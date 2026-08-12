@@ -1,0 +1,82 @@
+import { defineConfig } from "vitest/config";
+import solid from "vite-plugin-solid";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+// The backend gates /api behind X-Api-Key when PIXTOK_API_KEY is set in
+// .env. The dev proxy injects the header server-side so it never appears
+// in browser JS — direct requests (CSRF probes, LAN peers) get 401.
+// Personal network settings (Tailscale hosts, etc.) also live in .env —
+// NEVER in this file: it's committed, and a public repo must not carry
+// one person's tailnet.
+function loadEnvValue(key: string): string {
+  try {
+    // Anchor on this file, not process.cwd() — launching vite from a
+    // different directory must not silently yield an empty value.
+    const env = readFileSync(
+      join(import.meta.dirname, "..", ".env"),
+      "utf8"
+    );
+    const line = env
+      .split("\n")
+      .find((l) => l.startsWith(key + "="));
+    return line ? line.split("=")[1].trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function loadApiKey(): string {
+  return loadEnvValue("PIXTOK_API_KEY");
+}
+
+// Comma-separated extra Host header allowances (Tailscale Funnel's
+// ts.net host, the machine's direct tailnet IP, a cloudflare tunnel...).
+// Kept in the gitignored .env so the repo stays machine-agnostic.
+function loadAllowedHosts(): string[] {
+  return loadEnvValue("VITE_ALLOWED_HOSTS")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export default defineConfig({
+  plugins: [solid()],
+  server: {
+    // Bind all interfaces: Tailscale Funnel dials 127.0.0.1, direct
+    // tailnet access (phone) arrives on the 100.x interface. allowedHosts
+    // below still rejects foreign Host headers.
+    host: "0.0.0.0",
+    allowedHosts: ["localhost", ...loadAllowedHosts()],
+    proxy: {
+      "/api": {
+        target: "http://localhost:8080",
+        changeOrigin: true,
+        headers: { "X-Api-Key": loadApiKey() },
+      },
+      // pixiv's login SPA posts to root-relative /ajax/* paths (e.g.
+      // POST /ajax/login) — those resolve against OUR origin during the
+      // proxied login flow, so Vite must forward them to the backend,
+      // which proxies them onward to accounts.pixiv.net.
+      "/ajax": {
+        target: "http://localhost:8080",
+        changeOrigin: true,
+        headers: { "X-Api-Key": loadApiKey() },
+      },
+    },
+  },
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test-setup.ts"],
+    exclude: ["e2e/**", "node_modules/**"],
+    // REQUIRED for SolidJS component tests — see frontend-testing.md:
+    // without inlining, vitest resolves solid-js/web to the SSR entry and
+    // every component test fails with "Client-only API called on server".
+    server: {
+      deps: {
+        inline: ["solid-js", "@solidjs/testing-library"],
+      },
+    },
+  },
+});

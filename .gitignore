@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Build
+backend/pixtok-server
+frontend/dist/
+
+# Deploy scripts (personal setup)
+deploy/
+
+# Test artifacts
+frontend/test-results/
+
+# backend prefs db (user data — never commit)
+backend/pixtok.db
+pixtok.db
+
+# Personal dev notes
+.hermes/
+CRAWL-NOTES.md

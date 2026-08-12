@@ -1,0 +1,358 @@
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ── Proxied in-app login ────────────────────────────────────────────────
+//
+// pixiv's own login pages are served THROUGH this backend so the phone
+// browser stays on our origin the whole time: Set-Cookie headers get
+// their Domain=/Secure= attributes stripped (pixiv's session cookies
+// become host-only for OUR origin — the backend then reads them off the
+// callback request), and the PKCE callback is intercepted server-side:
+// code → refresh token, PHPSESSID → web session. One tap on the phone,
+// one login, everything captured. Verified viable Aug 2026: a proxied
+// junk-credential submit returned pixiv's standard wrong-password error
+// (the whole chain upstream of the password check works, including a
+// foreign-origin reCAPTCHA Enterprise token).
+
+// authProxyTargets maps login-proxy kinds to upstream hosts. Package
+// level so tests can point them at local fakes.
+var authProxyTargets = map[string]string{
+	"accounts": "https://accounts.pixiv.net",
+	"app":      "https://app-api.pixiv.net",
+	"www":      "https://www.pixiv.net",
+	"oauth":    "https://oauth.secure.pixiv.net",
+}
+
+const loginFlowCookie = "pixtok_login"
+
+var browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+
+// rewriteCookie rebuilds a Set-Cookie header without Domain=/Secure=/
+// Expires=/Max-Age=/SameSite. Host-only cookies on our origin are the
+// whole trick: the browser stores and replays them on follow-up
+// requests through the proxy, so the backend can read pixiv's session.
+func rewriteCookie(setCookie string) string {
+	parts := strings.Split(setCookie, ";")
+	out := make([]string, 0, 3)
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		lower := strings.ToLower(t)
+		if strings.HasPrefix(lower, "domain=") ||
+			lower == "secure" ||
+			strings.HasPrefix(lower, "expires=") ||
+			strings.HasPrefix(lower, "max-age=") ||
+			strings.HasPrefix(lower, "samesite=") {
+			continue
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, "; ")
+}
+
+// rewriteLocation maps an upstream redirect back onto our proxy paths so
+// the browser never leaves the app origin during the flow.
+func rewriteLocation(loc string) string {
+	for kind, target := range authProxyTargets {
+		prefix := "/api/auth/px/" + kind
+		if strings.HasPrefix(loc, target) {
+			return prefix + strings.TrimPrefix(loc, target)
+		}
+		// scheme-relative form
+		if strings.HasPrefix(loc, "//") {
+			host := strings.SplitN(strings.TrimPrefix(loc, "//"), "/", 2)[0]
+			if host == strings.TrimPrefix(target, "https://") {
+				rest := strings.TrimPrefix(loc, "//"+host)
+				return prefix + rest
+			}
+		}
+	}
+	return loc
+}
+
+// rewriteBodyURLs maps absolute pixiv URLs inside JSON response bodies
+// back onto our proxy paths. The login SPA replies with absolute URLs
+// (success.returnTo, 2FA redirects) — without this the browser would
+// leave our origin mid-flow and drop the rewritten cookies.
+func rewriteBodyURLs(body []byte) []byte {
+	for kind, target := range authProxyTargets {
+		prefix := []byte("/api/auth/px/" + kind)
+		// PHP json_encode escapes "/" as "\/" — pixiv's responses carry
+		// URLs in BOTH forms, so rewrite each of them (and the
+		// protocol-relative variants). Missing the escaped form leaves
+		// returnTo absolute → the browser hops straight to real pixiv
+		// and the flow dies with a login-page reload.
+		escaped := strings.ReplaceAll(target, "/", `\/`)
+		escapedProtoRel := strings.ReplaceAll("//"+strings.TrimPrefix(target, "https://"), "/", `\/`)
+		body = bytes.ReplaceAll(body, []byte(target), prefix)
+		body = bytes.ReplaceAll(body, []byte("//"+strings.TrimPrefix(target, "https://")), prefix)
+		body = bytes.ReplaceAll(body, []byte(escaped), prefix)
+		body = bytes.ReplaceAll(body, []byte(escapedProtoRel), prefix)
+		// NOTE: percent-encoded forms are deliberately NOT rewritten.
+		// Pixiv nests URLs inside query strings (post-redirect's
+		// return_to) and VALIDATES the host server-side — a rewritten
+		// relative path fails their open-redirect guard ("something
+		// went wrong"). The real URL passes validation and the page
+		// answers with a 302 whose Location header our header rewrite
+		// maps back onto the proxy.
+	}
+	return body
+}
+
+// registerAuthProxy wires the proxied-login routes. /api/auth/px/* is
+// hit by browser NAVIGATIONS during the login flow — gated by the
+// login-flow cookie set at /api/auth/pkce/start (only someone who
+// started a flow through the key-gated start route gets proxy access;
+// and the flow cookie expires in 10 minutes).
+func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
+	// CRITICAL: never follow redirects server-side. Each upstream
+	// response (including 302s) must go back to the BROWSER so it
+	// follows the REWRITTEN Location through the proxy again — that's
+	// what keeps the whole login chain (and the cookie rewriting) on
+	// our origin. With default redirect-following the client would hop
+	// to real pixiv hosts directly, bypassing every rewrite.
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// serveProxy forwards one request to the given upstream kind, applies
+	// the cookie/Location rewrites, and rewrites absolute pixiv URLs inside
+	// JSON response bodies (the login SPA replies with absolute returnTo /
+	// 2FA URLs — the browser must follow them back through this proxy).
+	serveProxy := func(kind, rest string, w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(loginFlowCookie)
+		if err != nil || c.Value == "" {
+			http.Error(w, "login flow not started", http.StatusForbidden)
+			return
+		}
+
+		// The PKCE callback: OUR one-time code arrives home. Exchange
+		// it, capture the web session, and land the user back in the
+		// app — no console tricks, no pasting, no Mac.
+		if kind == "app" && strings.Contains(r.URL.Path, "/users/auth/pixiv/callback") {
+			handlePkceCallback(w, r, api, pkce)
+			return
+		}
+
+		if rest == "" {
+			rest = "/"
+		}
+		// Cap proxied request bodies — a flow-cookie holder should not be
+		// able to stream unbounded data through us into Pixiv.
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		req, err := http.NewRequest(r.Method, authProxyTargets[kind]+rest, r.Body)
+		if err != nil {
+			http.Error(w, "proxy build failed", http.StatusBadGateway)
+			return
+		}
+		// Accept-Encoding deliberately dropped: we rewrite JSON bodies
+		// below, which is impossible on gzip/br-compressed responses.
+		for _, h := range []string{"Accept", "Accept-Language", "Content-Type", "Content-Length", "Referer", "Origin", "X-Requested-With"} {
+			if v := r.Header.Get(h); v != "" {
+				req.Header.Set(h, v)
+			}
+		}
+		// Forward the browser's cookie jar (pixiv's cookies now live
+		// on OUR origin thanks to the rewriting) minus OUR cookies —
+		// pixtok_login (the flow gate) and pixtok_gate (the app session)
+		// must never leave for pixiv's hosts.
+		if ck := r.Header.Get("Cookie"); ck != "" {
+			var kept []string
+			for _, part := range strings.Split(ck, ";") {
+				name := strings.TrimSpace(part)
+				if !strings.HasPrefix(name, "pixtok_") {
+					kept = append(kept, name)
+				}
+			}
+			if len(kept) > 0 {
+				req.Header.Set("Cookie", strings.Join(kept, "; "))
+			}
+		}
+		req.Header.Set("User-Agent", browserUA)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("ERROR login proxy: %v", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		// The critical rewrite.
+		cookies := resp.Header.Values("Set-Cookie")
+		resp.Header.Del("Set-Cookie")
+		for _, sc := range cookies {
+			if rewritten := rewriteCookie(sc); rewritten != "" {
+				resp.Header.Add("Set-Cookie", rewritten)
+			}
+		}
+		if loc := resp.Header.Get("Location"); loc != "" {
+			resp.Header.Set("Location", rewriteLocation(loc))
+		}
+
+		for k, vs := range resp.Header {
+			// Content-Length and Content-Encoding must not be copied
+			// verbatim: bodies are truncated (2-8 MB) and rewritten below,
+			// so an upstream Content-Length would desync the response. The
+			// rewrite branch sets its own; the passthrough streams chunked.
+			if k == "Content-Length" || k == "Content-Encoding" {
+				continue
+			}
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+
+		// JSON bodies: rewrite absolute pixiv URLs onto our proxy paths.
+		// Also rewrite HTML on the post-redirect bouncer: if that page
+		// navigates via meta-refresh/JS instead of a 302, the embedded
+		// URL must stay on our origin too.
+		ct := resp.Header.Get("Content-Type")
+		rewriteBody := strings.Contains(ct, "json") ||
+			(kind == "accounts" && strings.Contains(r.URL.Path, "/post-redirect") && strings.Contains(ct, "html"))
+		if rewriteBody {
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			if err == nil {
+				body = rewriteBodyURLs(body)
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				w.WriteHeader(resp.StatusCode)
+				_, _ = w.Write(body)
+				return
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, io.LimitReader(resp.Body, 8<<20))
+	}
+
+	// px routes: the login flow's navigations (/api/auth/px/<kind>/...).
+	proxy := func(kind string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			rest := strings.TrimPrefix(r.URL.RequestURI(), "/api/auth/px/"+kind)
+			serveProxy(kind, rest, w, r)
+		}
+	}
+
+	mux.HandleFunc("/api/auth/px/accounts/", proxy("accounts"))
+	mux.HandleFunc("/api/auth/px/app/", proxy("app"))
+	mux.HandleFunc("/api/auth/px/www/", proxy("www"))
+	mux.HandleFunc("/api/auth/px/oauth/", proxy("oauth"))
+
+	// The login SPA's XHRs are root-relative (/ajax/login, /ajax/login/
+	// two-factor-authentication/...) — from OUR origin they arrive here
+	// and belong to accounts.pixiv.net. Flow-cookie gated like the px
+	// routes (10-minute window, only set by pkce/start).
+	mux.HandleFunc("/ajax/", func(w http.ResponseWriter, r *http.Request) {
+		serveProxy("accounts", r.URL.RequestURI(), w, r)
+	})
+
+	// GET /api/auth/pkce/start — the FE Sign-in button navigates here.
+	// Key-gated (Vite injects the header on navigations too). Issues the
+	// challenge, drops the login-flow cookie, and bounces into the
+	// proxied pixiv OAuth login.
+	mux.HandleFunc("/api/auth/pkce/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		verifier, err := randomB64(32)
+		if err != nil {
+			http.Error(w, "rng failure", http.StatusInternalServerError)
+			return
+		}
+		sum := sha256.Sum256([]byte(verifier))
+		challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+		// The flow token keys the verifier in the pkce store AND is the
+		// login-flow cookie value. It rides the whole browser chain
+		// (Path=/), so the callback can look the verifier up without a
+		// state round-trip — pixiv generates its OWN state for the
+		// callback and ours never comes back.
+		flowID, err := randomB64(16)
+		if err != nil {
+			http.Error(w, "rng failure", http.StatusInternalServerError)
+			return
+		}
+		pkce.put(flowID, verifier)
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     loginFlowCookie,
+			Value:    flowID,
+			Path:     "/",
+			MaxAge:   10 * 60,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		http.Redirect(w, r,
+			"/api/auth/px/app/web/v1/login?code_challenge="+challenge+
+				"&code_challenge_method=S256&client=pixiv-android",
+			http.StatusFound)
+	})
+}
+
+// handlePkceCallback completes the flow server-side: exchange the code,
+// persist the permanent refresh token, capture PHPSESSID off the
+// request's cookie jar (it lives on our origin now), scrape + persist
+// the bound csrf token, and land the user back in the app.
+func handlePkceCallback(w http.ResponseWriter, r *http.Request, api pixivAPI, pkce *pkceStore) {
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "missing code", http.StatusBadRequest)
+		return
+	}
+	// The URL's state param is PIXIV's own (generated inside their
+	// flow) — it never matched anything we stored. The verifier is
+	// keyed by the login-flow cookie instead, which rides the whole
+	// chain on our origin.
+	flowCookie, err := r.Cookie(loginFlowCookie)
+	if err != nil || flowCookie.Value == "" {
+		http.Error(w, "login flow not started", http.StatusForbidden)
+		return
+	}
+	verifier, ok := pkce.take(flowCookie.Value)
+	if !ok {
+		log.Printf("WARN pkce callback: unknown or expired flow")
+		http.Error(w, "unknown or expired login flow — start again", http.StatusBadRequest)
+		return
+	}
+	refreshTok, accessTok, expiresIn, err := api.ExchangePkce(code, verifier)
+	if err != nil {
+		log.Printf("ERROR pkce exchange: %v", err)
+		http.Error(w, "pkce exchange failed", http.StatusBadGateway)
+		return
+	}
+	if err := api.SetTokens(refreshTok, accessTok, expiresIn); err != nil {
+		log.Printf("ERROR persisting tokens: %v", err)
+	}
+
+	// Web-session capture from the cookie jar the login just populated.
+	if c, err := r.Cookie("PHPSESSID"); err == nil && c.Value != "" {
+		csrf, err := api.ScrapeCsrfFor(c.Value)
+		if err != nil {
+			log.Printf("ERROR csrf scrape after login: %v", err)
+		} else if err := api.SetWebSession(c.Value, csrf); err != nil {
+			log.Printf("ERROR persisting session: %v", err)
+		}
+	} else {
+		log.Printf("WARN no PHPSESSID on callback — web session not captured")
+	}
+
+	http.Redirect(w, r, "/?auth=done", http.StatusFound)
+}

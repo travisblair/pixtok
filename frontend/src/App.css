@@ -1,0 +1,1315 @@
+/* Full-viewport vertical scroll-snap feed */
+.feed-container {
+  height: 100dvh;
+  overflow-y: scroll;
+  scroll-snap-type: y mandatory;
+  /* NO scroll-behavior: smooth — on iOS this makes the snap container
+     animate after the finger stops and rubber-band against the next
+     touch. Snap settles instantly; the toast jump uses JS scrollTo
+     with behavior:"smooth" explicitly. */
+}
+
+/* ── Shared utilities ─────────────────────────────────────────────── */
+
+/* Hide scrollbars but keep scrolling (pill rows, strips). */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Horizontal edge fade — off-screen content melts away instead of
+   hard-cutting (the left fade doubles as a scroll hint). */
+.fade-edges {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 12px,
+    #000 calc(100% - 12px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 12px,
+    #000 calc(100% - 12px),
+    transparent 100%
+  );
+}
+
+/* Chrome for pills/badges overlaid on imagery — one base, positions
+   and sizes live on the individual classes. */
+.overlay-pill {
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 20px;
+}
+
+.feed-card {
+  height: 100dvh;
+  scroll-snap-align: start;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+/* Horizontal page slider inside card */
+.card-pages {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.card-pages::-webkit-scrollbar {
+  display: none;
+}
+
+.card-page {
+  width: 100%;
+  min-width: 100%;
+  max-width: 100%;
+  height: 100%;
+  scroll-snap-align: start;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.card-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.card-image.loaded {
+  opacity: 1;
+}
+
+/* Page counter */
+.page-counter {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 0.8rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  z-index: 2;
+}
+
+/* Placeholder / spinner */
+.card-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #888;
+  font-size: 1rem;
+}
+
+/* Per-page retry button (failed image loads) — overlay-pill chrome. */
+.page-retry {
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  font-weight: 400;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Overlay at bottom of card */
+.card-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 24px 16px 40px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
+  color: #fff;
+}
+
+.card-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0 0 4px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.card-artist {
+  font-size: 0.9rem;
+  margin: 0 0 8px;
+  opacity: 0.9;
+}
+
+/* One scrollable row of tag chips on the card (no-scrollbar + fade-edges
+   utilities on the element, like the search-page pills). The right
+   margin reserves the heart/gear button stack (right:16 + ~39px glyph)
+   so chips end before the gear instead of sliding under it. */
+.card-tag-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  overflow-x: auto;
+  margin: 0 48px 8px 0;
+  min-height: 18px;
+}
+.card-tag-chip {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1;
+  color: #eee;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 4px 7px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.card-artist a {
+  color: #fff;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.card-artist a:hover {
+  text-decoration: underline;
+}
+
+.card-stats {
+  display: flex;
+  gap: 16px;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+/* Sentinel at the bottom of the feed */
+.feed-sentinel {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #888;
+  font-size: 0.85rem;
+  background: #000;
+}
+
+/* Empty-feed variant — fills the viewport so the initial-load spinner is
+   truly centered on screen, not hugging the bottom. */
+.feed-sentinel-full {
+  height: 100dvh;
+}
+
+/* Content pills (All/R18) — sit next to the burger on header row 1 */
+.content-pills {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Mode selector pills — header row 2, full width, horizontally
+   scrollable (no-scrollbar + fade-edges utilities in the TSX). */
+.mode-selector {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+/* Header: column layout — row 1 (header-row) holds the burger + the
+   All/R18 content pills; row 2 holds the ranking mode pills (scrollable,
+   full width, below the burger). */
+.header-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 12px 16px;
+  background: linear-gradient(rgba(0, 0, 0, 0.8), transparent);
+}
+
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-pill {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 20px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.mode-pill:hover {
+  border-color: rgba(255, 255, 255, 0.6);
+  color: #fff;
+}
+
+.mode-pill.active {
+  background: #fff;
+  color: #000;
+  border-color: #fff;
+  font-weight: 600;
+}
+
+.burger-pill {
+  font-size: 1rem;
+  padding: 6px 12px;
+}
+
+/* Drawer */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 20;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  left: -300px;
+  width: 280px;
+  height: 100dvh;
+  background: #1a1a1a;
+  z-index: 21;
+  transition: left 0.25s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.drawer.open {
+  left: 0;
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.drawer-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+.drawer-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.drawer-nav {
+  padding: 8px 0;
+}
+
+.drawer-item {
+  display: block;
+  width: 100%;
+  padding: 14px 16px;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.95rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.drawer-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.drawer-item.active {
+  color: #fff;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.empty-feed {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 1rem;
+}
+
+/* Toast — full-width bar: long work titles wrap instead of clipping off
+   both screen edges (shrink-wrapped centered pills overflow symmetrically
+   once the text is wider than the viewport). */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 16px;
+  right: 16px;
+  z-index: 110; /* above every overlay (modals z-100) so block confirmations show */
+  background: #fff;
+  color: #000;
+  border: none;
+  border-radius: 20px;
+  padding: 12px 18px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  animation: toast-in 0.2s ease;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Recommendations modal — full-screen slider, independent of the main feed */
+.recs-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.recs-feed {
+  position: relative;
+  z-index: 1;
+  width: 100%; /* modal is flex — without this the feed shrink-to-fits to a strip */
+}
+
+/* Top-left, where the burger would be — the card's 1/N page counter
+   owns the top-right corner. Keeps its circle chrome deliberately:
+   unlike the modals' chrome-less ✕ it floats over imagery with no
+   panel behind it, so the disc is what keeps it legible. */
+.recs-close {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+/* Related-view stack — full-screen drill-down on top of feed/modal */
+.related-view {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+
+.related-back {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap; /* "← Back" stays one line even when squeezed by the search input */
+}
+
+/* How deep in the related-view stack we are (e.g. 3/10). Top-CENTER so
+   it never covers the card's own "1/N" page counter (top-right) or the
+   back pill (top-left). */
+.stack-depth-badge {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+/* Back + close-all grouped at the top-left. */
+.related-header-left {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+}
+
+/* Close EVERYTHING (all stack levels) — sits right next to Back. */
+.close-all-btn {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+/* Artist name on the ArtistView overlay */
+.artist-name-badge {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  max-width: 60%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Related-view push navigation: slide in from the RIGHT (iOS push).
+   Horizontal, never vertical — vertical would read as feed scrolling. */
+.related-view.enter {
+  animation: slide-in-ltr 0.28s ease both;
+}
+
+.related-view.exit {
+  animation: slide-out-ltr 0.25s ease both;
+  pointer-events: none; /* taps fall through to the level below mid-animation */
+}
+
+@keyframes slide-in-ltr {
+  from {
+    transform: translateX(100%);
+    opacity: 0.5;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slide-out-ltr {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0.5;
+  }
+}
+
+/* Artist library slides in from the LEFT (opposite direction). */
+.artist-view.enter {
+  animation: slide-in-rtl 0.28s ease both;
+}
+
+.artist-view.exit {
+  animation: slide-out-rtl 0.25s ease both;
+  pointer-events: none;
+}
+
+@keyframes slide-in-rtl {
+  from {
+    transform: translateX(-100%);
+    opacity: 0.5;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slide-out-rtl {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-100%);
+    opacity: 0.5;
+  }
+}
+
+/* One-time coaching hint on the first stack open — full-width bar just
+   below the header row. Text wraps; the Got it button pins right. */
+.stack-hint {
+  position: absolute;
+  top: 64px;
+  left: 16px;
+  right: 16px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 24px;
+  padding: 8px 12px 8px 16px;
+  font-size: 0.82rem;
+}
+
+.stack-hint span {
+  min-width: 0; /* allow the flex child to shrink + wrap */
+}
+
+.stack-hint button {
+  background: #fff;
+  color: #000;
+  border: none;
+  border-radius: 16px;
+  padding: 5px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .related-view.enter,
+  .related-view.exit,
+  .artist-view.enter,
+  .artist-view.exit,
+  .search-screen.enter,
+  .search-screen.exit {
+    animation: none;
+  }
+  .related-view.exit,
+  .artist-view.exit {
+    pointer-events: auto;
+  }
+}
+
+/* ArtistView overlay reuses the related-view layout */
+.artist-view {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+
+/* Ugoira player */
+.ugoira-wrap {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.ugoira-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Big centered play affordance (replaces the old top-center badge pill,
+   which sat at z-auto under the image and only appeared between teardown
+   and autoplay — effectively invisible). pointer-events: none so the wrap
+   owns every tap. */
+.ugoira-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: #fff;
+  font-size: 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 5px; /* optically center the ▶ glyph */
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ugoira-spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 44px;
+  height: 44px;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  /* Own keyframes — the shared `spin` animates transform to a bare
+     rotate(), which interpolates the centering translate away each
+     cycle (the spinner visibly drifts down-right while loading). */
+  animation: ugoira-spin 0.8s linear infinite;
+  pointer-events: none;
+  z-index: 2;
+}
+
+@keyframes ugoira-spin {
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+.ugoira-badge {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+
+.ugoira-error {
+  color: #ffb4b4;
+  border-color: rgba(255, 100, 100, 0.5);
+}
+
+/* Config modal bits */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-dialog {
+  display: block;
+  width: 100%;
+  max-width: min(calc(100vw - 32px), 500px);
+  max-height: 90vh;
+  overflow-y: auto;
+  background: #1a1a1a;
+  color: #eee;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+}
+
+.modal-dialog > article {
+  margin: 0;
+  padding: 16px;
+}
+
+/* Settings image-quality pill row */
+.config-pill-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* Shared modal header/footer (BaseModal) */
+.modal-dialog .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-dialog .modal-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+/* Modal controls — dark theme, no UA default look */
+.modal-dialog button {
+  font-weight: 400;
+  font-size: 0.9rem;
+  color: #eee;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.modal-dialog button:active {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* Header ✕ — white, no chrome */
+.modal-dialog .modal-x {
+  background: none;
+  border: none;
+  color: #fff;
+  padding: 4px 8px;
+  font-size: 1rem;
+}
+
+.modal-dialog input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #111;
+  color: #eee;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 400;
+}
+
+.modal-dialog input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* The little ✕ on each blocked-tag pill — no chrome */
+.modal-dialog .blocked-tag-remove {
+  background: none;
+  border: none;
+  padding: 0 4px;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.drawer-divider {
+  height: 1px;
+  margin: 8px 12px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.blocked-tag-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.blocked-tag-form input {
+  flex: 1;
+}
+
+.blocked-tags {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.blocked-tags li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 16px;
+  padding: 4px 8px;
+}
+
+.blocked-tag-pill {
+  font-size: 0.85rem;
+}
+
+.blocked-tag-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 0.8rem;
+}
+
+/* Account screen — auth status rows */
+.auth-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  padding: 6px 0;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* Sign-in button — a real navigation into the proxied login flow */
+.signin-btn {
+  display: inline-block;
+  background: #fff;
+  color: #000;
+  border-radius: 20px;
+  padding: 10px 18px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  margin: 4px 0 8px;
+  cursor: pointer;
+}
+
+/* Re-authenticate link (authed state) — pill like .mode-pill but an
+   anchor: needs explicit inline-block or it squishes/wraps */
+.reauth-link {
+  display: inline-block;
+  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 20px;
+  color: rgba(255, 255, 255, 0.85);
+  text-decoration: none;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  margin: 4px 0 8px;
+  transition: all 0.15s;
+}
+.reauth-link:hover {
+  border-color: rgba(255, 255, 255, 0.6);
+  color: #fff;
+}
+
+.auth-status .auth-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  flex-shrink: 0;
+}
+
+.auth-status.ok .auth-dot {
+  background: #4caf50;
+}
+
+.auth-status.bad .auth-dot {
+  background: #f44336;
+}
+
+.hint {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+/* Which work the recs modal belongs to (liked source title) — top-center
+   so it never collides with the ✕ (top-left) or the page counter
+   (top-right). Long titles wrap (up to 2-3 lines) instead of ellipsizing
+   into a hidden sliver. */
+.recs-source {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 35%); /* clears the ✕ (left) and page counter (right) */
+  z-index: 2;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+  pointer-events: none; /* never block taps to the feed underneath */
+}
+
+.like-btn {
+  position: absolute;
+  bottom: 100px;
+  right: 16px;
+  z-index: 2;
+  background: none;
+  border: none;
+  font-size: 2rem;
+  cursor: pointer;
+  padding: 4px;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
+  transition: transform 0.15s;
+}
+
+.like-btn:active {
+  transform: scale(1.2);
+}
+
+/* Tag filter button — sits directly under the heart */
+.tags-btn {
+  position: absolute;
+  bottom: 48px;
+  right: 16px;
+  z-index: 2;
+  background: none;
+  border: none;
+  font-size: 1.7rem;
+  cursor: pointer;
+  padding: 4px;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
+  transition: transform 0.15s;
+}
+
+.tags-btn:active {
+  transform: scale(1.2);
+}
+
+/* Tag popup chips — blocked tags dim + strikethrough. The original name
+   sits on top with the Pixiv translation in tiny 8px text underneath.
+   flex-start: chips keep their own height — WITHOUT it, flex stretch
+   makes untranslated chips in a row with translated ones grow a phantom
+   empty second line ("space for a translation, but no translation"). */
+.tag-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tag-chip {
+  background: rgba(255, 255, 255, 0.1);
+  color: #eee;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 16px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.tag-chip-name {
+  line-height: 1.2;
+}
+
+.tag-chip-translation {
+  font-size: 8px;
+  line-height: 1.2;
+  opacity: 0.7;
+}
+
+.tag-chip.blocked {
+  color: rgba(255, 255, 255, 0.45);
+  text-decoration: line-through;
+}
+
+/* ── Search layer ───────────────────────────────────────────────────── */
+
+.search-screen {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The search screen's header is IN-FLOW (unlike the related-view /
+   artist overlays), so a 100dvh feed container would sit below it and
+   overflow the screen by the header's height — card bottoms (heart,
+   tags) below the fold and the popular/tags rows jammed against the
+   pills. The feed fills the remaining height instead; cards size to
+   the container so one card still fits each view exactly.
+
+   Snap is OFF here: the page-1 popular strip + related-tags rows live
+   at the top of this container, and `y mandatory` pins every rest
+   position to a card top — the meta rows above card 1 get clipped
+   behind the header and are unreachable (the "tags hidden under the
+   pills" bug). Search results free-scroll like pixiv's own search
+   page; the cards' 100% height keeps the page-at-a-time feel. */
+.search-screen .feed-container {
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  scroll-snap-type: none;
+}
+.search-screen .feed-card {
+  height: 100%;
+}
+.search-screen.enter {
+  animation: slide-in-rtl 0.28s ease both;
+}
+.search-screen.exit {
+  animation: slide-out-rtl 0.25s ease both;
+  pointer-events: none;
+}
+
+.search-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: rgba(0, 0, 0, 0.92);
+  padding: 12px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-form {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  background: #111;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #eee;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  font-weight: 400;
+}
+.search-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.search-pills {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0;
+}
+
+.search-section-label {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  padding: 12px 16px 8px;
+}
+
+.search-popular-strip {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 0 16px 4px;
+}
+.search-popular-item {
+  flex-shrink: 0;
+  width: 108px;
+  height: 108px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #111;
+}
+.search-popular-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.search-related-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 16px 12px;
+}
+.search-related-pill {
+  font-size: 0.8rem;
+}
+
+/* Search filter sheet (inside the BaseModal) + Filters button badge */
+.filter-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.filter-badge {
+  background: #ff4060;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 400;
+  line-height: 1;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.filter-section {
+  margin-bottom: 16px;
+}
+.filter-label {
+  font-size: 0.78rem;
+  opacity: 0.6;
+  margin-bottom: 8px;
+}
+.filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.filter-dates {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.filter-date-input {
+  flex: 1;
+  min-width: 0;
+  background: #111;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #eee;
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  color-scheme: dark;
+}
+.filter-date-sep {
+  font-size: 0.8rem;
+  opacity: 0.6;
+}
+
+.search-user-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.search-user-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+.search-user-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+.search-user-name {
+  font-size: 0.95rem;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-user-previews {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.search-user-preview {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #111;
+}
+.search-user-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* ── Password gate ──────────────────────────────────────────────────── */
+
+.gate-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(calc(100vw - 48px), 320px);
+}
+.gate-logo {
+  font-size: 1.6rem;
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: 8px;
+}
+.gate-form input {
+  background: #111;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #eee;
+  padding: 12px 14px;
+  font-size: 1rem;
+  font-weight: 400;
+}
+.gate-form input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
+}
+.gate-form button {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: none;
+  background: #fff;
+  color: #000;
+  font-size: 0.95rem;
+  font-weight: 400;
+  cursor: pointer;
+}
+.gate-form button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.gate-error {
+  color: #f44336;
+  font-size: 0.85rem;
+  text-align: center;
+}
