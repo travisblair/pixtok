@@ -4,6 +4,15 @@ A mobile-first, TikTok-style viewer for Pixiv. Browse Pixiv like a feed —
 full-screen vertical cards, infinite scroll, one thumb for everything.
 Built for phone screens and dogfooded on an iPhone through Tailscale.
 
+**Pixtok is a single-user, self-hosted app.** One instance = one Pixiv
+account = one set of preferences. The backend holds one Pixiv session
+(refresh token, PHPSESSID, CSRF) as process-global state, and the
+password gate is a shared secret, not a login system. It is not
+designed to be shared between users, and two people logging into the
+same instance would overwrite each other's Pixiv session. Deploy it for
+yourself, reach it from your own devices — that's the intended model.
+
+
 ## Features
 
 - **Home** — the personalized "For You" street feed, infinite scroll
@@ -55,6 +64,14 @@ stores both automatically — no manual token wrangling.
 your Pixiv account. If you only want read-only browsing, you can skip
 them — everything else works the same.
 
+**Credential storage:** pixiv credentials (the refresh token, PHPSESSID,
+and CSRF token) are written as plaintext to `.env` (mode 0600). The
+refresh token is PERMANENT — pixiv never rotates it — so file read
+access is full account control. Keep the file on a machine you trust
+and don't commit it (`.env` is gitignored). The `.env` is resolved next
+to the backend binary (or `backend/../.env` in the dev layout), not the
+current working directory.
+
 ### 2. Password gate (optional but recommended for public URLs)
 
 If the app is reachable from the public internet (Tailscale Funnel,
@@ -62,11 +79,14 @@ ngrok, a VPS), set a gate password:
 
 ```
 PIXTOK_GATE_PASSWORD_HASH=your-bcrypt-hash-here
+PIXTOK_PUBLIC_HTTPS=true   # HTTPS deployment → Secure cookies
 ```
 
 Generate the hash with `htpasswd -nbB user password` (cut at the second
 colon) or any bcrypt tool. Without it the gate is disabled and the app
-is open to whoever can reach the URL.
+is open to whoever can reach the URL. Set `PIXTOK_PUBLIC_HTTPS=true`
+when the app is served over HTTPS (Tailscale Funnel) so the gate cookie
+and the login proxy's rewritten pixiv cookies keep `Secure`.
 
 ### 3. Run
 

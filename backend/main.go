@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -61,14 +62,21 @@ func (c *imageCache) set(key string, data []byte, contentType string) {
 		c.totalBytes -= int64(len(old.data))
 		delete(c.items, key)
 	}
-	// Evict (arbitrary order) until the entry fits the budget.
+	// Evict the SOONEST-EXPIRING entry until the entry fits the budget.
+	// (Reviewer note: arbitrary map iteration can evict a hot entry
+	// while cold ones linger — picking the soonest expiry keeps hot
+	// entries alive longer.)
 	for len(c.items) > 0 &&
 		(len(c.items) >= c.maxEntries || c.totalBytes+int64(len(data)) > c.maxBytes) {
+		var victim string
+		var soonest time.Time
 		for k, v := range c.items {
-			c.totalBytes -= int64(len(v.data))
-			delete(c.items, k)
-			break
+			if victim == "" || v.expiresAt.Before(soonest) {
+				victim, soonest = k, v.expiresAt
+			}
 		}
+		c.totalBytes -= int64(len(c.items[victim].data))
+		delete(c.items, victim)
 	}
 	c.items[key] = cacheEntry{
 		data:        data,
@@ -92,37 +100,75 @@ func (c *imageCache) reapOnce(now time.Time) {
 }
 
 func (c *imageCache) reapLoop() {
-	// A panic in map maintenance must not kill the process — recover and
-	// keep the reaper alive (matches the cleanup-goroutine pattern).
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("ERROR image cache reaper panicked: %v", r)
-		}
-	}()
+	// A panic in map maintenance must not kill the process — recover
+	// INSIDE the loop body so the reaper survives and keeps ticking
+	// (a function-scope defer would unwind out of the for loop and
+	// kill the reaper permanently after one panic — reviewer finding).
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		c.reapOnce(time.Now())
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERROR image cache reaper panicked: %v", r)
+				}
+			}()
+			c.reapOnce(time.Now())
+		}()
 	}
 }
 
-// loadEnvKey reads KEY=value from ../.env (backend started from backend/).
+// envFileCandidates returns the .env paths to try, in order: next to the
+// binary (works no matter the CWD), then the dev layout (../.env when
+// running from backend/), then CWD. Reviewer note: the old code was
+// CWD-relative only — starting the binary from another directory made
+// token writes land nowhere.
+func envFileCandidates() []string {
+	var out []string
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		out = append(out,
+			filepath.Join(exeDir, ".env"),
+			filepath.Join(exeDir, "..", ".env"),
+		)
+	}
+	out = append(out, "../.env", ".env")
+	return out
+}
+
+// loadEnvKey reads KEY=value from the environment first, then from the
+// .env candidate paths.
 func loadEnvKey(name string) string {
 	if v := os.Getenv(name); v != "" {
 		return v
 	}
-	data, err := os.ReadFile("../.env")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, name+"=") {
-			return strings.TrimPrefix(line, name+"=")
+	for _, path := range envFileCandidates() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, name+"=") {
+				return strings.TrimPrefix(line, name+"=")
+			}
 		}
 	}
 	return ""
 }
+
+// publicHTTPS reports whether the deployment serves the app over HTTPS
+// (PIXTOK_PUBLIC_HTTPS=true — Tailscale Funnel/ngrok). When set, the
+// gate cookie and the login proxy's rewritten pixiv cookies keep Secure
+// (reviewer finding: Secure was stripped unconditionally, so session
+// cookies could ride plaintext HTTP on the public tunnel).
+var publicHTTPS = func() bool {
+	v := os.Getenv("PIXTOK_PUBLIC_HTTPS")
+	if v == "" {
+		v = loadEnvKey("PIXTOK_PUBLIC_HTTPS")
+	}
+	return v == "true" || v == "1"
+}()
 
 type statusRecorder struct {
 	http.ResponseWriter

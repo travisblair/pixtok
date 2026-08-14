@@ -3,6 +3,7 @@ package pixiv
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,29 @@ func TestSearchArtworksBuildsVerifiedURLs(t *testing.T) {
 				t.Fatalf("uri = %q, want %q", rt.lastURI, tc.want)
 			}
 		})
+	}
+}
+
+// Regression guard for the "corrupted query separators" review finding
+// (an external reviewer's fetch pipeline mangled &-prefixed params into
+// Unicode lookalikes — false positive on our side, but the class is
+// real): every built URL must contain the literal &-separated params.
+func TestSearchArtworksURLContainsLiteralSeparators(t *testing.T) {
+	c, rt := newTestClient()
+	if _, err := c.SearchArtworks("original", SearchOpts{
+		Order: "date_d", Mode: "all", SMode: "s_tag_full", Type: "ugoira",
+		AIType: "1", SCD: "2026-06-01", SCE: "2026-06-30",
+	}, 1); err != nil {
+		t.Fatalf("SearchArtworks: %v", err)
+	}
+	for _, want := range []string{
+		"order=date_d", "mode=all", "ai_type=1", "csw=0",
+		"s_mode=s_tag_full", "type=ugoira", "scd=2026-06-01",
+		"sce=2026-06-30", "lang=en",
+	} {
+		if !strings.Contains(rt.lastURI, want) {
+			t.Fatalf("built URL missing literal %q: %s", want, rt.lastURI)
+		}
 	}
 }
 

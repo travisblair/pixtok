@@ -35,23 +35,23 @@ func percentEncode(s string) string {
 
 // fakeAPI is a scriptable pixivAPI for handler tests.
 type fakeAPI struct {
-	recommendedFn func() ([]byte, error)
-	rankingFn     func(mode string) ([]byte, error)
-	newestFn      func(r18 bool, lastID string) ([]byte, error)
-	topFn         func(mode string) ([]byte, error)
-	streetFn      func(nextParams string) ([]byte, error)
-	relatedFn     func(id string) ([]byte, error)
-	workRecsFn    func(id string) ([]byte, error)
-	userIllustsFn func(id string) ([]byte, error)
-	ugoiraMetaFn  func(id string) ([]byte, error)
-	bookmarkAddFn func(id string, private bool) error
-	bookmarkDelFn func(id string) error
-	bookmarkIDsFn func(restrict string, maxPages int) ([]string, error)
+	recommendedFn     func() ([]byte, error)
+	rankingFn         func(mode string) ([]byte, error)
+	newestFn          func(r18 bool, lastID string) ([]byte, error)
+	topFn             func(mode string) ([]byte, error)
+	streetFn          func(nextParams string) ([]byte, error)
+	relatedFn         func(id string) ([]byte, error)
+	workRecsFn        func(id string) ([]byte, error)
+	userIllustsFn     func(id string) ([]byte, error)
+	ugoiraMetaFn      func(id string) ([]byte, error)
+	bookmarkAddFn     func(id string, private bool) error
+	bookmarkDelFn     func(id string) error
+	bookmarkIDsFn     func(restrict string, maxPages int) ([]string, error)
 	bookmarkIllustsFn func(restrict string) ([]byte, error)
-	searchArtFn   func(word string, opts pixiv.SearchOpts, page int) ([]byte, error)
-	searchUsrFn   func(nick, sMode string, page int) ([]byte, error)
-	proxyNextFn   func(url string) ([]byte, error)
-	proxyImageFn  func(url string) ([]byte, string, error)
+	searchArtFn       func(word string, opts pixiv.SearchOpts, page int) ([]byte, error)
+	searchUsrFn       func(nick, sMode string, page int) ([]byte, error)
+	proxyNextFn       func(url string) ([]byte, error)
+	proxyImageFn      func(url string) ([]byte, string, error)
 	// login-capture fns
 	pkceExchangeFn  func(code, verifier string) (string, string, int, error)
 	setTokensFn     func(refresh, access string, expiresIn int) error
@@ -269,7 +269,7 @@ func TestAPIKeyGate(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "sekrit")
 
-	if rr := doReq(t, h, http.MethodGet, "/api/recommended", ""); rr.Code != http.StatusUnauthorized {
+	if rr := doReq(t, h, http.MethodGet, "/api/recommended", "secret"); rr.Code != http.StatusUnauthorized {
 		t.Errorf("no key = %d, want 401", rr.Code)
 	}
 	if rr := doReq(t, h, http.MethodGet, "/api/recommended", "wrong"); rr.Code != http.StatusUnauthorized {
@@ -279,16 +279,22 @@ func TestAPIKeyGate(t *testing.T) {
 		t.Errorf("right key = %d, want 200", rr.Code)
 	}
 	// /health bypasses the gate
-	if rr := doReq(t, h, http.MethodGet, "/health", ""); rr.Code != http.StatusOK {
+	if rr := doReq(t, h, http.MethodGet, "/health", "secret"); rr.Code != http.StatusOK {
 		t.Errorf("/health no key = %d, want 200", rr.Code)
 	}
 }
 
-func TestAPIKeyGateDisabledWhenEmpty(t *testing.T) {
+func TestAPIKeyGateFailsClosedWhenEmpty(t *testing.T) {
+	// Reviewer finding: an empty key used to disable the gate entirely
+	// (fail-open). Now it 401s everything except /health — a deployment
+	// mistake must be loud, not open.
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
-	if rr := doReq(t, h, http.MethodGet, "/api/recommended", ""); rr.Code != http.StatusOK {
-		t.Errorf("empty key should fail open = %d, want 200", rr.Code)
+	if rr := doReq(t, h, http.MethodGet, "/api/recommended", ""); rr.Code != http.StatusUnauthorized {
+		t.Errorf("empty key should fail closed = %d, want 401", rr.Code)
+	}
+	if rr := doReq(t, h, http.MethodGet, "/health", ""); rr.Code != http.StatusOK {
+		t.Errorf("/health with empty key = %d, want 200", rr.Code)
 	}
 }
 
@@ -296,8 +302,8 @@ func TestUpstreamErrorsMapTo502(t *testing.T) {
 	f := &fakeAPI{
 		recommendedFn: func() ([]byte, error) { return nil, errors.New("upstream down") },
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
-	if rr := doReq(t, h, http.MethodGet, "/api/recommended", ""); rr.Code != http.StatusBadGateway {
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	if rr := doReq(t, h, http.MethodGet, "/api/recommended", "secret"); rr.Code != http.StatusBadGateway {
 		t.Errorf("upstream error = %d, want 502", rr.Code)
 	}
 }
@@ -310,13 +316,13 @@ func TestImgProxyCache(t *testing.T) {
 			return []byte("imgbytes"), "image/jpeg", nil
 		},
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	rr1 := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/1.jpg", "")
+	rr1 := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/1.jpg", "secret")
 	if rr1.Code != http.StatusOK || rr1.Header().Get("X-Cache") != "MISS" {
 		t.Fatalf("first = %d X-Cache=%s, want 200 MISS", rr1.Code, rr1.Header().Get("X-Cache"))
 	}
-	rr2 := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/1.jpg", "")
+	rr2 := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/1.jpg", "secret")
 	if rr2.Code != http.StatusOK || rr2.Header().Get("X-Cache") != "HIT" {
 		t.Fatalf("second = %d X-Cache=%s, want 200 HIT", rr2.Code, rr2.Header().Get("X-Cache"))
 	}
@@ -327,11 +333,11 @@ func TestImgProxyCache(t *testing.T) {
 
 func TestImgProxyMissingURL(t *testing.T) {
 	f := &fakeAPI{}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
-	if rr := doReq(t, h, http.MethodGet, "/api/img", ""); rr.Code != http.StatusBadRequest {
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	if rr := doReq(t, h, http.MethodGet, "/api/img", "secret"); rr.Code != http.StatusBadRequest {
 		t.Errorf("missing url = %d, want 400", rr.Code)
 	}
-	if rr := doReq(t, h, http.MethodGet, "/api/next", ""); rr.Code != http.StatusBadRequest {
+	if rr := doReq(t, h, http.MethodGet, "/api/next", "secret"); rr.Code != http.StatusBadRequest {
 		t.Errorf("missing next url = %d, want 400", rr.Code)
 	}
 }
@@ -623,9 +629,10 @@ func TestWorkRecsHandler(t *testing.T) {
 				 "pageCount":1}]}}`), nil
 		},
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/illust/123/recs", nil)
+	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -649,18 +656,18 @@ func TestWorkRecsHandler(t *testing.T) {
 
 func TestWorkRecsHandlerMethodAndID(t *testing.T) {
 	f := &fakeAPI{}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	if rr := doReq(t, h, http.MethodPost, "/api/illust/123/recs", ""); rr.Code != http.StatusMethodNotAllowed {
+	if rr := doReq(t, h, http.MethodPost, "/api/illust/123/recs", "secret"); rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /recs = %d, want 405", rr.Code)
 	}
-	if rr := doReq(t, h, http.MethodGet, "/api/illust/abc/recs", ""); rr.Code != http.StatusBadRequest {
+	if rr := doReq(t, h, http.MethodGet, "/api/illust/abc/recs", "secret"); rr.Code != http.StatusBadRequest {
 		t.Errorf("GET /recs non-numeric id = %d, want 400", rr.Code)
 	}
-	if rr := doReq(t, h, http.MethodGet, "/api/illust/12/related", ""); rr.Code == http.StatusBadRequest {
+	if rr := doReq(t, h, http.MethodGet, "/api/illust/12/related", "secret"); rr.Code == http.StatusBadRequest {
 		t.Errorf("GET /related valid id should not 400")
 	}
-	if rr := doReq(t, h, http.MethodGet, "/api/illust/x/related", ""); rr.Code != http.StatusBadRequest {
+	if rr := doReq(t, h, http.MethodGet, "/api/illust/x/related", "secret"); rr.Code != http.StatusBadRequest {
 		t.Errorf("GET /related non-numeric id = %d, want 400", rr.Code)
 	}
 }
@@ -671,8 +678,9 @@ func TestWorkRecsHandlerNotFound(t *testing.T) {
 			return nil, fmt.Errorf("%w (HTTP 404)", pixiv.ErrNotFound)
 		},
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 	req := httptest.NewRequest(http.MethodGet, "/api/illust/999/recs", nil)
+	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
@@ -686,8 +694,9 @@ func TestWorkRecsHandlerUpstreamError(t *testing.T) {
 			return nil, errors.New("pixiv says no")
 		},
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 	req := httptest.NewRequest(http.MethodGet, "/api/illust/1/recs", nil)
+	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadGateway {
@@ -703,18 +712,18 @@ func TestUserIllustsHandler(t *testing.T) {
 			return []byte(`{"illusts":[{"id":9,"title":"A"}],"next_url":null}`), nil
 		},
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	if rr := doReq(t, h, http.MethodGet, "/api/user/abc/illusts", ""); rr.Code != http.StatusBadRequest {
+	if rr := doReq(t, h, http.MethodGet, "/api/user/abc/illusts", "secret"); rr.Code != http.StatusBadRequest {
 		t.Errorf("non-numeric user id = %d, want 400", rr.Code)
 	}
-	if rr := doReq(t, h, http.MethodGet, "/api/user/77/illusts", ""); rr.Code != http.StatusOK {
+	if rr := doReq(t, h, http.MethodGet, "/api/user/77/illusts", "secret"); rr.Code != http.StatusOK {
 		t.Errorf("GET /api/user/77/illusts = %d, want 200", rr.Code)
 	}
 	if gotID != "77" {
 		t.Errorf("gotID = %q, want 77", gotID)
 	}
-	if rr := doReq(t, h, http.MethodGet, "/api/user/77/other", ""); rr.Code != http.StatusNotFound {
+	if rr := doReq(t, h, http.MethodGet, "/api/user/77/other", "secret"); rr.Code != http.StatusNotFound {
 		t.Errorf("unknown subroute = %d, want 404", rr.Code)
 	}
 }
@@ -727,12 +736,12 @@ func TestUgoiraMetaHandler(t *testing.T) {
 			return []byte(`{"error":false,"body":{"frames":[{"file":"000000.jpg","delay":66}]}}`), nil
 		},
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	if rr := doReq(t, h, http.MethodPost, "/api/illust/5/ugoira_meta", ""); rr.Code != http.StatusMethodNotAllowed {
+	if rr := doReq(t, h, http.MethodPost, "/api/illust/5/ugoira_meta", "secret"); rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST ugoira_meta = %d, want 405", rr.Code)
 	}
-	if rr := doReq(t, h, http.MethodGet, "/api/illust/5/ugoira_meta", ""); rr.Code != http.StatusOK {
+	if rr := doReq(t, h, http.MethodGet, "/api/illust/5/ugoira_meta", "secret"); rr.Code != http.StatusOK {
 		t.Errorf("GET ugoira_meta = %d, want 200", rr.Code)
 	}
 	if gotID != "5" {
@@ -748,15 +757,16 @@ func TestStreetHandler(t *testing.T) {
 			return []byte(`{"error":false,"body":{"contents":[]}}`), nil
 		},
 	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "")
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
 	// GET rejected
-	if rr := doReq(t, h, http.MethodGet, "/api/street", ""); rr.Code != http.StatusMethodNotAllowed {
+	if rr := doReq(t, h, http.MethodGet, "/api/street", "secret"); rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET /api/street = %d, want 405", rr.Code)
 	}
 
 	// POST with cursor body passes it through
 	req := httptest.NewRequest(http.MethodPost, "/api/street", strings.NewReader(`{"page":2,"li":"111"}`))
+	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -1515,11 +1525,11 @@ func TestSearchArtworksEndpoint(t *testing.T) {
 			ID           string `json:"id"`
 			IsBookmarked bool   `json:"is_bookmarked"`
 		} `json:"illusts"`
-		Total       int    `json:"total"`
-		LastPage    int    `json:"last_page"`
-		Page        int    `json:"page"`
-		NextURL     *string `json:"next_url"`
-		Popular     []struct {
+		Total    int     `json:"total"`
+		LastPage int     `json:"last_page"`
+		Page     int     `json:"page"`
+		NextURL  *string `json:"next_url"`
+		Popular  []struct {
 			ID string `json:"id"`
 		} `json:"popular"`
 		RelatedTags []struct {

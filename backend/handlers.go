@@ -388,7 +388,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		pages := 6
 		if p := r.URL.Query().Get("pages"); p != "" {
 			n, err := strconv.Atoi(p)
-			if err != nil || n < 1 || n > 25 {
+			if err != nil || n < 1 || n > 10 {
 				http.Error(w, "invalid pages", http.StatusBadRequest)
 				return
 			}
@@ -873,10 +873,13 @@ func validNumericID(s string) bool {
 // every /api route when configured. The Vite dev proxy injects the header
 // server-side, so the browser never sees it — direct requests (malicious
 // web pages posting to localhost, LAN peers) get 401. /health stays open.
+// FAIL-CLOSED (reviewer finding): with no key configured the gate 401s
+// everything instead of silently passing — a deployment mistake must be
+// loud, not open.
 func apiKeyGate(key string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if key == "" || r.URL.Path == "/health" ||
-			subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Api-Key")), []byte(key)) == 1 {
+		if r.URL.Path == "/health" ||
+			(key != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Api-Key")), []byte(key)) == 1) {
 			next.ServeHTTP(w, r)
 			return
 		}

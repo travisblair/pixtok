@@ -73,9 +73,13 @@ describe("blocked tags (backend-backed)", () => {
     expect(blockedTags()).toEqual(["loli", "swimsuit"]);
   });
 
-  it("add/remove update the list and PUT the full array", () => {
+  it("add/remove update the list and PUT the full array", async () => {
     addBlockedTag(" Swimsuit ");
     expect(blockedTags()).toEqual(["swimsuit"]);
+    // Pref writes serialize through a promise queue — flush two
+    // microtask ticks before asserting the fetch.
+    await Promise.resolve();
+    await Promise.resolve();
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0].url).toBe("/api/prefs/blocked-tags");
     expect(fetchCalls[0].init?.method).toBe("PUT");
@@ -88,8 +92,10 @@ describe("blocked tags (backend-backed)", () => {
 
     removeBlockedTag("swimsuit");
     expect(blockedTags()).toEqual(["loli"]);
-    const last = fetchCalls[fetchCalls.length - 1];
-    expect(JSON.parse(last.init?.body as string)).toEqual({ tags: ["loli"] });
+    await vi.waitFor(() => {
+      const last = fetchCalls[fetchCalls.length - 1];
+      expect(JSON.parse(last.init?.body as string)).toEqual({ tags: ["loli"] });
+    });
   });
 });
 
@@ -101,9 +107,11 @@ describe("image size (backend-backed)", () => {
     expect(fetchCalls).toHaveLength(0);
   });
 
-  it("persists a user change via PUT", () => {
+  it("persists a user change via PUT", async () => {
     setImageSize("medium");
     expect(imageSize()).toBe("medium");
+    await Promise.resolve();
+    await Promise.resolve();
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0].url).toBe("/api/prefs/image-size");
     expect(fetchCalls[0].init?.method).toBe("PUT");

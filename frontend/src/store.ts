@@ -49,14 +49,15 @@ export function getLikeState(id: number, initial: boolean) {
   return entry;
 }
 
-/** Seeds hearts from pixiv's bookmarks endpoint (server truth). */
+/**
+ * Seeds hearts from pixiv's bookmarks endpoint (server truth). REPLACES
+ * the whole set — reviewer finding: the old version only ADDED ids, so a
+ * work unliked on pixiv.com kept showing a filled heart after a resync
+ * (the stale id never left the set). Server truth means the server's
+ * list wins, empty included.
+ */
 export function seedLikedIds(ids: number[]) {
-  if (ids.length === 0) return;
-  setLikedIds((prev) => {
-    const n = new Set(prev);
-    for (const id of ids) n.add(id);
-    return n;
-  });
+  setLikedIds(new Set(ids));
 }
 
 /** Test hook — reset between unit tests so state can't leak across them. */

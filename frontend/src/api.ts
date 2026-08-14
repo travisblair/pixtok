@@ -48,6 +48,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return normalizeIds(data) as T;
 }
 
+// Preference writes serialize through this queue (reviewer finding:
+// rapid PUTs can complete out of order — ["a"], ["a","b","c"], ["a","b"]
+// — leaving the DB at a stale state). Chaining guarantees the last
+// issued write is the last applied. Errors don't break the chain.
+let prefsWriteQueue: Promise<unknown> = Promise.resolve();
+function queuedPrefWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const run = prefsWriteQueue.then(fn, fn);
+  prefsWriteQueue = run.catch(() => {});
+  return run;
+}
+
 export const api = {
   getTop(mode = "day") {
     return request<import("./types").FeedResponse>(`/top?mode=${mode}`, {
@@ -118,12 +129,14 @@ export const api = {
   },
 
   async setBlockedTags(tags: string[]) {
-    await request<{ tags: string[] }>("/prefs/blocked-tags", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tags }),
-      signal: AbortSignal.timeout(10_000),
-    });
+    await queuedPrefWrite(() =>
+      request<{ tags: string[] }>("/prefs/blocked-tags", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags }),
+        signal: AbortSignal.timeout(10_000),
+      })
+    );
   },
 
   getImageSize() {
@@ -133,12 +146,14 @@ export const api = {
   },
 
   async setImageSize(value: string) {
-    await request<{ value: string }>("/prefs/image-size", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value }),
-      signal: AbortSignal.timeout(10_000),
-    });
+    await queuedPrefWrite(() =>
+      request<{ value: string }>("/prefs/image-size", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+        signal: AbortSignal.timeout(10_000),
+      })
+    );
   },
 
   // Search — the site's search pages. Works search carries the tag's

@@ -45,6 +45,20 @@ var (
 	ErrNotFound = errors.New("not found")
 )
 
+// statusError carries an upstream HTTP status so callers can branch on
+// it with errors.As — no string-matching on error text (the street
+// retry used to gate on `strings.Contains(err.Error(), "street
+// returned 4")` — reviewer finding; a typed error can't drift).
+type statusError struct {
+	op     string
+	status int
+	body   string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("%s returned %d: %s", e.op, e.status, e.body)
+}
+
 // truncate caps text embedded in errors — upstream bodies can be large
 // and must not flood logs (or leak, if an upstream ever echoes request
 // material back).
@@ -74,10 +88,15 @@ func validAPIHost(raw string) bool {
 }
 
 // validImageURL enforces the allowlist for the /api/img proxy:
-// only Pixiv image CDN hosts, https only, default port.
+// only Pixiv image CDN hosts, https only, default port, and NO userinfo
+// or fragments (reviewer note: userinfo and fragments have no place in
+// the CDN URL grammar and are classic embedding tricks).
 func validImageURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || !imageHosts[u.Hostname()] {
+		return false
+	}
+	if u.User != nil || u.Fragment != "" {
 		return false
 	}
 	p := u.Port()
@@ -99,8 +118,8 @@ type Client struct {
 func NewClient() (*Client, error) {
 	rt := os.Getenv("PIXIV_REFRESH_TOKEN")
 	if rt == "" {
-		// Try reading from .env file relative to backend dir
-		data, err := os.ReadFile("../.env")
+		// Try reading from the .env next to the backend/binary.
+		data, err := os.ReadFile(envFilePath())
 		if err != nil {
 			return nil, fmt.Errorf("PIXIV_REFRESH_TOKEN not set and .env not found: %w", err)
 		}
@@ -130,7 +149,7 @@ func NewClient() (*Client, error) {
 		c.csrfTokenCache = v
 	}
 	if c.phpSessID == "" || c.csrfTokenCache == "" {
-		data, err := os.ReadFile("../.env")
+		data, err := os.ReadFile(envFilePath())
 		if err == nil {
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
@@ -275,21 +294,21 @@ func (c *Client) doWith(cl *http.Client, req *http.Request) (*http.Response, err
 // (the same lists ranking.php serves). Anything else is rejected here and
 // never forwarded upstream.
 var rankingModes = map[string]bool{
-	"day":          true,
-	"week":         true,
-	"month":        true,
-	"day_male":     true,
-	"day_female":   true,
-	"week_male":    true,
-	"week_female":  true,
-	"week_rookie":  true,
-	"week_original": true,
-	"day_ai":       true,
-	"day_r18":      true,
-	"day_male_r18": true,
+	"day":            true,
+	"week":           true,
+	"month":          true,
+	"day_male":       true,
+	"day_female":     true,
+	"week_male":      true,
+	"week_female":    true,
+	"week_rookie":    true,
+	"week_original":  true,
+	"day_ai":         true,
+	"day_r18":        true,
+	"day_male_r18":   true,
 	"day_female_r18": true,
-	"week_r18":     true,
-	"week_r18g":    true,
+	"week_r18":       true,
+	"week_r18g":      true,
 }
 
 // GetRankingIllust returns pixiv's ranked illust feed (app API, the same
@@ -331,11 +350,13 @@ func (c *Client) GetTopIllust(mode string) ([]byte, error) {
 // forwarded upstream. NOTE (verified live, Aug 2026): the type= param is
 // IGNORED on /ajax/search/artworks, but HONORED on
 // /ajax/search/illustrations — work type = endpoint path + type param:
-//   all    -> /artworks (pixiv's default: illust+manga+ugoira mixed)
-//   illust -> /illustrations?type=illust (illustrations only)
-//   ugoira -> /illustrations?type=ugoira (ugoira only; crawled the site's
-//             own Search-option Work type control: Ugoira navigates to
-//             /tags/{tag}/illustrations?type=ugoira, totals match).
+//
+//	all    -> /artworks (pixiv's default: illust+manga+ugoira mixed)
+//	illust -> /illustrations?type=illust (illustrations only)
+//	ugoira -> /illustrations?type=ugoira (ugoira only; crawled the site's
+//	          own Search-option Work type control: Ugoira navigates to
+//	          /tags/{tag}/illustrations?type=ugoira, totals match).
+//
 // popular_d is premium-gated server-side (non-premium requests silently
 // fall back to date_d). Manga/Novel intentionally absent — pixtok search
 // is works + illustrations + ugoira.
@@ -664,11 +685,34 @@ func (c *Client) AuthHealth() (appOK bool, webOK bool) {
 // other).
 var envFileMu sync.Mutex
 
+// envFilePath resolves the .env the backend reads/writes: the first
+// candidate that already exists wins, otherwise the first candidate is
+// used as the create target. Binary-dir-relative first so a backend
+// started from any CWD still finds the same file (reviewer finding:
+// the old hardcoded "../.env" silently failed from other directories).
+func envFilePath() string {
+	candidates := []string{}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, ".env"),
+			filepath.Join(exeDir, "..", ".env"),
+		)
+	}
+	candidates = append(candidates, "../.env", ".env")
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return candidates[0]
+}
+
 func updateEnvFile(kv map[string]string) error {
 	envFileMu.Lock()
 	defer envFileMu.Unlock()
 
-	path := "../.env"
+	path := envFilePath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -757,7 +801,11 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 			return nil, err
 		}
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("street returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+			return nil, &statusError{
+				op:     "street",
+				status: resp.StatusCode,
+				body:   truncate(string(body), 200),
+			}
 		}
 		return body, nil
 	}
@@ -767,7 +815,8 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 	// stale csrf token). Don't retry 429/5xx: doubling upstream load
 	// under stress and clearing a valid token would just add failure
 	// surface. Cache invalidation is mutex-guarded and race-safe.
-	if err != nil && strings.Contains(err.Error(), "street returned 4") {
+	var se *statusError
+	if err != nil && errors.As(err, &se) && se.status >= 400 && se.status < 500 {
 		c.csrfMu.Lock()
 		c.csrfTokenCache = ""
 		c.csrfMu.Unlock()

@@ -41,8 +41,6 @@ func TestValidImageURL(t *testing.T) {
 		"https://i.pximg.net/c/360x360_70/img-master/img/2026/08/10/00/00/24/148227434_p0_square1200.jpg",
 		"https://img.pximg.net/img/1.jpg",
 		"https://s.pximg.net/common/logo.png",
-		// userinfo on a VALID host is inert (Go never sends it as auth) — accepted
-		"https://user@i.pximg.net/img/1.jpg",
 	}
 	for _, u := range valid {
 		if !validImageURL(u) {
@@ -52,11 +50,14 @@ func TestValidImageURL(t *testing.T) {
 
 	invalid := []string{
 		"",
-		"http://i.pximg.net/img/1.jpg",        // plaintext
-		"https://evil.example.com/1.jpg",      // arbitrary host
-		"https://i.pximg.net:8080/img/1.jpg",  // non-default port
-		"https://i.pximg.net.evil.com/1.jpg",  // suffix domain
-		"https://www.pixiv.net/img/1.jpg",     // web host is not the CDN
+		"http://i.pximg.net/img/1.jpg",       // plaintext
+		"https://evil.example.com/1.jpg",     // arbitrary host
+		"https://i.pximg.net:8080/img/1.jpg", // non-default port
+		"https://i.pximg.net.evil.com/1.jpg", // suffix domain
+		"https://www.pixiv.net/img/1.jpg",    // web host is not the CDN
+		// userinfo/fragment embedding tricks (reviewer finding: rejected)
+		"https://user@i.pximg.net/img/1.jpg",
+		"https://i.pximg.net/img/1.jpg#frag",
 		"https://app-api.pixiv.net/img/1.jpg", // API host is not the CDN
 		"file:///etc/passwd",                  // local file
 		"https://127.0.0.1/1.jpg",             // loopback

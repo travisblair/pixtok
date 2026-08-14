@@ -465,7 +465,7 @@ func transformSearchArtworks(raw []byte) (searchArtworksResponse, error) {
 				Recent    []webIllust `json:"recent"`
 				Permanent []webIllust `json:"permanent"`
 			} `json:"popular"`
-			RelatedTags []string `json:"relatedTags"`
+			RelatedTags    []string `json:"relatedTags"`
 			TagTranslation map[string]struct {
 				En string `json:"en"`
 			} `json:"tagTranslation"`

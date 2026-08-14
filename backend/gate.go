@@ -31,9 +31,9 @@ import (
 const gateCookie = "pixtok_gate"
 
 type gate struct {
-	mu          sync.Mutex
-	hash        []byte // bcrypt hash of the configured password; nil = gate disabled
-	enabled     bool
+	mu      sync.Mutex
+	hash    []byte // bcrypt hash of the configured password; nil = gate disabled
+	enabled bool
 	// failure tarpit: progressive delays after 5 failures (per the
 	// auth-delay-tarpit pattern), capped concurrency.
 	failures     int
@@ -214,6 +214,7 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 			Path:     "/",
 			MaxAge:   30 * 24 * 60 * 60,
 			HttpOnly: true,
+			Secure:   publicHTTPS,
 			SameSite: http.SameSiteLaxMode,
 		})
 		w.Header().Set("Content-Type", "application/json")

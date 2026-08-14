@@ -51,8 +51,13 @@ func rewriteCookie(setCookie string) string {
 			continue
 		}
 		lower := strings.ToLower(t)
+		// Secure is kept when the deployment is HTTPS (publicHTTPS) —
+		// reviewer finding: stripping it unconditionally let session
+		// cookies ride plaintext on the public tunnel. On local HTTP
+		// dev it must still go, or the browser won't store/send the
+		// cookie at all.
 		if strings.HasPrefix(lower, "domain=") ||
-			lower == "secure" ||
+			(lower == "secure" && !publicHTTPS) ||
 			strings.HasPrefix(lower, "expires=") ||
 			strings.HasPrefix(lower, "max-age=") ||
 			strings.HasPrefix(lower, "samesite=") {
@@ -145,6 +150,17 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 			return
 		}
 
+		// Method allowlist (reviewer finding): a login proxy has no
+		// business forwarding anything but the browser's own
+		// navigation/form methods. PUT/PATCH/DELETE/CONNECT/TRACE must
+		// never reach pixiv through us.
+		switch r.Method {
+		case http.MethodGet, http.MethodPost, http.MethodHead:
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		// The PKCE callback: OUR one-time code arrives home. Exchange
 		// it, capture the web session, and land the user back in the
 		// app — no console tricks, no pasting, no Mac.
@@ -171,16 +187,19 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 				req.Header.Set(h, v)
 			}
 		}
-		// Forward the browser's cookie jar (pixiv's cookies now live
-		// on OUR origin thanks to the rewriting) minus OUR cookies —
-		// pixtok_login (the flow gate) and pixtok_gate (the app session)
-		// must never leave for pixiv's hosts.
+		// Forward only PIXIV'S cookies upstream (reviewer finding: the
+		// old filter was "everything not pixtok_*", a blacklist — any
+		// third-party cookie our origin ever holds would leak to
+		// pixiv). Allowlist the cookies the login flow actually needs:
+		// PHPSESSID (the session) + device_token; pixiv's other cookies
+		// are analytics, not auth.
 		if ck := r.Header.Get("Cookie"); ck != "" {
 			var kept []string
 			for _, part := range strings.Split(ck, ";") {
-				name := strings.TrimSpace(part)
-				if !strings.HasPrefix(name, "pixtok_") {
-					kept = append(kept, name)
+				name := strings.TrimSpace(strings.SplitN(part, "=", 2)[0])
+				switch name {
+				case "PHPSESSID", "device_token":
+					kept = append(kept, strings.TrimSpace(part))
 				}
 			}
 			if len(kept) > 0 {
