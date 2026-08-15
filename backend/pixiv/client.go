@@ -714,6 +714,15 @@ func updateEnvFile(kv map[string]string) error {
 	envFileMu.Lock()
 	defer envFileMu.Unlock()
 
+	// Values are written raw KEY=value — a newline would split into its
+	// own line and corrupt the file (reviewer finding). Refuse rather
+	// than write a malformed .env.
+	for key, val := range kv {
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(val, "\r\n") {
+			return fmt.Errorf("refusing to write %q with newline into .env", key)
+		}
+	}
+
 	path := envFilePath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -813,12 +822,13 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 	}
 
 	body, err := do()
-	// Retry once on token/session rejection (400-family — a rotated or
-	// stale csrf token). Don't retry 429/5xx: doubling upstream load
-	// under stress and clearing a valid token would just add failure
-	// surface. Cache invalidation is mutex-guarded and race-safe.
+	// Retry once ONLY on 400/401 — a rotated/stale csrf token or session
+	// rejection. A 403/404/429 is not a token problem: retrying doubles
+	// upstream load under rate limiting and repeats a request that will
+	// fail the same way. Cache invalidation is mutex-guarded and
+	// race-safe. (Reviewer finding: the old window covered ALL 4xx.)
 	var se *statusError
-	if err != nil && errors.As(err, &se) && se.status >= 400 && se.status < 500 {
+	if err != nil && errors.As(err, &se) && (se.status == 400 || se.status == 401) {
 		c.csrfMu.Lock()
 		c.csrfTokenCache = ""
 		c.csrfMu.Unlock()

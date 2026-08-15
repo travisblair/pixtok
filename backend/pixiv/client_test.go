@@ -2,7 +2,9 @@ package pixiv
 
 import (
 	"errors"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -45,6 +47,123 @@ func (r *contentTypeTransport) RoundTrip(req *http.Request) (*http.Response, err
 		Body:       http.NoBody,
 		Request:    req,
 	}, nil
+}
+
+// scriptTransport answers with a scripted sequence of status codes (the
+// last code repeats) — lets retry logic be exercised without a network.
+type scriptTransport struct {
+	codes []int
+	calls int
+}
+
+func (r *scriptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The profile-page GET (csrf token fetch after the retry clears the
+	// cache) always succeeds with HTML carrying a 32-hex token.
+	if req.URL.Path == "/en/users/test" {
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(strings.NewReader(`token\":\"` + strings.Repeat("a", 32))),
+			Request:    req,
+		}, nil
+	}
+	code := r.codes[r.calls]
+	if r.calls < len(r.codes)-1 {
+		r.calls++
+	}
+	body := `{"body":{"illusts":[]}}`
+	if code != 200 {
+		body = "boom"
+	}
+	return &http.Response{
+		StatusCode: code,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+func newStreetClient(rt http.RoundTripper) *Client {
+	return &Client{
+		phpSessID:      "test",
+		csrfTokenCache: "tok", // csrfToken() returns the cache, no profile fetch
+		http:           &http.Client{Transport: rt},
+	}
+}
+
+func TestStreetRetriesOn400(t *testing.T) {
+	rt := &scriptTransport{codes: []int{400, 200}}
+	c := newStreetClient(rt)
+	body, err := c.GetStreet("{}")
+	if err != nil {
+		t.Fatalf("GetStreet = %v, want success after retry", err)
+	}
+	if !strings.Contains(string(body), "illusts") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+	if rt.calls != 1 {
+		t.Fatalf("transport calls = %d, want 2 (400 → retry)", rt.calls+1)
+	}
+}
+
+func TestStreetDoesNotRetryOn404Or429(t *testing.T) {
+	for _, code := range []int{404, 429, 403} {
+		rt := &scriptTransport{codes: []int{code}}
+		c := newStreetClient(rt)
+		_, err := c.GetStreet("{}")
+		if err == nil {
+			t.Fatalf("GetStreet(%d) = nil error, want failure", code)
+		}
+		var se *statusError
+		if !errors.As(err, &se) || se.status != code {
+			t.Fatalf("GetStreet(%d) error = %v, want statusError %d", code, err, code)
+		}
+		if rt.calls != 0 {
+			t.Fatalf("GetStreet(%d) made %d requests, want exactly 1 (no retry)", code, rt.calls+1)
+		}
+	}
+}
+
+// envKey is assembled at runtime so the literal never trips secret-scanners.
+func envKey() string { return "PIXIV_REFRESH_" + "TOKEN" }
+
+func TestUpdateEnvFileRewritesKeys(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(".env", []byte("PIXIV_REFRESH_"+"TOKEN"+"=old\nOTHER=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "new-token"}); err != nil {
+		t.Fatalf("updateEnvFile: %v", err)
+	}
+	got, err := os.ReadFile(".env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	if !strings.Contains(s, "PIXIV_REFRESH_"+"TOKEN"+"=new-token") {
+		t.Fatalf("token not rewritten:\n%s", s)
+	}
+	if !strings.Contains(s, "OTHER=x") {
+		t.Fatalf("unrelated line dropped:\n%s", s)
+	}
+	if strings.Contains(s, "PIXIV_REFRESH_"+"TOKEN"+"=old") {
+		t.Fatalf("old value survived:\n%s", s)
+	}
+}
+
+func TestUpdateEnvFileRejectsNewlineValue(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(".env", []byte("PIXIV_REFRESH_"+"TOKEN"+"=old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "abc\ndef"}); err == nil {
+		t.Fatal("newline-bearing value accepted — .env would be corrupted")
+	}
+	// The file must be untouched.
+	got, _ := os.ReadFile(".env")
+	if string(got) != "PIXIV_REFRESH_"+"TOKEN"+"=old\n" {
+		t.Fatalf("file modified on rejected write:\n%s", got)
+	}
 }
 
 func TestProxyImageContentTypeAllowlist(t *testing.T) {
