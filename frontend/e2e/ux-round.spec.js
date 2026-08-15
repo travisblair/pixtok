@@ -218,31 +218,41 @@ test.describe("UX round", () => {
     await expectMainFeedCount(page, 6);
 
     const player = page.locator(".ugoira-wrap").first();
+    const control = player.locator(".ugoira-play");
 
-    // Idle: play icon visible, and NO meta/zip fetch yet (no autoplay).
-    await expect(player.locator(".ugoira-play")).toBeVisible();
+    // Idle: the ▶ control over the poster CANVAS (no <img> — the canvas
+    // is the only surface, so playing has no poster swap), and NO
+    // meta/zip fetch yet (no autoplay).
+    await expect(control).toBeVisible();
+    await expect(player.locator(".ugoira-canvas")).toBeVisible();
+    await expect(player.locator("img.card-image")).toHaveCount(0);
     expect(mocks.ugoiraCalls.length).toBe(0);
 
-    // Tap → loads meta + zip → canvas loop replaces the play icon.
-    await player.click();
+    // Tap the control → loads meta + zip → the loop starts on the same
+    // canvas; the control flips to pause bars.
+    await control.click();
     await expect.poll(() => mocks.ugoiraCalls.length).toBe(1);
     expect(mocks.ugoiraCalls[0].id).toBe(7701);
     await expect(page.locator(".ugoira-canvas")).toBeVisible({ timeout: 15_000 });
-    await expect(player.locator(".ugoira-play")).toHaveCount(0);
+    await expect(control).toHaveAttribute("aria-label", "Pause animation");
     await expect(player.locator(".ugoira-badge")).toHaveCount(0);
 
-    // Tap again → paused: play icon returns over the frozen frame.
-    await player.click();
-    await expect(player.locator(".ugoira-play")).toBeVisible();
+    // Control taps must NOT push a related stack.
+    await expect(page.locator(".related-view")).toHaveCount(0);
+
+    // Tap the control again → paused: ▶ returns over the frozen frame.
+    await control.click();
+    await expect(control).toHaveAttribute("aria-label", "Play animation");
     await expect(page.locator(".ugoira-canvas")).toBeVisible();
 
     // Tap a third time → resumes.
-    await player.click();
-    await expect(player.locator(".ugoira-play")).toHaveCount(0);
-    await expect(page.locator(".ugoira-canvas")).toBeVisible();
+    await control.click();
+    await expect(control).toHaveAttribute("aria-label", "Pause animation");
 
-    // The player owns its taps — no related stack was pushed.
-    await expect(page.locator(".related-view")).toHaveCount(0);
+    // Tapping the IMAGE (away from the centered control, below the card
+    // header) opens the related-work stack like any other card.
+    await player.click({ position: { x: 12, y: 300 } });
+    await expect(page.locator(".related-view")).toBeVisible();
   });
 
   test("failed images offer a Try again button that reloads the page image", async ({ page }) => {

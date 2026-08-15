@@ -8,11 +8,19 @@ import { api } from "../api";
  * through the image proxy, inflate in-memory (fflate), and step through
  * the frames on a canvas honouring each frame's delay.
  *
- * Playback is MANUAL — the card shows a play icon over the static frame;
- * tapping loads meta + zip (spinner while loading) and starts the loop;
- * tapping again pauses (icon returns), tapping a third time resumes.
- * Scroll-away tears everything down (ugoira zips run several MB — never
- * let a scrolled-past card keep 100+ decoded frames alive).
+ * The canvas is the ONLY surface — there is no poster <img>. On mount the
+ * static frame is fetched and drawn onto the canvas (downscaled to the
+ * same budget as animation frames); the ▶ button sits on that canvas.
+ * Tapping ▶ loads meta + zip (spinner while loading) and starts the loop
+ * — frame 0 replaces the poster on the same canvas with identical pixels,
+ * so there is no img→canvas swap and no visible jump. Tapping again
+ * pauses (▶ returns over the frozen frame), a third tap resumes.
+ *
+ * Interaction model: ONLY the control button drives playback — it
+ * stopPropagation's its taps. Taps anywhere else on the image fall
+ * through to the card, which opens the related-work stack like any other
+ * card. Scroll-away frees the decoded frames but keeps the poster frame
+ * on the canvas.
  *
  * Performance notes (reviewer findings):
  * - Decompression is the ASYNC fflate unzip() — the sync form froze the
@@ -20,7 +28,8 @@ import { api } from "../api";
  * - Frame canvases are DOWNSCALED to at most MAX_FRAME_SIDE device px.
  *   Native-res frames (1200×1200 RGBA ≈ 5.7 MB) × 50 frames ≈ 288 MB —
  *   an instant iOS jetsam kill. The card is ~400 CSS px wide; 800 px
- *   is visually identical and cuts per-frame memory ~4x.
+ *   is visually identical and cuts per-frame memory ~4x. The poster
+ *   frame goes through the same downscale.
  */
 type PlayerStatus = "idle" | "loading" | "playing" | "paused";
 
@@ -33,15 +42,19 @@ export default function UgoiraPlayer(props: {
 }) {
   const [status, setStatus] = createSignal<PlayerStatus>("idle");
   const [error, setError] = createSignal(false);
+  const [posterReady, setPosterReady] = createSignal(false);
 
   let canvasRef: HTMLCanvasElement | undefined;
   let rootRef: HTMLDivElement | undefined;
   let frames: HTMLCanvasElement[] = [];
   let delays: number[] = [];
+  let staticFrame: HTMLCanvasElement | null = null; // downscaled poster frame
+  let staticLoading = false;
   let idx = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let loadSeq = 0; // bumped on teardown — in-flight loads discard themselves
   let zipAbort: AbortController | undefined; // kills the in-flight zip fetch
+  let staticAbort: AbortController | undefined; // kills the in-flight poster fetch
 
   function clearTimer() {
     if (timer !== undefined) {
@@ -50,15 +63,58 @@ export default function UgoiraPlayer(props: {
     }
   }
 
+  function drawStatic() {
+    if (!canvasRef || !staticFrame) return;
+    const canvas = canvasRef;
+    canvas.width = staticFrame.width;
+    canvas.height = staticFrame.height;
+    // getContext may be gone at unmount (test teardown restores mocks
+    // before Solid's onCleanup runs) — never crash in cleanup paths.
+    canvas.getContext("2d")?.drawImage(staticFrame, 0, 0);
+  }
+
   function teardown() {
     loadSeq++;
     zipAbort?.abort(); // stop a multi-MB zip download that's no longer needed
     zipAbort = undefined;
+    staticAbort?.abort();
+    staticAbort = undefined;
     clearTimer();
     frames = [];
     delays = [];
+    drawStatic(); // the poster frame (frame 0) stays on the canvas
     setStatus("idle");
     setError(false);
+  }
+
+  async function loadStatic() {
+    if (staticFrame || staticLoading) return;
+    const seq = ++loadSeq;
+    staticLoading = true;
+    setError(false);
+    const controller = new AbortController();
+    staticAbort = controller;
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const res = await fetch(
+        `/api/img?url=${encodeURIComponent(props.staticUrl)}`,
+        { signal: controller.signal }
+      );
+      if (!res.ok) throw new Error(`static fetch failed: ${res.status}`);
+      const blob = await res.blob();
+      const frame = await loadFrame(blob);
+      if (seq !== loadSeq) return; // torn down or superseded while fetching
+      staticFrame = frame;
+      drawStatic();
+      setPosterReady(true);
+    } catch (e) {
+      console.error("ugoira static load failed:", e);
+      if (seq === loadSeq) setError(true);
+    } finally {
+      clearTimeout(timeout);
+      staticLoading = false;
+      if (staticAbort === controller) staticAbort = undefined;
+    }
   }
 
   async function loadFrames() {
@@ -104,6 +160,8 @@ export default function UgoiraPlayer(props: {
       frames = loaded;
       delays = body.frames.map((f) => Math.max(20, f.delay || 60));
       idx = 0;
+      // step() draws frame 0 in the same tick — identical pixels to the
+      // poster already on the canvas, so there's no visible jump.
       setStatus("playing");
       step();
     } catch (e) {
@@ -132,7 +190,7 @@ export default function UgoiraPlayer(props: {
         const c = document.createElement("canvas");
         c.width = Math.max(1, Math.round(img.naturalWidth * scale));
         c.height = Math.max(1, Math.round(img.naturalHeight * scale));
-        c.getContext("2d")!.drawImage(img, 0, 0, c.width, c.height);
+        c.getContext("2d")?.drawImage(img, 0, 0, c.width, c.height);
         URL.revokeObjectURL(url);
         resolve(c);
       };
@@ -144,27 +202,33 @@ export default function UgoiraPlayer(props: {
     });
   }
 
+  function drawFrame(i: number) {
+    if (!canvasRef || frames.length === 0) return;
+    const canvas = canvasRef;
+    const frame = frames[i % frames.length];
+    canvas.width = frame.width;
+    canvas.height = frame.height;
+    canvas.getContext("2d")?.drawImage(frame, 0, 0);
+  }
+
   function step() {
     if (status() !== "playing") return; // plain read — timer callback, no tracking
     if (!canvasRef || frames.length === 0) return;
-    const canvas = canvasRef;
-    const frame = frames[idx % frames.length];
-    canvas.width = frame.width;
-    canvas.height = frame.height;
-    canvas.getContext("2d")!.drawImage(frame, 0, 0);
+    drawFrame(idx);
     idx = (idx + 1) % frames.length;
     timer = setTimeout(step, delays[(idx - 1 + delays.length) % delays.length]);
   }
 
   function toggle(e: Event) {
-    // Owns its taps — the card must NOT push a related stack on play/pause.
+    // The control button owns its taps — the card must NOT push a
+    // related stack on play/pause.
     e.stopPropagation();
     e.preventDefault();
     const s = status();
     if (s === "loading") return;
     if (s === "playing") {
       clearTimer();
-      setStatus("paused"); // frozen frame stays on canvas; play icon returns
+      setStatus("paused"); // frozen frame stays on canvas; ▶ returns
       return;
     }
     if (s === "paused") {
@@ -172,62 +236,70 @@ export default function UgoiraPlayer(props: {
       step(); // resume from the current frame
       return;
     }
-    // idle — or idle after an error (tap retries the load)
+    // idle — or idle after an error (tap retries poster + frames)
     void loadFrames();
+    if (!staticFrame) void loadStatic();
   }
 
-  function onKeyDown(e: KeyboardEvent) {
-    if (e.key !== "Enter" && e.key !== " ") return;
-    e.preventDefault();
-    toggle(e);
-  }
-
-  // Scrolled away → freeze + free everything. Re-entering shows the play
-  // icon again; the next tap reloads (zip comes from the HTTP cache).
+  // Scrolled away → freeze + free the frame set (the poster frame stays
+  // on the canvas). Re-entering retries the poster if it never loaded.
   onMount(() => {
     const root = rootRef?.closest<HTMLElement>(".feed-container") ?? null;
     const io = new IntersectionObserver(
       ([entry]) => {
-        if (!entry.isIntersecting) teardown();
+        if (!entry.isIntersecting) {
+          teardown();
+        } else if (!staticFrame) {
+          void loadStatic();
+        }
       },
       { root, rootMargin: "0px" }
     );
     if (rootRef) io.observe(rootRef);
+    void loadStatic();
     onCleanup(() => {
       io.disconnect();
       teardown();
     });
   });
 
-  // Canvas visible while playing OR paused (frozen frame stays on screen).
-  const activeCanvas = () => status() === "playing" || status() === "paused";
+  const controlShown = () =>
+    (status() === "idle" || status() === "paused" || status() === "playing") &&
+    !error();
 
   return (
-    <div
-      class="ugoira-wrap"
-      ref={rootRef}
-      onClick={toggle}
-      onKeyDown={onKeyDown}
-      role="button"
-      tabIndex={0}
-      aria-label={status() === "playing" ? "Pause animation" : "Play animation"}
-    >
-      <img
-        class="card-image loaded"
-        src={`/api/img?url=${encodeURIComponent(props.staticUrl)}`}
-        alt={props.title}
+    <div class="ugoira-wrap" ref={rootRef}>
+      <canvas
+        ref={canvasRef}
+        class={"ugoira-canvas" + (posterReady() ? " ready" : "")}
+        aria-hidden="true"
       />
-      <Show when={activeCanvas()}>
-        <canvas ref={canvasRef} class="ugoira-canvas" aria-hidden="true" />
-      </Show>
-      <Show when={(status() === "idle" || status() === "paused") && !error()}>
-        <div class="ugoira-play" aria-hidden="true">▶</div>
+      <Show when={controlShown()}>
+        <button
+          type="button"
+          class={"ugoira-play" + (status() === "playing" ? " pause" : "")}
+          onClick={toggle}
+          aria-label={status() === "playing" ? "Pause animation" : "Play animation"}
+        >
+          <Show when={status() === "playing"} fallback={"▶"}>
+            <span class="ugoira-pause-bars" aria-hidden="true">
+              <span />
+              <span />
+            </span>
+          </Show>
+        </button>
       </Show>
       <Show when={status() === "loading"}>
         <div class="ugoira-spinner" aria-hidden="true" />
       </Show>
       <Show when={error()}>
-        <div class="ugoira-badge overlay-pill ugoira-error">⚠️ tap to retry</div>
+        <button
+          type="button"
+          class="ugoira-badge overlay-pill ugoira-error"
+          onClick={toggle}
+        >
+          ⚠️ tap to retry
+        </button>
       </Show>
     </div>
   );

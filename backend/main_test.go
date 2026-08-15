@@ -682,6 +682,17 @@ func TestDeriveLargeFallback(t *testing.T) {
 	if _, ok := deriveLarge("https://i.pximg.net/c/360x360_70/img-master/img/x/1_p0_square1200.jpg"); !ok {
 		t.Error("deriveLarge should match the known thumbnail pattern")
 	}
+	// Regression: search / illust/new thumbs use the c/250x250_80_a2
+	// prefix — the old 360x360_70-only match passed the 250px square
+	// through as `large`, so ugoira posters rendered as giant square
+	// blocks that snapped to the real ratio when the animation started.
+	a2, ok := deriveLarge("https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/08/15/20/07/54/148463904_square1200.jpg")
+	if !ok {
+		t.Fatal("deriveLarge should match the _a2 thumbnail prefix")
+	}
+	if want := "https://i.pximg.net/img-master/img/2026/08/15/20/07/54/148463904_master1200.jpg"; a2 != want {
+		t.Errorf("_a2 derive = %q, want %q", a2, want)
+	}
 }
 
 func TestPageThumb(t *testing.T) {

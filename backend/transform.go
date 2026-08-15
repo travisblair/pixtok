@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -279,19 +280,27 @@ func transformStreet(raw []byte) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// deriveLarge converts a recommend/init thumbnail URL to the full-size
-// master1200 URL. The pattern is deterministic:
+// deriveLarge converts a pixiv thumbnail URL to the full-size master1200
+// URL. The /c/<size>_<quality>/ prefix is a resize-proxy path segment — it
+// can be dropped to reach the underlying img-master file. Known prefixes
+// in the wild: c/360x360_70 (recommend/init) and c/250x250_80_a2 (search /
+// illust/new). The suffix determines the file variant:
 //
-//	https://i.pximg.net/c/360x360_70/img-master/img/<path>/<id>_p0_square1200.jpg
-//	-> https://i.pximg.net/img-master/img/<path>/<id>_p0_master1200.jpg
+//	https://i.pximg.net/c/250x250_80_a2/img-master/img/<path>/<id>_square1200.jpg
+//	-> https://i.pximg.net/img-master/img/<path>/<id>_master1200.jpg
 //
-// ok is false when the URL doesn't match the known thumbnail pattern —
-// callers must NOT synthesize master1200/meta_pages URLs from it.
+// ok is false when the URL doesn't match the thumbnail pattern — callers
+// must NOT synthesize master1200/meta_pages URLs from it (search cards
+// used to pass the 250px square through as `large`, and ugoira posters
+// rendered as big square blocks that snapped to the real ratio on play).
+var cThumbPrefixRe = regexp.MustCompile(`^(.+)/c/[^/]+/(img-master/.+)$`)
+
 func deriveLarge(thumb string) (url string, ok bool) {
-	s := strings.Replace(thumb, "/c/360x360_70/", "/", 1)
-	if s == thumb {
+	m := cThumbPrefixRe.FindStringSubmatch(thumb)
+	if m == nil {
 		return thumb, false
 	}
+	s := m[1] + "/" + m[2]
 	return strings.Replace(s, "_square1200.jpg", "_master1200.jpg", 1), true
 }
 
