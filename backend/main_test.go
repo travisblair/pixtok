@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1682,6 +1683,99 @@ func TestGateLocksEverythingUntilUnlocked(t *testing.T) {
 	h.ServeHTTP(rr6, req6)
 	if rr6.Code != http.StatusOK || !strings.Contains(rr6.Body.String(), `"locked":false`) {
 		t.Fatalf("status after unlock = %d %s", rr6.Code, rr6.Body.String())
+	}
+}
+
+func TestSecureForRequest(t *testing.T) {
+	mk := func(fn func(*http.Request)) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		fn(r)
+		return r
+	}
+	cases := []struct {
+		name string
+		flag string
+		req  *http.Request
+		want bool
+	}{
+		{"flag off, plain", "false", mk(func(r *http.Request) {}), false},
+		{"flag off, forwarded https", "false", mk(func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "https")
+		}), false},
+		{"flag on, plain", "true", mk(func(r *http.Request) {}), false},
+		{"flag on, forwarded http", "true", mk(func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "http")
+		}), false},
+		{"flag on, forwarded https", "true", mk(func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "https")
+		}), true},
+		{"flag on, forwarded HTTPS mixed case", "true", mk(func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "HTTPS")
+		}), true},
+		{"flag on, direct TLS", "true", mk(func(r *http.Request) {
+			r.TLS = &tls.ConnectionState{}
+		}), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("PIXTOK_PUBLIC_HTTPS", c.flag)
+			if got := secureForRequest(c.req); got != c.want {
+				t.Fatalf("secureForRequest = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// Regression: PIXTOK_PUBLIC_HTTPS=true used to stamp Secure on the gate
+// cookie for EVERY request, including plain-HTTP ones (localhost, direct
+// tailnet URL). Browsers store a Secure cookie but never send it over
+// HTTP, so the login "succeeded" and every follow-up request 403'd —
+// the whole app dead for HTTP origins.
+func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
+	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
+	h := newGatedServer(t, "correct horse battery staple")
+
+	unlock := func(t *testing.T, mutate func(*http.Request)) *http.Cookie {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/gate",
+			strings.NewReader(`{"password":"correct horse battery staple"}`))
+		req.Header.Set("X-Api-Key", "secret")
+		req.Header.Set("Content-Type", "application/json")
+		if mutate != nil {
+			mutate(req)
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unlock = %d (body: %s)", rr.Code, rr.Body.String())
+		}
+		for _, c := range rr.Result().Cookies() {
+			if c.Name == gateCookie {
+				return c
+			}
+		}
+		t.Fatal("no gate cookie in unlock response")
+		return nil
+	}
+
+	// Plain HTTP transport: cookie must NOT be Secure.
+	if c := unlock(t, nil); c.Secure {
+		t.Fatal("plain HTTP unlock got a Secure cookie — the browser would never send it back over HTTP")
+	}
+
+	// Funnel: TLS terminated upstream, request tagged X-Forwarded-Proto.
+	if c := unlock(t, func(r *http.Request) {
+		r.Header.Set("X-Forwarded-Proto", "https")
+	}); !c.Secure {
+		t.Fatal("funnel (X-Forwarded-Proto: https) unlock lost Secure")
+	}
+
+	// Flag off: never Secure, even with the forwarded proto.
+	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false")
+	if c := unlock(t, func(r *http.Request) {
+		r.Header.Set("X-Forwarded-Proto", "https")
+	}); c.Secure {
+		t.Fatal("Secure set with PIXTOK_PUBLIC_HTTPS disabled")
 	}
 }
 

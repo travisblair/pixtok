@@ -181,6 +181,29 @@ func publicHTTPSEnabled() bool {
 	return v == "true" || v == "1"
 }
 
+// secureForRequest decides whether Set-Cookie responses for this request
+// may carry Secure. The deployment flag alone is not enough: the same
+// backend serves the public funnel (TLS terminated upstream, dialed
+// plaintext at 127.0.0.1) AND direct tailnet/localhost HTTP. Stamping
+// Secure on a cookie for a plaintext origin breaks the app: the browser
+// stores the cookie but never sends it over HTTP, so the gate login
+// "succeeds" and every follow-up request 403s (this exact bug shipped
+// when PIXTOK_PUBLIC_HTTPS=true went live).
+//
+// Direct HTTPS is visible as r.TLS != nil; funnel requests arrive with
+// X-Forwarded-Proto: https from the terminating proxy. Requests that are
+// neither get a plain cookie — correct for localhost and the direct
+// tailnet URL, which are HTTP transports.
+func secureForRequest(r *http.Request) bool {
+	if !publicHTTPSEnabled() {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	status int

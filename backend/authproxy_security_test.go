@@ -93,7 +93,7 @@ func TestRewriteBodyURLsSuffixDomain(t *testing.T) {
 
 func TestRewriteCookieStripsDomainAlways(t *testing.T) {
 	in := "PHPSESSID=abc123; Domain=.pixiv.net; Path=/; Secure; HttpOnly"
-	got := rewriteCookie(in)
+	got := rewriteCookie(in, false)
 	if strings.Contains(got, "Domain") {
 		t.Fatalf("Domain= survived: %q", got)
 	}
@@ -103,15 +103,14 @@ func TestRewriteCookieStripsDomainAlways(t *testing.T) {
 	if !strings.Contains(got, "HttpOnly") {
 		t.Fatalf("HttpOnly lost: %q", got)
 	}
-	// Secure depends on deployment — on HTTP dev it must go (browser
-	// would refuse the cookie), on HTTPS public it must stay.
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
-	if !strings.Contains(rewriteCookie(in), "Secure") {
-		t.Fatalf("Secure stripped under HTTPS deployment")
+	// Secure follows the REQUEST's transport — on HTTP dev it must go
+	// (the browser stores but never sends a Secure cookie over HTTP),
+	// on HTTPS it must stay (session cookies must not ride plaintext).
+	if !strings.Contains(rewriteCookie(in, true), "Secure") {
+		t.Fatalf("Secure stripped under HTTPS request")
 	}
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false")
-	if strings.Contains(rewriteCookie(in), "Secure") {
-		t.Fatalf("Secure kept under HTTP dev — cookie would never store")
+	if strings.Contains(rewriteCookie(in, false), "Secure") {
+		t.Fatalf("Secure kept under HTTP request — cookie would never store")
 	}
 }
 

@@ -43,7 +43,12 @@ var browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537
 // Expires=/Max-Age=/SameSite. Host-only cookies on our origin are the
 // whole trick: the browser stores and replays them on follow-up
 // requests through the proxy, so the backend can read pixiv's session.
-func rewriteCookie(setCookie string) string {
+// `secure` is secureForRequest(r): on HTTPS transports the Secure
+// attribute is preserved (reviewer finding: stripping it unconditionally
+// let session cookies ride plaintext on the public tunnel); on HTTP
+// transports it must go, or the browser stores but never sends the
+// cookie and the session silently breaks.
+func rewriteCookie(setCookie string, secure bool) string {
 	parts := strings.Split(setCookie, ";")
 	out := make([]string, 0, 3)
 	for _, p := range parts {
@@ -52,13 +57,8 @@ func rewriteCookie(setCookie string) string {
 			continue
 		}
 		lower := strings.ToLower(t)
-		// Secure is kept when the deployment is HTTPS (publicHTTPS) —
-		// reviewer finding: stripping it unconditionally let session
-		// cookies ride plaintext on the public tunnel. On local HTTP
-		// dev it must still go, or the browser won't store/send the
-		// cookie at all.
 		if strings.HasPrefix(lower, "domain=") ||
-			(lower == "secure" && !publicHTTPSEnabled()) ||
+			(lower == "secure" && !secure) ||
 			strings.HasPrefix(lower, "expires=") ||
 			strings.HasPrefix(lower, "max-age=") ||
 			strings.HasPrefix(lower, "samesite=") {
@@ -293,7 +293,7 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 		cookies := resp.Header.Values("Set-Cookie")
 		resp.Header.Del("Set-Cookie")
 		for _, sc := range cookies {
-			if rewritten := rewriteCookie(sc); rewritten != "" {
+			if rewritten := rewriteCookie(sc, secureForRequest(r)); rewritten != "" {
 				resp.Header.Add("Set-Cookie", rewritten)
 			}
 		}
