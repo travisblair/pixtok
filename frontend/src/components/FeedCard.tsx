@@ -60,6 +60,83 @@ export default function FeedCard(props: {
 
   const tags = () => props.illust.tags ?? [];
 
+  // ── Tag row layout ────────────────────────────────────────────────────
+  // Spec: fill row 1 fully (stopping before the gear), then row 2; if the
+  // tags need MORE than two natural rows, the 2-row strip scrolls
+  // horizontally — overflow rows interleave onto the two lines
+  // (rows 1,3,5→top; 2,4,6→bottom) so reading order stays row-major.
+  // Measurement: render the natural wrap once, bucket chips into rows by
+  // offsetTop, then re-pack if there are more than 2 rows.
+  type TagPair = { name: string; translated?: string };
+  const [tagLines, setTagLines] = createSignal<{
+    top: TagPair[];
+    bottom: TagPair[];
+  } | null>(null);
+  let tagRowRef: HTMLDivElement | undefined;
+
+  function measureTagRow() {
+    const el = tagRowRef;
+    if (!el) return;
+    const chips = Array.from(
+      el.querySelectorAll<HTMLElement>(".card-tag-chip")
+    );
+    if (chips.length === 0) {
+      setTagLines(null);
+      return;
+    }
+    let prevTop: number | null = null;
+    const rows: number[][] = [];
+    let cur: number[] = [];
+    for (let i = 0; i < chips.length; i++) {
+      const t = chips[i].offsetTop;
+      if (prevTop === null || t === prevTop) {
+        cur.push(i);
+      } else {
+        rows.push(cur);
+        cur = [i];
+      }
+      prevTop = t;
+    }
+    rows.push(cur);
+    if (rows.length <= 2) {
+      setTagLines(null); // natural wrap already correct
+      return;
+    }
+    const pairs = normalizeTagPairs(props.illust);
+    const top: TagPair[] = [];
+    const bottom: TagPair[] = [];
+    rows.forEach((row, ri) => {
+      const target = ri % 2 === 0 ? top : bottom;
+      for (const i of row) target.push(pairs[i]);
+    });
+    setTagLines({ top, bottom });
+  }
+
+  // Re-measure whenever the row mounts/updates (Solid effects run after
+  // the DOM commit, so the ref and chips exist).
+  createEffect(() => {
+    void tags();
+    if (tagRowRef) measureTagRow();
+  });
+
+  function renderChip(tag: TagPair) {
+    return (
+      <button
+        type="button"
+        class="card-tag-chip"
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onTagOpen?.(tag.name);
+        }}
+      >
+        <span class="card-tag-name">#{tag.name}</span>
+        <Show when={tag.translated}>
+          <span class="card-tag-translation">{tag.translated}</span>
+        </Show>
+      </button>
+    );
+  }
+
   // Big sliders (long manga) keep a tight ±1 window so decoded bitmaps
   // stay bounded on iOS — see sliderWindowSize in helpers.ts.
   const windowSize = sliderWindowSize(pages.length);
@@ -325,30 +402,31 @@ export default function FeedCard(props: {
             {artistName}
           </a>
         </p>
-        {/* Two rows of tag chips, then horizontal scrolling (column
-            flow — columns fill down 2 rows and stack to the right).
-            Chips carry the Pixiv translation under the name when one
-            exists. */}
+        {/* Tag chips: natural row-major wrap (fill row 1 fully, stopping
+            before the gear, then row 2). When tags need more than two
+            rows the strip switches to two interleaved lines that scroll
+            horizontally. Chips carry the Pixiv translation under the
+            name when one exists. */}
         <Show when={tags().length > 0}>
-          <div class="card-tag-row no-scrollbar fade-edges">
-            <For each={normalizeTagPairs(props.illust)}>
-              {(tag) => (
-                <button
-                  type="button"
-                  class="card-tag-chip"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    props.onTagOpen?.(tag.name);
-                  }}
-                >
-                  <span class="card-tag-name">#{tag.name}</span>
-                  <Show when={tag.translated}>
-                    <span class="card-tag-translation">{tag.translated}</span>
-                  </Show>
-                </button>
-              )}
-            </For>
-          </div>
+          <Show
+            when={tagLines() === null}
+            fallback={
+              <div class="card-tag-scroller no-scrollbar fade-edges">
+                <div class="card-tag-line">
+                  <For each={tagLines()!.top}>{(tag) => renderChip(tag)}</For>
+                </div>
+                <div class="card-tag-line">
+                  <For each={tagLines()!.bottom}>{(tag) => renderChip(tag)}</For>
+                </div>
+              </div>
+            }
+          >
+            <div class="card-tag-row no-scrollbar fade-edges" ref={tagRowRef}>
+              <For each={normalizeTagPairs(props.illust)}>
+                {(tag) => renderChip(tag)}
+              </For>
+            </div>
+          </Show>
         </Show>
         {/* Web feeds carry 0/0 stats — hide the row entirely then */}
         <Show when={props.illust.total_bookmarks > 0 || props.illust.total_view > 0}>

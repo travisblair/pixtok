@@ -170,21 +170,34 @@
   opacity: 0.9;
 }
 
-/* Card tag chips: column flow fills down TWO rows, then overflows into
-   new columns to the right — horizontal scrolling past row 2 (the
-   no-scrollbar + fade-edges utilities on the element). The right margin
-   reserves the heart/gear button stack (right:16 + ~39px glyph) so
-   chips end before the gear. Chips are fixed-height so 2-row columns
-   pack evenly; the Pixiv translation sits in 8px under the name. */
+/* Card tag chips: natural row-major wrap — row 1 fills (stopping before
+   the gear, via the right margin), then row 2. When the tags need MORE
+   than two rows, the strip switches to .card-tag-scroller: two
+   interleaved single lines (rows 1,3,5→top; 2,4,6→bottom) scrolling
+   horizontally. Chips are fixed-height so both modes pack evenly; the
+   Pixiv translation sits in 8px under the name. */
 .card-tag-row {
   display: flex;
-  flex-flow: column wrap;
-  align-content: flex-start;
+  flex-wrap: wrap;
   gap: 4px;
   max-height: 62px; /* 2 × 29px chip + 4px gap */
+  overflow: hidden;
+  margin: 0 48px 8px 0;
+}
+.card-tag-scroller {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 62px;
   overflow-x: auto;
   overflow-y: hidden;
   margin: 0 48px 8px 0;
+}
+.card-tag-line {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  flex-shrink: 0;
 }
 .card-tag-chip {
   flex-shrink: 0;
