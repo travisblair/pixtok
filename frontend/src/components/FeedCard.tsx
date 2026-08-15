@@ -7,7 +7,12 @@ import {
 } from "solid-js";
 import type { PixivIllust } from "../types";
 import { api } from "../api";
-import { shouldLoadPage, computeLoadDelay, sliderWindowSize } from "../helpers";
+import {
+  shouldLoadPage,
+  computeLoadDelay,
+  sliderWindowSize,
+  normalizeTagPairs,
+} from "../helpers";
 import { getLikeState, imageSize } from "../store";
 import UgoiraPlayer from "./UgoiraPlayer";
 
@@ -320,12 +325,13 @@ export default function FeedCard(props: {
             {artistName}
           </a>
         </p>
-        {/* One scrollable row of tag chips — no-scrollbar + fade-edges
-            like the search-page pills; the edge fades melt the chips
-            before they reach the gear/heart buttons. */}
+        {/* Two rows of tag chips, then horizontal scrolling (column
+            flow — columns fill down 2 rows and stack to the right).
+            Chips carry the Pixiv translation under the name when one
+            exists. */}
         <Show when={tags().length > 0}>
           <div class="card-tag-row no-scrollbar fade-edges">
-            <For each={tags()}>
+            <For each={normalizeTagPairs(props.illust)}>
               {(tag) => (
                 <button
                   type="button"
@@ -335,7 +341,10 @@ export default function FeedCard(props: {
                     props.onTagOpen?.(tag.name);
                   }}
                 >
-                  #{tag.name}
+                  <span class="card-tag-name">#{tag.name}</span>
+                  <Show when={tag.translated}>
+                    <span class="card-tag-translation">{tag.translated}</span>
+                  </Show>
                 </button>
               )}
             </For>

@@ -575,6 +575,61 @@ func TestTransformUgoiraTypeSurvives(t *testing.T) {
 	})
 }
 
+// Regression: search + top-firehose responses carry a response-level
+// tagTranslation map; the transforms must fill TranslatedName on each
+// work's tags so card chips can render translations like the popup.
+func TestTransformTagTranslationsApplied(t *testing.T) {
+	t.Run("search artworks", func(t *testing.T) {
+		raw := `{"error":false,"body":{
+			"illustManga":{"data":[
+				{"id":"111","title":"T1","illustType":0,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/x/111_p0_square1200.jpg","userId":"9","userName":"Alice","tags":["水着","オリジナル"]}
+			],"total":1,"lastPage":1},
+			"popular":{"recent":[{"id":"222","title":"P1","illustType":0,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/x/222_p0_square1200.jpg","userId":"8","userName":"Bob","tags":["水着"]}],"permanent":[]},
+			"tagTranslation":{"水着":{"en":"Swimsuit"}},
+			"relatedTags":[]
+		}}`
+		resp, err := transformSearchArtworks([]byte(raw))
+		if err != nil {
+			t.Fatalf("transformSearchArtworks: %v", err)
+		}
+		if len(resp.Illusts) != 1 || len(resp.Illusts[0].Tags) != 2 {
+			t.Fatalf("illusts/tags wrong: %+v", resp.Illusts)
+		}
+		if got := resp.Illusts[0].Tags[0].TranslatedName; got != "Swimsuit" {
+			t.Errorf("tag 水着 TranslatedName = %q, want Swimsuit", got)
+		}
+		if got := resp.Illusts[0].Tags[1].TranslatedName; got != "" {
+			t.Errorf("unmapped tag got translation %q, want empty", got)
+		}
+		if len(resp.Popular) != 1 || resp.Popular[0].Tags[0].TranslatedName != "Swimsuit" {
+			t.Errorf("popular block translation missing: %+v", resp.Popular)
+		}
+	})
+
+	t.Run("top firehose", func(t *testing.T) {
+		raw := `{"error":false,"body":{"thumbnails":{"illust":[
+			{"id":"111","title":"T1","illustType":0,"pageCount":1,"userId":"9","userName":"Alice","profileImageUrl":"https://i.pximg.net/p1","tags":["水着"],"urls":{"large":"https://i.pximg.net/l1"}}
+		]},"tagTranslation":{"水着":{"en":"Swimsuit"}}}}`
+		out, err := transformTopIllust([]byte(raw))
+		if err != nil {
+			t.Fatalf("transformTopIllust: %v", err)
+		}
+		var resp struct {
+			Illusts []struct {
+				Tags []struct {
+					TranslatedName string `json:"translated_name"`
+				} `json:"tags"`
+			} `json:"illusts"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(resp.Illusts) != 1 || resp.Illusts[0].Tags[0].TranslatedName != "Swimsuit" {
+			t.Errorf("firehose translation missing: %+v", resp.Illusts)
+		}
+	})
+}
+
 func TestTransformStreetNoNext(t *testing.T) {
 	raw := `{"error":false,"body":{"contents":[],"nextParams":null}}`
 	out, err := transformStreet([]byte(raw))

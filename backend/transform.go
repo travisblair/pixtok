@@ -65,6 +65,29 @@ type feedResponse struct {
 	NextURL *string  `json:"next_url"`
 }
 
+// tagTranslationMap is pixiv's response-level {tagName: {en}} map carried
+// by search and top-firehose responses. Work items themselves carry only
+// raw tag strings — the map is the only translation source for them.
+type tagTranslationMap map[string]struct {
+	En string `json:"en"`
+}
+
+// applyTagTranslations fills TranslatedName on works' tags from a
+// response-level tagTranslation map. Works without a mapping keep their
+// raw name (the FE chip just renders no translation line).
+func applyTagTranslations(works []illust, tr tagTranslationMap) {
+	if len(tr) == 0 {
+		return
+	}
+	for i := range works {
+		for j := range works[i].Tags {
+			if t, ok := tr[works[i].Tags[j].Name]; ok && t.En != "" {
+				works[i].Tags[j].TranslatedName = t.En
+			}
+		}
+	}
+}
+
 // transformTopIllust converts Pixiv's web AJAX /ajax/top/illust response
 // (the Illustrations tab firehose) to the standard FeedResponse format.
 func transformTopIllust(raw []byte) ([]byte, error) {
@@ -88,6 +111,7 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 					CreateDate  string            `json:"createDate"`
 				} `json:"illust"`
 			} `json:"thumbnails"`
+			TagTranslation tagTranslationMap `json:"tagTranslation"`
 		} `json:"body"`
 	}
 
@@ -139,6 +163,8 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 
 		out.Illusts = append(out.Illusts, ill)
 	}
+
+	applyTagTranslations(out.Illusts, src.Body.TagTranslation)
 
 	return json.Marshal(out)
 }
@@ -503,10 +529,8 @@ func transformSearchArtworks(raw []byte) (searchArtworksResponse, error) {
 				Recent    []webIllust `json:"recent"`
 				Permanent []webIllust `json:"permanent"`
 			} `json:"popular"`
-			RelatedTags    []string `json:"relatedTags"`
-			TagTranslation map[string]struct {
-				En string `json:"en"`
-			} `json:"tagTranslation"`
+			RelatedTags    []string          `json:"relatedTags"`
+			TagTranslation tagTranslationMap `json:"tagTranslation"`
 		} `json:"body"`
 	}
 
@@ -538,11 +562,16 @@ func transformSearchArtworks(raw []byte) (searchArtworksResponse, error) {
 		related = append(related, rt)
 	}
 
+	illusts := mapWebIllusts(list.Data, 60)
+	pop := mapWebIllusts(popular, 20)
+	applyTagTranslations(illusts, src.Body.TagTranslation)
+	applyTagTranslations(pop, src.Body.TagTranslation)
+
 	return searchArtworksResponse{
-		Illusts:     mapWebIllusts(list.Data, 60),
+		Illusts:     illusts,
 		Total:       list.Total,
 		LastPage:    list.LastPage,
-		Popular:     mapWebIllusts(popular, 20),
+		Popular:     pop,
 		RelatedTags: related,
 	}, nil
 }

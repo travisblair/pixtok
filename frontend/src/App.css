@@ -170,30 +170,50 @@
   opacity: 0.9;
 }
 
-/* One scrollable row of tag chips on the card (no-scrollbar + fade-edges
-   utilities on the element, like the search-page pills). The right
-   margin reserves the heart/gear button stack (right:16 + ~39px glyph)
-   so chips end before the gear instead of sliding under it. */
+/* Card tag chips: column flow fills down TWO rows, then overflows into
+   new columns to the right — horizontal scrolling past row 2 (the
+   no-scrollbar + fade-edges utilities on the element). The right margin
+   reserves the heart/gear button stack (right:16 + ~39px glyph) so
+   chips end before the gear. Chips are fixed-height so 2-row columns
+   pack evenly; the Pixiv translation sits in 8px under the name. */
 .card-tag-row {
   display: flex;
-  flex-wrap: nowrap;
+  flex-flow: column wrap;
+  align-content: flex-start;
   gap: 4px;
+  max-height: 62px; /* 2 × 29px chip + 4px gap */
   overflow-x: auto;
+  overflow-y: hidden;
   margin: 0 48px 8px 0;
-  min-height: 18px;
 }
 .card-tag-chip {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  min-height: 29px;
   font-size: 10px;
   font-weight: 400;
-  line-height: 1;
   color: #eee;
   background: rgba(255, 255, 255, 0.14);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
-  padding: 4px 7px;
+  padding: 3px 7px;
   margin: 0;
   cursor: pointer;
+}
+.card-tag-name {
+  line-height: 1.2;
+}
+.card-tag-translation {
+  font-size: 8px;
+  line-height: 1.2;
+  opacity: 0.75;
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-artist a {
