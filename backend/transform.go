@@ -46,6 +46,19 @@ type illustTag struct {
 	IsEmphasized   bool   `json:"is_emphasized"`
 }
 
+// illustTypeString maps pixiv's web illustType discriminator
+// (0=illust, 1=manga, 2=ugoira) to the FE type string.
+func illustTypeString(it int) string {
+	switch it {
+	case 2:
+		return "ugoira"
+	case 1:
+		return "manga"
+	default:
+		return "illust"
+	}
+}
+
 type feedResponse struct {
 	Illusts []illust `json:"illusts"`
 	NextURL *string  `json:"next_url"`
@@ -60,6 +73,7 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 				Illust []struct {
 					ID           string `json:"id"`
 					Title        string `json:"title"`
+					IllustType   int    `json:"illustType"`
 					UserID       string `json:"userId"`
 					UserName     string `json:"userName"`
 					PageCount    int    `json:"pageCount"`
@@ -89,7 +103,7 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 		ill := illust{
 			ID:             srcIll.ID,
 			Title:          srcIll.Title,
-			Type:           "illust",
+			Type:           illustTypeString(srcIll.IllustType),
 			PageCount:      srcIll.PageCount,
 			TotalBookmarks: 0,
 			TotalView:      0,
@@ -145,6 +159,7 @@ func transformStreet(raw []byte) ([]byte, error) {
 				Kind       string `json:"kind"`
 				Thumbnails []struct {
 					Type        string `json:"type"`
+					IllustType  int    `json:"illustType"`
 					PageCount   int    `json:"pageCount"`
 					ID          string `json:"id"`
 					Title       string `json:"title"`
@@ -197,10 +212,18 @@ func transformStreet(raw []byte) ([]byte, error) {
 		}
 		t := block.Thumbnails[0]
 
+		// Street thumbnails carry a `type` string (illust/manga — ugoira
+		// works are labelled illust there) and, when present, the
+		// authoritative illustType discriminator. Prefer illustType.
+		typ := t.Type
+		if t.IllustType != 0 {
+			typ = illustTypeString(t.IllustType)
+		}
+
 		ill := illust{
 			ID:             t.ID,
 			Title:          t.Title,
-			Type:           t.Type,
+			Type:           typ,
 			PageCount:      t.PageCount,
 			CreateDate:     t.CreateDate,
 			Caption:        t.Description,
@@ -323,13 +346,19 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 		if len(out) >= maxWorks {
 			break
 		}
+		// Web AJAX works carry NO type string — illustType is the
+		// authoritative discriminator (0=illust, 1=manga, 2=ugoira).
+		// The old fallback only mapped 1→manga and dropped 2 into
+		// "illust", so every ugoira work in search/newest/recs
+		// rendered as a static card and the ▶ player never mounted.
 		typ := s.Type
-		if typ == "" {
-			if s.IllustType == 1 {
-				typ = "manga"
-			} else {
-				typ = "illust"
-			}
+		switch {
+		case s.IllustType == 2:
+			typ = "ugoira"
+		case s.IllustType == 1:
+			typ = "manga"
+		case typ == "":
+			typ = "illust"
 		}
 
 		large, ok := deriveLarge(s.URL)

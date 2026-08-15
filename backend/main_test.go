@@ -499,6 +499,82 @@ func TestTransformStreet(t *testing.T) {
 	}
 }
 
+// Regression: web AJAX works carry illustType (0=illust, 1=manga,
+// 2=ugoira) and usually NO type string. The old mapping dropped
+// illustType 2 into "illust", so live ugoira works never mounted the
+// FE ▶ player — a live type=ugoira search returned 60 real ugoira
+// works, every one typed "illust".
+func TestTransformUgoiraTypeSurvives(t *testing.T) {
+	t.Run("newest via mapWebIllusts", func(t *testing.T) {
+		raw := `{"error":false,"message":"","body":{"illusts":[
+			{"id":"111","title":"U1","illustType":2,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/2026/01/01/00/00/00/111_p0_square1200.jpg","userId":"9","userName":"Alice","profileImageUrl":"https://i.pximg.net/p1"},
+			{"id":"222","title":"M1","illustType":1,"pageCount":2,"url":"https://i.pximg.net/c/360x360_70/img-master/img/2026/01/01/00/00/00/222_p0_square1200.jpg","userId":"8","userName":"Bob","profileImageUrl":"https://i.pximg.net/p2"},
+			{"id":"333","title":"I1","illustType":0,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/2026/01/01/00/00/00/333_p0_square1200.jpg","userId":"7","userName":"Cid","profileImageUrl":"https://i.pximg.net/p3"}
+		],"lastId":"111"}}`
+		out, err := transformNewest([]byte(raw), false)
+		if err != nil {
+			t.Fatalf("transformNewest: %v", err)
+		}
+		var resp struct {
+			Illusts []struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			} `json:"illusts"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		want := map[string]string{"111": "ugoira", "222": "manga", "333": "illust"}
+		for _, w := range resp.Illusts {
+			if want[w.ID] != w.Type {
+				t.Errorf("work %s type = %q, want %q", w.ID, w.Type, want[w.ID])
+			}
+		}
+	})
+
+	t.Run("top illust firehose", func(t *testing.T) {
+		raw := `{"error":false,"body":{"thumbnails":{"illust":[
+			{"id":"111","title":"U1","illustType":2,"pageCount":1,"userId":"9","userName":"Alice","profileImageUrl":"https://i.pximg.net/p1","urls":{"large":"https://i.pximg.net/l1"}}
+		]}}}`
+		out, err := transformTopIllust([]byte(raw))
+		if err != nil {
+			t.Fatalf("transformTopIllust: %v", err)
+		}
+		var resp struct {
+			Illusts []struct {
+				Type string `json:"type"`
+			} `json:"illusts"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(resp.Illusts) != 1 || resp.Illusts[0].Type != "ugoira" {
+			t.Fatalf("firehose ugoira work mapped to %+v, want type ugoira", resp.Illusts)
+		}
+	})
+
+	t.Run("street", func(t *testing.T) {
+		raw := `{"error":false,"body":{"contents":[
+			{"kind":"illust","thumbnails":[{"type":"illust","illustType":2,"pageCount":1,"id":"111","title":"U1","userId":"9","userName":"Alice","profileImageUrl":"https://i.pximg.net/p1","pages":[{"urls":{"1200x1200_standard":"https://i.pximg.net/l1"}}]}]}
+		],"nextParams":null}}`
+		out, err := transformStreet([]byte(raw))
+		if err != nil {
+			t.Fatalf("transformStreet: %v", err)
+		}
+		var resp struct {
+			Illusts []struct {
+				Type string `json:"type"`
+			} `json:"illusts"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(resp.Illusts) != 1 || resp.Illusts[0].Type != "ugoira" {
+			t.Fatalf("street ugoira work mapped to %+v, want type ugoira", resp.Illusts)
+		}
+	})
+}
+
 func TestTransformStreetNoNext(t *testing.T) {
 	raw := `{"error":false,"body":{"contents":[],"nextParams":null}}`
 	out, err := transformStreet([]byte(raw))
