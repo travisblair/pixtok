@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/travisblair/pixtok/pixiv"
@@ -138,6 +142,12 @@ func envFileCandidates() []string {
 
 // loadEnvKey reads KEY=value from the environment first, then from the
 // .env candidate paths.
+//
+// Precedence note (reviewer finding): the ENVIRONMENT wins. In-app login
+// persists fresh tokens to .env, but if the process environment already
+// carries PIXIV_REFRESH_TOKEN, that stale value continues to win on the
+// next boot. When running with env-var credentials, don't rely on .env
+// (or stop persisting to it).
 func loadEnvKey(name string) string {
 	if v := os.Getenv(name); v != "" {
 		return v
@@ -192,6 +202,20 @@ func logRequests(next http.Handler) http.Handler {
 	})
 }
 
+// securityHeaders sets a minimal browser-hardening policy on every
+// response (reviewer finding: the backend sent none). nosniff matters
+// most around proxied image/auth content.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "geolocation=(), camera=(), microphone=()")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	client, err := pixiv.NewClient()
 	if err != nil {
@@ -222,7 +246,12 @@ func main() {
 	// App-owned password gate: the Funnel is public — everything behind
 	// /api (feeds, images, the proxied login, prefs) locks behind a
 	// password from .env. Disabled when no password is configured.
-	g := newGate(loadEnvKey("PIXTOK_GATE_PASSWORD_HASH"))
+	// Plaintext dev passwords need the explicit opt-in flag (fail-closed).
+	g, err := newGate(loadEnvKey("PIXTOK_GATE_PASSWORD_HASH"),
+		loadEnvKey("PIXTOK_GATE_ALLOW_PLAINTEXT_DEV_ONLY") == "true")
+	if err != nil {
+		log.Fatalf("gate config: %v", err)
+	}
 	if g.enabled {
 		registerGateRoutes(mux, g)
 	} else {
@@ -230,16 +259,54 @@ func main() {
 		// running without it deserves a loud boot warning.
 		log.Printf("WARNING: PIXTOK_GATE_PASSWORD_HASH not set — password gate DISABLED")
 	}
+
+	// The .env file holds permanent pixiv credentials — warn if its
+	// permissions are loose (reviewer finding). The atomic rewrite
+	// writes new files 0600, but a pre-existing file may not be.
+	for _, p := range envFileCandidates() {
+		if fi, err := os.Stat(p); err == nil {
+			if fi.Mode().Perm()&0o077 != 0 {
+				log.Printf("WARNING: %s is group/world-readable (mode %04o) — chmod 600 it, it holds pixiv credentials", p, fi.Mode().Perm())
+			}
+			break // same precedence as loadEnvKey — first existing file wins
+		}
+	}
+
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      logRequests(apiKeyGate(apiKey, g.middleware(mux))),
+		Handler:      securityHeaders(logRequests(apiKeyGate(apiKey, g.middleware(mux)))),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Graceful stop on SIGINT/SIGTERM (reviewer finding): drain
+	// in-flight requests and close the prefs DB instead of dying
+	// mid-request.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
 	log.Printf("pixtok backend listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("server: %v", err)
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server: %v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("shutdown signal received — draining…")
+		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+		if prefs != nil {
+			if err := prefs.Close(); err != nil {
+				log.Printf("close prefs db: %v", err)
+			}
+		}
+		log.Printf("shutdown complete")
 	}
 }

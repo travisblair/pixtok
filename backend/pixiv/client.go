@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -839,7 +840,7 @@ func (c *Client) GetRelated(illustID string) ([]byte, error) {
 // GetUserIllusts returns the artist's works (app API, paginated).
 func (c *Client) GetUserIllusts(userID string) ([]byte, error) {
 	if !ValidID(userID) {
-		return nil, fmt.Errorf("invalid user id")
+		return nil, fmt.Errorf("%w: invalid user id", ErrInvalidParam)
 	}
 	u := fmt.Sprintf("%s/v1/user/illusts?user_id=%s&filter=for_ios", baseURL, userID)
 	return c.doGet(u)
@@ -1117,6 +1118,19 @@ func (c *Client) ProxyImage(imgURL string) ([]byte, string, error) {
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "image/jpeg"
+	}
+	// Content-type allowlist (reviewer finding): the upstream header is
+	// echoed to the browser — trust it only for types this proxy exists
+	// to serve. SVG especially must stay rejected or the image proxy
+	// becomes a script-capable content proxy. application/zip covers
+	// ugoira frame archives.
+	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
+		contentType = mt
+	}
+	switch contentType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp", "image/avif", "application/zip":
+	default:
+		return nil, "", fmt.Errorf("image proxy returned disallowed content type %q", contentType)
 	}
 
 	return body, contentType, nil

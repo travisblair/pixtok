@@ -328,9 +328,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 				ids = append(ids, n)
 			}
 		}
-		out, _ := json.Marshal(map[string]any{"ids": ids})
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(out)
+		writeJSON(w, map[string]any{"ids": ids})
 	})
 
 	// ── Search (the site's search pages: tag/free-text artworks + users) ──
@@ -425,9 +423,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			}
 			resp.NextURL = &u
 		}
-		out, _ := json.Marshal(resp)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(out)
+		writeJSON(w, resp)
 	})
 
 	mux.HandleFunc("GET /api/search/users", func(w http.ResponseWriter, r *http.Request) {
@@ -469,9 +465,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 				url.QueryEscape(nick), sMode, p+1)
 			resp.NextURL = &u
 		}
-		out, _ := json.Marshal(resp)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(out)
+		writeJSON(w, resp)
 	})
 
 	mux.HandleFunc("/api/illust/", func(w http.ResponseWriter, r *http.Request) {
@@ -683,9 +677,7 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
 				return
 			}
-			out, _ := json.Marshal(map[string]any{"tags": tags})
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(out)
+			writeJSON(w, map[string]any{"tags": tags})
 
 		case http.MethodPut:
 			var body struct {
@@ -714,9 +706,7 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
 				return
 			}
-			out, _ := json.Marshal(map[string]any{"tags": clean})
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(out)
+			writeJSON(w, map[string]any{"tags": clean})
 
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -732,9 +722,7 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
 				return
 			}
-			out, _ := json.Marshal(map[string]any{"value": v})
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(out)
+			writeJSON(w, map[string]any{"value": v})
 
 		case http.MethodPut:
 			var body struct {
@@ -753,9 +741,7 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
 				return
 			}
-			out, _ := json.Marshal(map[string]any{"value": body.Value})
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(out)
+			writeJSON(w, map[string]any{"value": body.Value})
 
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

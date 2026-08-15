@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -73,20 +74,48 @@ func rewriteCookie(setCookie string) string {
 
 // rewriteLocation maps an upstream redirect back onto our proxy paths so
 // the browser never leaves the app origin during the flow.
+//
+// Security invariant (reviewer finding): matching must be EXACT — parsed
+// scheme + hostname + port equality. Prefix matching would also rewrite
+// https://accounts.pixiv.net.evil.example/... (suffix-domain confusion).
+// Only Pixiv-owned hosts may ever be mapped onto our proxy paths.
 func rewriteLocation(loc string) string {
+	u, err := url.Parse(loc)
+	if err != nil || u.Hostname() == "" {
+		return loc // relative or malformed — leave for the browser to resolve
+	}
+	// Scheme-relative URLs (//host/...) parse with an empty scheme —
+	// resolved against the target's scheme below. Anything else must
+	// match the target's scheme exactly.
 	for kind, target := range authProxyTargets {
-		prefix := "/api/auth/px/" + kind
-		if strings.HasPrefix(loc, target) {
-			return prefix + strings.TrimPrefix(loc, target)
+		t, err := url.Parse(target)
+		if err != nil {
+			continue
 		}
-		// scheme-relative form
-		if strings.HasPrefix(loc, "//") {
-			host := strings.SplitN(strings.TrimPrefix(loc, "//"), "/", 2)[0]
-			if host == strings.TrimPrefix(target, "https://") {
-				rest := strings.TrimPrefix(loc, "//"+host)
-				return prefix + rest
-			}
+		if u.Scheme == "" {
+			u.Scheme = t.Scheme
 		}
+		if u.Scheme != t.Scheme || u.Hostname() != t.Hostname() {
+			continue
+		}
+		// Port: empty (scheme default) or the target's own explicit
+		// port. This rejects https://accounts.pixiv.net:8443/... while
+		// still allowing test fakes on random local ports.
+		defaultPort := "443"
+		if u.Scheme == "http" {
+			defaultPort = "80"
+		}
+		if p := u.Port(); p != "" && p != defaultPort && p != t.Port() {
+			continue
+		}
+		rest := u.EscapedPath()
+		if u.RawQuery != "" {
+			rest += "?" + u.RawQuery
+		}
+		if u.Fragment != "" {
+			rest += "#" + u.Fragment
+		}
+		return "/api/auth/px/" + kind + rest
 	}
 	return loc
 }
@@ -103,12 +132,20 @@ func rewriteBodyURLs(body []byte) []byte {
 		// protocol-relative variants). Missing the escaped form leaves
 		// returnTo absolute → the browser hops straight to real pixiv
 		// and the flow dies with a login-page reload.
-		escaped := strings.ReplaceAll(target, "/", `\/`)
-		escapedProtoRel := strings.ReplaceAll("//"+strings.TrimPrefix(target, "https://"), "/", `\/`)
-		body = bytes.ReplaceAll(body, []byte(target), prefix)
-		body = bytes.ReplaceAll(body, []byte("//"+strings.TrimPrefix(target, "https://")), prefix)
-		body = bytes.ReplaceAll(body, []byte(escaped), prefix)
-		body = bytes.ReplaceAll(body, []byte(escapedProtoRel), prefix)
+		//
+		// Security invariant (reviewer finding): a replacement only
+		// counts when the byte AFTER the hostname is a URL boundary
+		// (" / ? # ...) — never '.', or suffix-domain lookalikes like
+		// https://accounts.pixiv.net.evil.example would also be
+		// rewritten onto our proxy path.
+		for _, form := range []string{
+			target, // https://host
+			"//" + strings.TrimPrefix(target, "https://"), // //host
+			strings.ReplaceAll(target, "/", `\/`),         // https:\/\/host
+			strings.ReplaceAll("//"+strings.TrimPrefix(target, "https://"), "/", `\/`),
+		} {
+			body = replaceURLBoundary(body, []byte(form), prefix)
+		}
 		// NOTE: percent-encoded forms are deliberately NOT rewritten.
 		// Pixiv nests URLs inside query strings (post-redirect's
 		// return_to) and VALIDATES the host server-side — a rewritten
@@ -118,6 +155,42 @@ func rewriteBodyURLs(body []byte) []byte {
 		// maps back onto the proxy.
 	}
 	return body
+}
+
+// replaceURLBoundary replaces needle with repl wherever the byte AFTER
+// the match is a URL-boundary byte (or the match ends the body).
+func replaceURLBoundary(body, needle, repl []byte) []byte {
+	if len(needle) == 0 {
+		return body
+	}
+	var out []byte
+	rest := body
+	for {
+		i := bytes.Index(rest, needle)
+		if i < 0 {
+			out = append(out, rest...)
+			return out
+		}
+		end := i + len(needle)
+		if end < len(rest) && !isURLBoundary(rest[end]) {
+			// Not a boundary — e.g. "accounts.pixiv.net.evil" — keep the
+			// text verbatim and resume scanning after it.
+			out = append(out, rest[:end]...)
+			rest = rest[end:]
+			continue
+		}
+		out = append(out, rest[:i]...)
+		out = append(out, repl...)
+		rest = rest[end:]
+	}
+}
+
+func isURLBoundary(b byte) bool {
+	switch b {
+	case '/', '?', '#', '"', '\'', '\\', ',', '}', ']', ' ', '	', '\n', '\r', '&', '=':
+		return true
+	}
+	return false
 }
 
 // registerAuthProxy wires the proxied-login routes. /api/auth/px/* is
@@ -240,6 +313,10 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 				w.Header().Add(k, v)
 			}
 		}
+		// Every proxy response is transient login-flow state (pages,
+		// redirects, tokens). Never let it be cached by the browser or
+		// an intermediary (reviewer finding).
+		w.Header().Set("Cache-Control", "no-store")
 
 		// JSON bodies: rewrite absolute pixiv URLs onto our proxy paths.
 		// Also rewrite HTML on the post-redirect bouncer: if that page

@@ -12,9 +12,15 @@ function normalizeIllustIds(items: unknown[] | undefined) {
   if (!items) return;
   for (const item of items) {
     const ill = item as { id?: string | number; user?: { id?: string | number } };
-    if (ill && typeof ill.id === "string") ill.id = Number(ill.id);
+    if (ill && typeof ill.id === "string") {
+      const n = Number(ill.id);
+      // Reviewer finding: never store a lossy number. Ids beyond
+      // Number.MAX_SAFE_INTEGER keep their exact string form.
+      if (Number.isSafeInteger(n)) ill.id = n;
+    }
     if (ill && ill.user && typeof ill.user.id === "string") {
-      ill.user.id = Number(ill.user.id);
+      const n = Number(ill.user.id);
+      if (Number.isSafeInteger(n)) ill.user.id = n;
     }
   }
 }
@@ -31,7 +37,10 @@ function normalizeIds(data: unknown): unknown {
   if (Array.isArray(feed.users)) {
     for (const u of feed.users) {
       const user = u as { id?: string | number; previews?: unknown[] };
-      if (user && typeof user.id === "string") user.id = Number(user.id);
+      if (user && typeof user.id === "string") {
+        const n = Number(user.id);
+        if (Number.isSafeInteger(n)) user.id = n;
+      }
       normalizeIllustIds(user.previews);
     }
   }

@@ -30,6 +30,30 @@ describe("api.request", () => {
   });
 });
 
+describe("api.normalizeIds", () => {
+  it("converts string ids to numbers", async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      body: '{"illusts":[{"id":"123","user":{"id":"45"}}]}',
+    });
+    const data = await api.getTop("all");
+    expect((data as { illusts: Array<{ id: number; user: { id: number } }> }).illusts[0].id).toBe(123);
+    expect((data as { illusts: Array<{ id: number; user: { id: number } }> }).illusts[0].user.id).toBe(45);
+  });
+
+  it("leaves unsafe integers as exact strings (no lossy Number)", async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      // 9007199254740993 = 2^53 + 1 — Number() would silently round it.
+      body: '{"illusts":[{"id":"9007199254740993","user":{"id":"1"}}]}',
+    });
+    const data = await api.getTop("all");
+    expect((data as { illusts: Array<{ id: unknown }> }).illusts[0].id).toBe("9007199254740993");
+  });
+});
+
 describe("api.getTop", () => {
   it("sends the mode as a query param", async () => {
     const fn = mockFetch({ ok: true, status: 200, body: '{"illusts":[]}' });

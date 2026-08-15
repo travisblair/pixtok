@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -41,28 +42,35 @@ type gate struct {
 	slots        chan struct{}
 }
 
-func newGate(passwordHash string) *gate {
+// newGate builds the gate from the configured password. Fail-closed
+// (reviewer finding): a non-bcrypt value in PIXTOK_GATE_PASSWORD_HASH is
+// only accepted as a plaintext dev password when the explicit
+// PIXTOK_GATE_ALLOW_PLAINTEXT_DEV_ONLY=true flag is set — otherwise boot
+// fails loudly. Security-sensitive configuration must never silently
+// degrade.
+func newGate(passwordHash string, allowPlaintext bool) (*gate, error) {
 	g := &gate{slots: make(chan struct{}, 10)}
 	if passwordHash == "" {
-		return g
+		return g, nil // no password configured — gate disabled
 	}
 	if _, err := bcrypt.Cost([]byte(passwordHash)); err != nil {
-		// Not a valid bcrypt hash — treat as a plaintext password for
-		// dev: hash it now (in-memory only; the cookie won't survive a
-		// restart, which is fine for local dev).
+		if !allowPlaintext {
+			return nil, fmt.Errorf("PIXTOK_GATE_PASSWORD_HASH is not a valid bcrypt hash — set a real hash, or set PIXTOK_GATE_ALLOW_PLAINTEXT_DEV_ONLY=true for local dev")
+		}
+		// Dev convenience: hash the plaintext now (in-memory only; the
+		// cookie won't survive a restart, which is fine for local dev).
 		h, err := bcrypt.GenerateFromPassword([]byte(passwordHash), bcrypt.DefaultCost)
 		if err != nil {
-			log.Printf("WARNING: gate password unhashable — gate DISABLED")
-			return g
+			return nil, fmt.Errorf("hash gate password: %w", err)
 		}
 		g.hash = h
 		g.enabled = true
-		log.Printf("gate enabled (plaintext password hashed at boot — set a bcrypt hash in .env for persistent sessions)")
-		return g
+		log.Printf("gate enabled (plaintext password hashed at boot — dev-only; set a bcrypt hash in .env for persistent sessions)")
+		return g, nil
 	}
 	g.hash = []byte(passwordHash)
 	g.enabled = true
-	return g
+	return g, nil
 }
 
 // validToken computes the expected cookie value for the current hash.
@@ -208,6 +216,9 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 		}
 		g.recordSuccess()
 
+		// The unlock response carries the auth cookie — never cache it
+		// (reviewer finding).
+		w.Header().Set("Cache-Control", "no-store")
 		http.SetCookie(w, &http.Cookie{
 			Name:     gateCookie,
 			Value:    g.validToken(),

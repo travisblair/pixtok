@@ -28,6 +28,69 @@ func newTestClient() (*Client, *recTransport) {
 	return &Client{phpSessID: "test", http: &http.Client{Transport: rt}}, rt
 }
 
+// contentTypeTransport answers with a fixed Content-Type — lets
+// ProxyImage tests pin the content-type allowlist without a network.
+type contentTypeTransport struct {
+	ct string // empty = no Content-Type header at all
+}
+
+func (r *contentTypeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	h := http.Header{}
+	if r.ct != "" {
+		h.Set("Content-Type", r.ct)
+	}
+	return &http.Response{
+		StatusCode: 200,
+		Header:     h,
+		Body:       http.NoBody,
+		Request:    req,
+	}, nil
+}
+
+func TestProxyImageContentTypeAllowlist(t *testing.T) {
+	cases := []struct {
+		name string
+		ct   string
+		want string // expected normalized content type; empty = expect error
+	}{
+		{"jpeg", "image/jpeg", "image/jpeg"},
+		{"jpeg with charset", "image/jpeg; charset=utf-8", "image/jpeg"},
+		{"png", "image/png", "image/png"},
+		{"gif", "image/gif", "image/gif"},
+		{"webp", "image/webp", "image/webp"},
+		{"avif", "image/avif", "image/avif"},
+		{"zip (ugoira frames)", "application/zip", "application/zip"},
+		{"missing header defaults to jpeg", "", "image/jpeg"},
+		{"svg rejected", "image/svg+xml", ""},
+		{"html rejected", "text/html", ""},
+		{"octet-stream rejected", "application/octet-stream", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{
+				phpSessID: "test",
+				http:      &http.Client{Transport: &contentTypeTransport{ct: tc.ct}},
+			}
+			_, got, err := c.ProxyImage("https://i.pximg.net/img-master/img/2024/01/01/00/00/00/1.jpg")
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("content type %q accepted, want rejection", tc.ct)
+				}
+				if !strings.Contains(err.Error(), "disallowed content type") {
+					t.Fatalf("error = %v, want disallowed-content-type error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("content type %q rejected: %v", tc.ct, err)
+			}
+			if got != tc.want {
+				t.Fatalf("content type = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSearchArtworksBuildsVerifiedURLs(t *testing.T) {
 	cases := []struct {
 		name string

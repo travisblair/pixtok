@@ -1,5 +1,5 @@
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
-import { unzipSync } from "fflate";
+import { unzip, type Unzipped } from "fflate";
 import { api } from "../api";
 
 /**
@@ -13,8 +13,18 @@ import { api } from "../api";
  * tapping again pauses (icon returns), tapping a third time resumes.
  * Scroll-away tears everything down (ugoira zips run several MB — never
  * let a scrolled-past card keep 100+ decoded frames alive).
+ *
+ * Performance notes (reviewer findings):
+ * - Decompression is the ASYNC fflate unzip() — the sync form froze the
+ *   main thread for multi-MB archives (visible jank on tap).
+ * - Frame canvases are DOWNSCALED to at most MAX_FRAME_SIDE device px.
+ *   Native-res frames (1200×1200 RGBA ≈ 5.7 MB) × 50 frames ≈ 288 MB —
+ *   an instant iOS jetsam kill. The card is ~400 CSS px wide; 800 px
+ *   is visually identical and cuts per-frame memory ~4x.
  */
 type PlayerStatus = "idle" | "loading" | "playing" | "paused";
+
+const MAX_FRAME_SIDE = 800;
 
 export default function UgoiraPlayer(props: {
   illustId: number;
@@ -71,7 +81,15 @@ export default function UgoiraPlayer(props: {
       const zipBuf = await zipRes.arrayBuffer();
 
       if (seq !== loadSeq) return; // torn down while fetching
-      const unzipped = unzipSync(new Uint8Array(zipBuf));
+      // fflate 0.8.x's async unzip is callback-based — wrap it so the
+      // decompression work yields to the event loop (the sync form
+      // froze the UI thread for multi-MB archives).
+      const unzipped = await new Promise<Unzipped>((resolve, reject) => {
+        unzip(new Uint8Array(zipBuf), (err, res) => {
+          if (err) reject(err);
+          else resolve(res);
+        });
+      });
 
       const mime = body.mime_type || "image/jpeg";
       const loaded = await Promise.all(
@@ -105,10 +123,16 @@ export default function UgoiraPlayer(props: {
       const url = URL.createObjectURL(blob);
       const img = new Image();
       img.onload = () => {
+        // Downscale to the display budget (reviewer finding): the
+        // visible canvas never needs the source resolution.
+        const scale = Math.min(
+          1,
+          MAX_FRAME_SIDE / Math.max(img.naturalWidth, img.naturalHeight)
+        );
         const c = document.createElement("canvas");
-        c.width = img.naturalWidth;
-        c.height = img.naturalHeight;
-        c.getContext("2d")!.drawImage(img, 0, 0);
+        c.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        c.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        c.getContext("2d")!.drawImage(img, 0, 0, c.width, c.height);
         URL.revokeObjectURL(url);
         resolve(c);
       };

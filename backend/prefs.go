@@ -29,6 +29,20 @@ type prefsStore struct {
 	db *gorm.DB
 }
 
+// Close releases the underlying SQLite handle — called during graceful
+// shutdown (reviewer finding: the connection was never explicitly
+// closed).
+func (s *prefsStore) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}
+
 const blockedTagsKey = "blocked_tags"
 
 // openPrefs opens (and migrates) the prefs database at path. For tests

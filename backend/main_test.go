@@ -1603,7 +1603,10 @@ func TestBookmarksEndpointPassthrough(t *testing.T) {
 
 func newGatedServer(t *testing.T, password string) http.Handler {
 	t.Helper()
-	g := newGate(password)
+	g, err := newGate(password, true) // plaintext passwords are test fixtures
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
 	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
 	registerGateRoutes(mux, g)
 	return apiKeyGate("secret", g.middleware(mux))
@@ -1683,7 +1686,10 @@ func TestGateLocksEverythingUntilUnlocked(t *testing.T) {
 }
 
 func TestGateDisabledWithoutPassword(t *testing.T) {
-	g := newGate("")
+	g, err := newGate("", false)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
 	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
 	registerGateRoutes(mux, g)
 	h := apiKeyGate("secret", g.middleware(mux))
