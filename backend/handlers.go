@@ -48,8 +48,9 @@ type pixivAPI interface {
 }
 
 // pkceStore holds in-flight PKCE challenges: single-use, short-TTL,
-// capped. The login shim gets a state from /pkce/begin and returns it
-// with the OAuth code at /pkce/complete.
+// capped. The proxied login (pkce/start → px/* → server-side callback)
+// creates the verifier/challenge at start and consumes it at the
+// callback.
 type pkceEntry struct {
 	verifier string
 	expires  time.Time
