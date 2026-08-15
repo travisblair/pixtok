@@ -748,6 +748,18 @@ func TestDeriveLargeFallback(t *testing.T) {
 	if want := "https://i.pximg.net/img-master/img/2026/08/15/20/07/54/148463904_master1200.jpg"; a2 != want {
 		t.Errorf("_a2 derive = %q, want %q", a2, want)
 	}
+	// Regression: pixiv's custom-thumb scheme (newer AI/custom-cropped
+	// works, Aug 2026) — the c/ resize prefix must be dropped and the
+	// custom1200 variant kept (it IS the 1200px full size). The old
+	// regex only knew img-master, so these works rendered as stretched
+	// 250px squares — the occasional fuzzy cards.
+	ct, ok := deriveLarge("https://i.pximg.net/c/250x250_80_a2/custom-thumb/img/2026/08/16/08/07/26/148485956_p0_custom1200.jpg")
+	if !ok {
+		t.Fatal("deriveLarge should match the custom-thumb path")
+	}
+	if want := "https://i.pximg.net/custom-thumb/img/2026/08/16/08/07/26/148485956_p0_custom1200.jpg"; ct != want {
+		t.Errorf("custom-thumb derive = %q, want %q", ct, want)
+	}
 }
 
 func TestPageThumb(t *testing.T) {

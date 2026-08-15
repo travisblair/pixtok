@@ -218,7 +218,11 @@ test.describe("UX round", () => {
     await expectMainFeedCount(page, 6);
 
     const player = page.locator(".ugoira-wrap").first();
-    const control = player.locator(".ugoira-play");
+    // The control lives in the card overlay, above the title.
+    const control = page
+      .locator(".feed-card")
+      .first()
+      .locator(".card-ugoira-control");
 
     // Idle: the ▶ control over the poster CANVAS (no <img> — the canvas
     // is the only surface, so playing has no poster swap), and NO

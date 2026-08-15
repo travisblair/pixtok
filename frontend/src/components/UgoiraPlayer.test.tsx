@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { zipSync } from "fflate";
 import UgoiraPlayer from "./UgoiraPlayer";
 
@@ -9,16 +10,17 @@ import UgoiraPlayer from "./UgoiraPlayer";
  * What is REAL here: fflate unzip, frame-to-delay mapping, the loadSeq
  * discard guard, zip abort, downscale math, and the timer-driven step
  * loop - all exercised end-to-end from the component's actual entry
- * points (control-button tap, IntersectionObserver teardown).
+ * points (the parent's toggle signal, IntersectionObserver teardown).
  *
  * What is mocked (jsdom cannot do these): Image decoding (frames fire
  * onload synchronously with queued natural sizes) and canvas 2d
  * contexts (drawImage is spied; canvas width/height are the real
  * downscale math the component computes).
  *
- * Interaction model (Aug 2026): ONLY the centered control button drives
- * playback (stopPropagation). Image taps fall through to the card, which
- * opens the related stack — so the wrap itself has no click handler.
+ * Interaction model (Aug 2026): the play/pause CONTROL lives in the
+ * card overlay (FeedCard), driven by a counter signal handed to the
+ * player; the player reports status back. Image taps fall through to
+ * the card and open the related stack — the wrap has no click handler.
  */
 
 vi.mock("../api", () => ({
@@ -114,21 +116,43 @@ function installFetchMock(opts?: { ok?: boolean; status?: number; stall?: boolea
   return mock;
 }
 
+/**
+ * Harness that mirrors FeedCard's wiring: a toggle counter handed to the
+ * player, the reported status rendered as text for assertions.
+ */
+function Harness() {
+  const [sig, setSig] = createSignal(0);
+  const [st, setSt] = createSignal<string>("idle");
+  return (
+    <>
+      <button
+        data-testid="ctl"
+        type="button"
+        onClick={() => setSig((x) => x + 1)}
+      >
+        ctl
+      </button>
+      <span data-testid="st">{st()}</span>
+      <UgoiraPlayer
+        illustId={7701}
+        staticUrl="https://i.pximg.net/img-original/static.jpg"
+        title="うごイラ"
+        toggleSignal={sig()}
+        onStatus={setSt}
+      />
+    </>
+  );
+}
+
 function renderPlayer() {
-  return render(() => (
-    <UgoiraPlayer
-      illustId={7701}
-      staticUrl="https://i.pximg.net/img-original/static.jpg"
-      title="うごイラ"
-    />
-  ));
+  return render(() => <Harness />);
 }
 
 function wrapEl(container: HTMLElement) {
   return container.querySelector(".ugoira-wrap") as HTMLElement;
 }
-function controlEl(container: HTMLElement) {
-  return container.querySelector(".ugoira-play") as HTMLButtonElement | null;
+function statusText(container: HTMLElement) {
+  return container.querySelector('[data-testid="st"]')!.textContent;
 }
 function visibleCanvas(container: HTMLElement) {
   return container.querySelector(
@@ -139,9 +163,9 @@ function visibleDraws(container: HTMLElement) {
   const c = visibleCanvas(container);
   return c ? ctxByCanvas.get(c)!.drawImage : vi.fn();
 }
-/** Taps the control button — the ONLY element that drives playback. */
+/** Bumps the parent's toggle signal — the only playback control. */
 function tapControl(container: HTMLElement) {
-  fireEvent.click(controlEl(container)!);
+  fireEvent.click(container.querySelector('[data-testid="ctl"]')!);
 }
 /** The IntersectionObserver the component registered on mount. */
 function mountedObserver(): {
@@ -171,8 +195,6 @@ beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
     function (this: HTMLCanvasElement, id: string) {
       if (id !== "2d") return null as never;
-      // One ctx per canvas: step() calls getContext on every frame draw,
-      // and each call must return the SAME spy or call counts reset.
       let ctx = ctxByCanvas.get(this);
       if (!ctx) {
         ctx = { drawImage: vi.fn() };
@@ -196,9 +218,7 @@ afterEach(() => {
 /**
  * Pump microtasks WITHOUT advancing fake timers (waitFor advances them,
  * which lets the 100ms frame timer fire mid-test and makes draw counts
- * nondeterministic). All mocked async pieces (fetch, fflate, FakeImage)
- * resolve on microtasks, so a fixed number of flushes completes the
- * whole load chain deterministically.
+ * nondeterministic). All mocked async pieces resolve on microtasks.
  */
 async function flushMicrotasks(n = 30) {
   for (let i = 0; i < n; i++) await Promise.resolve();
@@ -207,9 +227,7 @@ async function flushMicrotasks(n = 30) {
 async function playThrough(container: HTMLElement) {
   tapControl(container);
   await flushMicrotasks();
-  expect(controlEl(container)!.getAttribute("aria-label")).toBe(
-    "Pause animation"
-  );
+  expect(statusText(container)).toBe("playing");
 }
 
 /** Shared helper: play through to the error badge state. */
@@ -220,14 +238,9 @@ async function playThroughExpectError(container: HTMLElement) {
 }
 
 describe("UgoiraPlayer", () => {
-  it("renders idle with the static frame and the play control - no autoplay, no meta/zip", async () => {
+  it("renders idle with the static frame on the canvas - no autoplay, no meta/zip", async () => {
     const { container } = renderPlayer();
-    // The control is a native BUTTON — keyboard activatable, owns its taps.
-    const control = controlEl(container)!;
-    expect(control.tagName).toBe("BUTTON");
-    expect(control.getAttribute("type")).toBe("button");
-    expect(control.getAttribute("aria-label")).toBe("Play animation");
-    expect(control.textContent).toContain("▶");
+    expect(statusText(container)).toBe("idle");
     // The canvas IS the poster — mounted from the start (no <img> swap).
     expect(visibleCanvas(container)).toBeTruthy();
     expect(container.querySelector("img.card-image")).toBeNull();
@@ -239,22 +252,28 @@ describe("UgoiraPlayer", () => {
     expect(fetchCalls[0].url).toContain("/api/img?url=");
   });
 
-  it("tap -> spinner -> canvas loop; the control flips to pause bars", async () => {
+  it("toggle -> spinner -> playing on the canvas; status reports back", async () => {
     const { container } = renderPlayer();
     tapControl(container);
     expect(container.querySelector(".ugoira-spinner")).toBeTruthy();
     await flushMicrotasks();
     expect(container.querySelector(".ugoira-spinner")).toBeNull();
-    const control = controlEl(container)!;
-    expect(control.getAttribute("aria-label")).toBe("Pause animation");
-    expect(control.textContent).not.toContain("▶");
-    expect(control.querySelector(".ugoira-pause-bars")).toBeTruthy();
+    expect(statusText(container)).toBe("playing");
     expect(mockedApi.getUgoiraMeta).toHaveBeenCalledTimes(1);
     // First fetch = static poster (discarded once playback wins), second
     // = the frame zip.
     expect(fetchCalls.length).toBeGreaterThanOrEqual(2);
     expect(fetchCalls[0].url).toContain("/api/img?url=");
     expect(fetchCalls[1].url).toContain("/api/img?url=");
+  });
+
+  it("the parent's toggle signal drives play, pause, and resume", async () => {
+    const { container } = renderPlayer();
+    await playThrough(container);
+    tapControl(container); // pause
+    expect(statusText(container)).toBe("paused");
+    tapControl(container); // resume
+    expect(statusText(container)).toBe("playing");
   });
 
   it("downscales oversized frames to 800px and leaves small frames alone", async () => {
@@ -362,21 +381,18 @@ describe("UgoiraPlayer", () => {
     expect(draws).toHaveBeenCalledTimes(3);
   });
 
-  it("pause freezes the canvas with the play control back; no stepping while paused", async () => {
+  it("pause freezes the canvas; no stepping while paused", async () => {
     const { container } = renderPlayer();
     await playThrough(container);
     tapControl(container); // pause
-    expect(controlEl(container)!.textContent).toContain("▶");
-    expect(controlEl(container)!.getAttribute("aria-label")).toBe(
-      "Play animation"
-    );
+    expect(statusText(container)).toBe("paused");
     expect(visibleCanvas(container)).toBeTruthy(); // frozen frame stays
     const before = visibleDraws(container).mock.calls.length;
     vi.advanceTimersByTime(10_000);
     expect(visibleDraws(container).mock.calls.length).toBe(before);
   });
 
-  it("a second tap during loading is ignored (no duplicate meta fetches)", async () => {
+  it("a second toggle during loading is ignored (no duplicate meta fetches)", async () => {
     let resolveMeta!: (v: unknown) => void;
     mockedApi.getUgoiraMeta.mockImplementationOnce(
       () => new Promise((r) => (resolveMeta = r))
@@ -384,14 +400,12 @@ describe("UgoiraPlayer", () => {
     const { container } = renderPlayer();
     tapControl(container);
     expect(container.querySelector(".ugoira-spinner")).toBeTruthy();
-    // While loading the control is hidden (spinner in its place) — an
-    // image tap falls through to the card, it can't double-fire loads.
-    fireEvent.click(wrapEl(container));
+    // While loading the control is disabled by the player's own guard —
+    // a second toggle must not double-fire loads.
+    tapControl(container);
     resolveMeta!(META);
     await flushMicrotasks();
-    expect(controlEl(container)!.getAttribute("aria-label")).toBe(
-      "Pause animation"
-    );
+    expect(statusText(container)).toBe("playing");
     expect(mockedApi.getUgoiraMeta).toHaveBeenCalledTimes(1);
   });
 
@@ -399,7 +413,6 @@ describe("UgoiraPlayer", () => {
     installFetchMock({ ok: false, status: 502 });
     const { container } = renderPlayer();
     await playThroughExpectError(container);
-    expect(controlEl(container)).toBeNull();
     expect(mockedApi.getUgoiraMeta).toHaveBeenCalledTimes(1);
     // Tap the badge: idle-after-error retries.
     fireEvent.click(container.querySelector(".ugoira-badge")!);
@@ -432,12 +445,9 @@ describe("UgoiraPlayer", () => {
     const { container } = renderPlayer();
     await playThrough(container);
     scrollAway();
-    // The canvas stays mounted; the control returns to ▶.
+    // The canvas stays mounted; the player reports idle again.
     expect(visibleCanvas(container)).toBeTruthy();
-    expect(controlEl(container)!.textContent).toContain("▶");
-    expect(controlEl(container)!.getAttribute("aria-label")).toBe(
-      "Play animation"
-    );
+    expect(statusText(container)).toBe("idle");
   });
 
   it("an in-flight load discards itself after scroll-away (seq guard)", async () => {
@@ -453,25 +463,13 @@ describe("UgoiraPlayer", () => {
     resolveMeta!(META);
     await flushMicrotasks();
     expect(visibleCanvas(container)).toBeTruthy(); // poster canvas stays
-    expect(controlEl(container)!.textContent).toContain("▶");
+    expect(statusText(container)).toBe("idle");
     expect(fetchCalls[0].signal!.aborted).toBe(true);
   });
 
-  it("the control is a native button — Enter/Space activation is built-in", async () => {
+  it("the wrap has no click handler - image taps belong to the card", () => {
     const { container } = renderPlayer();
-    const control = controlEl(container)!;
-    expect(control.tagName).toBe("BUTTON");
-    // Native button semantics: browsers fire click on Enter/Space. The
-    // handler itself is the shared toggle — verify clicking drives it.
-    fireEvent.click(control);
-    await flushMicrotasks();
-    // The button unmounts during loading and remounts on play — query
-    // fresh instead of holding the old node.
-    expect(controlEl(container)!.getAttribute("aria-label")).toBe(
-      "Pause animation"
-    );
-    // The wrap itself has NO click handler — image taps belong to the
-    // card (stack opening), so nothing in the player toggles.
     expect(wrapEl(container).getAttribute("role")).toBeNull();
+    expect(wrapEl(container).getAttribute("tabindex")).toBeNull();
   });
 });

@@ -46,6 +46,13 @@ export default function FeedCard(props: {
   const setLiked = like.setLiked;
   const [active, setActive] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  // Ugoira play/pause control lives in the overlay (small, above the
+  // title, always visible). The counter is the toggle signal handed to
+  // the player; the player reports status back for the icon/label.
+  const [ugoiraToggle, bumpUgoiraToggle] = createSignal(0);
+  const [ugoiraStatus, setUgoiraStatus] = createSignal<
+    "idle" | "loading" | "playing" | "paused"
+  >("idle");
   let pagesRef: HTMLDivElement | undefined;
   let rootRef: HTMLDivElement | undefined;
   let unloadTimer: ReturnType<typeof setTimeout> | undefined;
@@ -286,6 +293,8 @@ export default function FeedCard(props: {
             illustId={props.illust.id}
             staticUrl={page.image_urls.large}
             title={props.illust.title}
+            toggleSignal={ugoiraToggle()}
+            onStatus={setUgoiraStatus}
           />
         </div>
       );
@@ -391,6 +400,29 @@ export default function FeedCard(props: {
       </div>
 
       <div class="card-overlay">
+        {/* Ugoira play/pause: small, above the title, always visible. */}
+        <Show when={props.illust.type === "ugoira" && !props.suppressImages}>
+          <button
+            type="button"
+            class="card-ugoira-control"
+            onClick={(e) => {
+              e.stopPropagation();
+              bumpUgoiraToggle((t) => t + 1);
+            }}
+            aria-label={
+              ugoiraStatus() === "playing" ? "Pause animation" : "Play animation"
+            }
+          >
+            {ugoiraStatus() === "playing" ? (
+              <span class="ugoira-pause-bars" aria-hidden="true">
+                <span />
+                <span />
+              </span>
+            ) : (
+              "▶"
+            )}
+          </button>
+        </Show>
         <h2 class="card-title">{props.illust.title}</h2>
         <p class="card-artist">
           by{" "}

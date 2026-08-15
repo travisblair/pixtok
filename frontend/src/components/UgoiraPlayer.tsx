@@ -1,4 +1,4 @@
-import { createSignal, onMount, onCleanup, Show } from "solid-js";
+import { createSignal, createEffect, on, onMount, onCleanup, Show } from "solid-js";
 import { unzip, type Unzipped } from "fflate";
 import { api } from "../api";
 
@@ -44,6 +44,11 @@ export default function UgoiraPlayer(props: {
   illustId: number;
   staticUrl: string;
   title: string;
+  // The play/pause CONTROL lives in the card overlay (small, above the
+  // title — always visible). The parent bumps this signal to toggle;
+  // the player reports status back for the control's label/icon.
+  toggleSignal?: number;
+  onStatus?: (s: PlayerStatus) => void;
 }) {
   const [status, setStatus] = createSignal<PlayerStatus>("idle");
   const [error, setError] = createSignal(false);
@@ -60,6 +65,17 @@ export default function UgoiraPlayer(props: {
   let loadSeq = 0; // bumped on teardown — in-flight loads discard themselves
   let zipAbort: AbortController | undefined; // kills the in-flight zip fetch
   let staticAbort: AbortController | undefined; // kills the in-flight poster fetch
+
+  // The overlay control drives playback through this signal.
+  createEffect(
+    on(
+      () => props.toggleSignal,
+      () => toggle(),
+      { defer: true }
+    )
+  );
+  // Report status to the overlay control (label + ▶/pause icon).
+  createEffect(() => props.onStatus?.(status()));
 
   function clearTimer() {
     if (timer !== undefined) {
@@ -227,11 +243,10 @@ export default function UgoiraPlayer(props: {
     timer = setTimeout(step, delays[(idx - 1 + delays.length) % delays.length]);
   }
 
-  function toggle(e: Event) {
-    // The control button owns its taps — the card must NOT push a
-    // related stack on play/pause.
-    e.stopPropagation();
-    e.preventDefault();
+  function toggle(e?: Event) {
+    // Owns its taps — the card must NOT push a related stack on play/pause.
+    e?.stopPropagation();
+    e?.preventDefault();
     const s = status();
     if (s === "loading") return;
     if (s === "playing") {
@@ -271,10 +286,6 @@ export default function UgoiraPlayer(props: {
     });
   });
 
-  const controlShown = () =>
-    (status() === "idle" || status() === "paused" || status() === "playing") &&
-    !error();
-
   return (
     <div class="ugoira-wrap" ref={rootRef}>
       <canvas
@@ -282,21 +293,6 @@ export default function UgoiraPlayer(props: {
         class={"ugoira-canvas" + (posterReady() ? " ready" : "")}
         aria-hidden="true"
       />
-      <Show when={controlShown()}>
-        <button
-          type="button"
-          class={"ugoira-play" + (status() === "playing" ? " pause" : "")}
-          onClick={toggle}
-          aria-label={status() === "playing" ? "Pause animation" : "Play animation"}
-        >
-          <Show when={status() === "playing"} fallback={"▶"}>
-            <span class="ugoira-pause-bars" aria-hidden="true">
-              <span />
-              <span />
-            </span>
-          </Show>
-        </button>
-      </Show>
       <Show when={status() === "loading"}>
         <div class="ugoira-spinner" aria-hidden="true" />
       </Show>

@@ -695,40 +695,37 @@
   opacity: 1;
 }
 
-/* Big centered play/pause control (replaces the old top-center badge
-   pill). It's the ONLY element that drives playback — taps on the image
-   itself fall through to the card and open the related stack. */
-.ugoira-play {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 68px;
-  height: 68px;
+/* Small ugoira play/pause control — sits in the card overlay directly
+   ABOVE the work title, always visible (no hiding). */
+.card-ugoira-control {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.4);
   color: #fff;
-  font-size: 1.6rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding-left: 5px; /* optically center the ▶ glyph */
+  font-size: 0.85rem;
   cursor: pointer;
-  z-index: 2;
+  padding: 0;
+  padding-left: 2px; /* optically center the ▶ glyph */
+  margin-bottom: 8px;
   -webkit-tap-highlight-color: transparent;
 }
-.ugoira-play.pause {
+.card-ugoira-control:has(.ugoira-pause-bars) {
   padding-left: 0; /* the pause bars are symmetric */
 }
 .ugoira-pause-bars {
   display: flex;
-  gap: 9px;
+  gap: 6px;
 }
 .ugoira-pause-bars span {
-  width: 7px;
-  height: 26px;
-  border-radius: 3px;
+  width: 5px;
+  height: 16px;
+  border-radius: 2px;
   background: #fff;
 }
 
