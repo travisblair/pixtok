@@ -15,30 +15,87 @@ yourself, reach it from your own devices — that's the intended model.
 
 ## Features
 
-- **Home** — the personalized "For You" street feed, infinite scroll
-- **Newest** — the live upload firehose (all / R18)
-- **Illustrations** — Pixiv's top page (popular works)
-- **Ranking** — daily / weekly / monthly / rookie / original / AI, male
-  & female, with R18 variants
-- **Discover** — the site-wide recommended feed
-- **Search** — one box, no forced tag-vs-user choice: works results by
-  default (Newest / Popular / Oldest ordering, All / R18), an Artists
-  mode with per-user preview works, the tag's popular recommendations
-  strip, and tappable related tags
-- **Bookmarks** — your bookmarked works as a feed
-- **Related stacks** — tap any work to drill into related works,
-  up to 10 levels deep, with push animations and exact scroll restore
-- **Artist libraries** — tap an artist's name for their full works
-- **Like → recommendations** — liking a work loads Pixiv's own related
-  recommendations in a modal
-- **Ugoira** — animated works play on a canvas with tap-to-play
-- **Blocked tags** — hide works by tag (client-side, no premium needed)
-- **Data saver** — 540px images instead of full resolution
-- **Session persistence** — reload (even an iOS jetsam kill) restores
-  the feed, scroll position, open stacks and search exactly where you
-  left off
-- **Password gate** — one password in front of everything when the app
-  is exposed publicly
+Everything opens from the ☰ drawer. Feeds scroll vertically with
+infinite scroll; each card is a full-screen page.
+
+### Feeds
+
+- **Home** — your personalized "For You" street feed.
+- **Newest** — the live upload firehose; the All / R18 pills above the
+  feed switch content.
+- **Illustrations** — Pixiv's top page (popular works).
+- **Ranking** — daily / weekly / monthly / rookie / original / AI
+  rankings, male & female, with R18 variants; pick content and mode with
+  the pills above the feed.
+- **Discover** — the site-wide recommended feed.
+- **Bookmarks** — everything you've bookmarked on Pixiv, as a feed.
+
+### Search
+
+☰ → Search, type a term, hit Search. Works results by default.
+
+- **Filters** — sort (Newest / Popular / Oldest), content (All / All
+  ages / R18), work type (All works / Illustrations only / **Ugoira
+  only**), match mode (tags partial / tags exact / title & caption),
+  AI-generated (display / hide), and a posting-date range.
+- **Artists** — the Artists pill switches to people search; each row
+  shows three preview works.
+- **Popular & related tags** — page 1 of works results carries the
+  tag's popular-works strip and tappable related-tag pills.
+
+### Related stacks
+
+Tap any work card to open it in a stack: the work is on top with its
+related works loading beneath it. Scroll for more, or tap another work
+inside the stack to drill deeper (up to 10 levels — the "N/10" badge
+shows the depth). ← Back returns one level; ✕ closes the whole stack
+back to the feed. Each level remembers its scroll position.
+
+### Artist pages
+
+Tap an artist's name on any card — or an artist row in Search →
+Artists — to open their library. Scroll for more works; tap any work to
+open a stack on top of the artist page.
+
+### Recommendations (the like modal)
+
+Tap the ♡ on any card: the work is bookmarked on Pixiv and a
+"Recommendations for ⟨title⟩" modal opens with Pixiv's own related
+works. The heart stays synced with your Pixiv bookmarks across the
+whole app.
+
+### Ugoira (animated works)
+
+Cards with a small ▶ button above the title are animations. Tap ▶ to
+play, tap again to pause — a spinner shows while the frames download.
+The loop runs on a canvas (no video element) and frees its frames when
+you scroll away. Tapping the image itself opens the related stack like
+any other card.
+
+### Tags
+
+Every card shows its tags, with Pixiv's English translation beneath the
+original where one exists. Tap a tag chip to open that tag's page (a
+search seeded with the tag). Tap the ⚙️ button under the ♡ to open the
+work's tag list — tapping a tag there blocks or unblocks it. Blocked
+tags hide matching works from everything loaded afterwards; manage the
+list any time in Settings.
+
+### Settings
+
+☰ → Settings: image quality (**Full** or **Data saver** — 540px images
+for cellular) and your blocked-tags list.
+
+### Session persistence
+
+Reload — or an iOS jetsam kill and reopen — lands you exactly where you
+left off: same feed, scroll position, open stacks, search, artist page,
+and modals.
+
+### Password gate
+
+Optional: one password in front of the whole app when it's reachable
+from the public internet. See Setup.
 
 ## Setup
 
