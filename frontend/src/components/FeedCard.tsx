@@ -361,30 +361,34 @@ export default function FeedCard(props: {
         </div>
       </Show>
 
-      {/* Like button */}
-      <button
-        type="button"
-        class="like-btn"
-        onClick={toggleLike}
-        aria-label={liked() ? "Remove bookmark" : "Bookmark"}
-      >
-        {liked() ? "❤️" : "🤍"}
-      </button>
+      {/* Right-edge action stack — one flex column so the gear sits an
+          EXACT 16px below the heart on every device (font metrics make
+          two independently-absolute buttons drift apart). */}
+      <div class="card-right-stack">
+        <button
+          type="button"
+          class="like-btn"
+          onClick={toggleLike}
+          aria-label={liked() ? "Remove bookmark" : "Bookmark"}
+        >
+          {liked() ? "❤️" : "🤍"}
+        </button>
 
-      {/* Tag blocking button — opens the block/unblock popup for this
-          work. Gear icon: the tag chips on the card are for OPENING tag
-          pages, this one is for FILTERING. */}
-      <button
-        type="button"
-        class="tags-btn"
-        onClick={(e) => {
-          e.stopPropagation();
-          props.onTagsTap?.(props.illust);
-        }}
-        aria-label="Block this work's tags"
-      >
-        ⚙️
-      </button>
+        {/* Tag blocking button — opens the block/unblock popup for this
+            work. Gear icon: the tag chips on the card are for OPENING tag
+            pages, this one is for FILTERING. */}
+        <button
+          type="button"
+          class="tags-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onTagsTap?.(props.illust);
+          }}
+          aria-label="Block this work's tags"
+        >
+          ⚙️
+        </button>
+      </div>
 
       <div class="card-overlay">
         <h2 class="card-title">{props.illust.title}</h2>

@@ -17,7 +17,7 @@ import type { SearchState } from "./components/SearchScreen";
  *  - the recs modal (its work list + source title + open flag)
  */
 
-const KEY = "pixtok_state_v1";
+const KEY = "pixtok_state_v2";
 
 export const MAX_SNAPSHOT_ITEMS = 100;
 // Max related-stack depth — the UI refusal and the snapshot truncation
@@ -41,6 +41,12 @@ export interface AppSnapshot {
   modalOpen: boolean;
   searchOpen: boolean;
   search: SearchState | null;
+  // Open-order of overlay layers ("search", "s0".."sN", "artist") — the
+  // restore assigns z values in this order so the stacking matches the
+  // live session exactly (the old restore always put the artist on top,
+  // flipping artist-under-stack sessions and feeding the black-screen
+  // obscured-layer bug class).
+  layerOrder: string[];
 }
 
 export type SnapshotInput = Omit<AppSnapshot, "v">;
@@ -86,6 +92,7 @@ export function saveSnapshot(snap: SnapshotInput): void {
             users: snap.search.users.slice(0, 30),
           }
         : null,
+      layerOrder: Array.isArray(snap.layerOrder) ? [...snap.layerOrder] : [],
     };
     localStorage.setItem(KEY, JSON.stringify(out));
   } catch {
@@ -136,6 +143,11 @@ export function loadSnapshot(): AppSnapshot | null {
         Array.isArray(parsed.search.users)
           ? (parsed.search as SearchState)
           : null,
+      layerOrder:
+        Array.isArray(parsed.layerOrder) &&
+        parsed.layerOrder.every((k) => typeof k === "string")
+          ? (parsed.layerOrder as string[])
+          : [],
     };
   } catch {
     return null;

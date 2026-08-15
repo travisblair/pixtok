@@ -998,11 +998,22 @@
   pointer-events: none; /* never block taps to the feed underneath */
 }
 
-.like-btn {
+/* Right-edge action stack: heart + gear in one flex column, anchored
+   bottom:100px (the heart's old position). The 16px gap is exact on
+   every device — independent absolute buttons drift apart as emoji font
+   metrics differ between iOS and macOS. */
+.card-right-stack {
   position: absolute;
-  bottom: 100px;
   right: 16px;
+  bottom: 100px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
   z-index: 2;
+}
+
+.like-btn {
   background: none;
   border: none;
   font-size: 2rem;
@@ -1016,12 +1027,8 @@
   transform: scale(1.2);
 }
 
-/* Tag filter button — sits directly under the heart */
+/* Tag filter button — sits exactly 16px under the heart */
 .tags-btn {
-  position: absolute;
-  bottom: 48px;
-  right: 16px;
-  z-index: 2;
   background: none;
   border: none;
   font-size: 1.7rem;

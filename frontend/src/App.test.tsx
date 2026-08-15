@@ -34,7 +34,7 @@ const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 beforeEach(() => {
   // Session snapshots must not leak between tests (a leftover
-  // pixtok_state_v1 would make later renders rehydrate instead of
+  // pixtok_state_v2 would make later renders rehydrate instead of
   // loading the street feed).
   localStorage.clear();
   // Distinct id ranges per feed so cross-feed bleed is visible in
@@ -99,7 +99,7 @@ describe("App", () => {
 
   it("restores a saved session instead of loading any feed", async () => {
     localStorage.setItem(
-      "pixtok_state_v1",
+      "pixtok_state_v2",
       JSON.stringify({
         v: 1,
         feedType: "recommended",
@@ -131,7 +131,7 @@ describe("App", () => {
     // feed snapshot; restoring it stranded the app on "Nothing here
     // yet" after unlock. An empty, cursorless snapshot loads fresh.
     localStorage.setItem(
-      "pixtok_state_v1",
+      "pixtok_state_v2",
       JSON.stringify({
         v: 1,
         feedType: "home",
@@ -160,7 +160,7 @@ describe("App", () => {
 
   it("restores an open artist page from the snapshot", async () => {
     localStorage.setItem(
-      "pixtok_state_v1",
+      "pixtok_state_v2",
       JSON.stringify({
         v: 1,
         feedType: "home",
@@ -198,7 +198,7 @@ describe("App", () => {
     // (permanent black cards, unfixable by reloading because the
     // snapshot keeps modalOpen=true).
     localStorage.setItem(
-      "pixtok_state_v1",
+      "pixtok_state_v2",
       JSON.stringify({
         v: 1,
         feedType: "home",
@@ -235,7 +235,7 @@ describe("App", () => {
     // marked itself obscured and rendered black (same class as the recs
     // modal bug).
     localStorage.setItem(
-      "pixtok_state_v1",
+      "pixtok_state_v2",
       JSON.stringify({
         v: 1,
         feedType: "home",
@@ -285,7 +285,7 @@ describe("App", () => {
 
   it("restores an open search layer from the snapshot", async () => {
     localStorage.setItem(
-      "pixtok_state_v1",
+      "pixtok_state_v2",
       JSON.stringify({
         v: 1,
         feedType: "home",
@@ -380,7 +380,7 @@ describe("App", () => {
     // Let the 500ms debounce fire for real.
     await new Promise((r) => setTimeout(r, 650));
 
-    const saved = JSON.parse(localStorage.getItem("pixtok_state_v1")!);
+    const saved = JSON.parse(localStorage.getItem("pixtok_state_v2")!);
     expect(saved.feedType).toBe("recommended");
     expect(saved.illusts.length).toBe(5);
   });

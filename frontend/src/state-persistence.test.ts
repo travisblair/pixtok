@@ -7,7 +7,7 @@ import {
 } from "./state-persistence";
 import { makeIllust } from "./test-fixtures";
 
-const KEY = "pixtok_state_v1";
+const KEY = "pixtok_state_v2";
 
 function baseSnapshot(): SnapshotInput {
   return {

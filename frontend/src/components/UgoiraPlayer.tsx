@@ -34,6 +34,11 @@ import { api } from "../api";
 type PlayerStatus = "idle" | "loading" | "playing" | "paused";
 
 const MAX_FRAME_SIDE = 800;
+// The POSTER is a single canvas — it costs nothing to render it at full
+// retina density, and at 800px it reads visibly soft next to the
+// master1200 <img> cards (user-reported fuzz). Animation frames keep the
+// 800px cap: 50-150 of them is the memory that matters.
+const POSTER_MAX_SIDE = 1400;
 
 export default function UgoiraPlayer(props: {
   illustId: number;
@@ -102,12 +107,14 @@ export default function UgoiraPlayer(props: {
       );
       if (!res.ok) throw new Error(`static fetch failed: ${res.status}`);
       const blob = await res.blob();
-      const frame = await loadFrame(blob);
+      const frame = await loadFrame(blob, POSTER_MAX_SIDE);
       if (seq !== loadSeq) return; // torn down or superseded while fetching
       staticFrame = frame;
       drawStatic();
       setPosterReady(true);
     } catch (e) {
+      // Aborts are teardown, not failures — never log or badge them.
+      if (e instanceof DOMException && e.name === "AbortError") return;
       console.error("ugoira static load failed:", e);
       if (seq === loadSeq) setError(true);
     } finally {
@@ -165,6 +172,7 @@ export default function UgoiraPlayer(props: {
       setStatus("playing");
       step();
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
       console.error("ugoira load failed:", e);
       if (seq === loadSeq) {
         setStatus("idle");
@@ -176,7 +184,7 @@ export default function UgoiraPlayer(props: {
     }
   }
 
-  function loadFrame(blob: Blob): Promise<HTMLCanvasElement> {
+  function loadFrame(blob: Blob, maxSide = MAX_FRAME_SIDE): Promise<HTMLCanvasElement> {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(blob);
       const img = new Image();
@@ -185,7 +193,7 @@ export default function UgoiraPlayer(props: {
         // visible canvas never needs the source resolution.
         const scale = Math.min(
           1,
-          MAX_FRAME_SIDE / Math.max(img.naturalWidth, img.naturalHeight)
+          maxSide / Math.max(img.naturalWidth, img.naturalHeight)
         );
         const c = document.createElement("canvas");
         c.width = Math.max(1, Math.round(img.naturalWidth * scale));

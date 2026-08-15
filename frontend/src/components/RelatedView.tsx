@@ -92,7 +92,7 @@ export default function RelatedView(props: {
               onArtistTap={props.onArtistTap}
               onTagsTap={props.onTagsTap}
               onTagOpen={props.onTagOpen}
-              suppressImages={props.obscured}
+              suppressImages={props.obscured || props.closing}
             />
           )}
         </For>

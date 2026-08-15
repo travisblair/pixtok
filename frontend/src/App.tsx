@@ -80,6 +80,11 @@ export default function App() {
   // takes the next z-index, so whatever opens LAST is always on top —
   // an artist page tapped from inside a stack must cover that stack.
   let layerZ = LAYER_Z_BASE;
+  // Open-order of overlay layers ("search", "s0".."sN" stack levels,
+  // "artist") — persisted so a reload restores the SAME stacking order
+  // instead of guessing (the old restore always put the artist on top,
+  // flipping artist-under-stack sessions).
+  let layerSeq: string[] = [];
   // z-index of the topmost overlay (0 = nothing above the main feed).
   // Only the top layer may keep image windows alive — covered layers
   // unload to keep memory bounded (see FeedCard suppressImages).
@@ -231,6 +236,7 @@ export default function App() {
     toast.hide(); // don't let the toast sit hidden under the stack
     layerZ++;
     setTopZ(layerZ);
+    layerSeq.push(`s${stack().length}`);
     setStack(prev => [...prev, { illust, z: layerZ }]);
   }
 
@@ -239,6 +245,10 @@ export default function App() {
     const depth = stack().length;
     if (depth === 0) return;
     setClosingDepth(depth); // play the slide-out on the top view
+    // Flush the close to the snapshot before the animation — a kill
+    // during the slide-out must not resurrect this level.
+    layerSeq = layerSeq.filter((k) => k !== `s${depth - 1}`);
+    persistNow({ stack: stack().slice(0, -1).map((s) => s.illust) });
     setTimeout(() => {
       setStack(prev => {
         const next = prev.slice(0, -1);
@@ -261,6 +271,8 @@ export default function App() {
   }
 
   function closeAllStacks() {
+    layerSeq = layerSeq.filter((k) => !k.startsWith("s") && k !== "artist");
+    persistNow({ stack: [], artist: null, modalOpen: false });
     setStack([]);
     setModalOpen(false);
     setTopZ(artist()?.z ?? searchLayer()?.z ?? 0);
@@ -271,6 +283,7 @@ export default function App() {
     layerZ++;
     setTopZ(layerZ);
     setArtist({ id: illust.user.id, name: illust.user.name || illust.user.account, z: layerZ });
+    layerSeq.push("artist");
   }
 
   // Search's artist rows carry a bare user identity (no illust object) —
@@ -279,11 +292,19 @@ export default function App() {
     layerZ++;
     setTopZ(layerZ);
     setArtist({ id: user.id, name: user.name, z: layerZ });
+    layerSeq.push("artist");
   }
 
   function closeArtist() {
     if (artistClosing()) return;
     setArtistClosing(true); // play the slide-out
+    // The close MUST hit the snapshot immediately: the page can be
+    // jetsam-killed during the 250ms slide-out, and the debounced save
+    // would miss it — the next reload resurrects the artist page with
+    // no way out (reload → restore → reload loop until iOS kills the
+    // tab). Same flush on every close action below.
+    layerSeq = layerSeq.filter((k) => k !== "artist");
+    persistNow({ artist: null });
     setTimeout(() => {
       setArtist(null);
       setArtistClosing(false);
@@ -298,6 +319,7 @@ export default function App() {
     layerZ++;
     setTopZ(layerZ);
     setSearchLayer({ z: layerZ });
+    layerSeq.push("search");
   }
 
   /** Fresh search-layer state seeded with a tag (the tag's works page). */
@@ -338,6 +360,8 @@ export default function App() {
   function closeSearch() {
     if (searchClosing()) return;
     setSearchClosing(true); // play the slide-out
+    layerSeq = layerSeq.filter((k) => k !== "search");
+    persistNow({ searchOpen: false, search: null });
     setTimeout(() => {
       setSearchLayer(null);
       setSearchClosing(false);
@@ -436,48 +460,70 @@ export default function App() {
       setNextUrl(snap.nextUrl);
       for (const ill of snap.illusts) seenIds.add(ill.id);
 
-      // Search layer (if one was open) — restored BELOW the stack: stacks
-      // pushed from search results restore above it. The artist page is
-      // restored after everything (it holds the highest z, as usual).
+      // Restore overlay z-values in the SAVED open order — the stacking
+      // must match the live session exactly. The old restore always put
+      // the artist on top: an artist-under-stack session came back
+      // flipped, and wrong obscured flags suppressed the top layer's
+      // images (the recurring black-screen class).
       let restoredSearchZ = 0;
-      if (snap.searchOpen && snap.search) {
+      let restoredArtistZ = 0;
+      const restoredZs: number[] = new Array(snap.stack.length).fill(0);
+      const order =
+        snap.layerOrder.length > 0
+          ? snap.layerOrder
+          : ["search", ...snap.stack.map((_, i) => `s${i}`), "artist"];
+      for (const key of order) {
+        if (key === "search" && snap.searchOpen && snap.search) {
+          layerZ++;
+          restoredSearchZ = layerZ;
+        } else if (key === "artist" && snap.artist) {
+          layerZ++;
+          restoredArtistZ = layerZ;
+        } else if (key.startsWith("s")) {
+          const i = Number(key.slice(1));
+          if (Number.isInteger(i) && i >= 0 && i < snap.stack.length) {
+            layerZ++;
+            restoredZs[i] = layerZ;
+          }
+        }
+      }
+      // Any layer missing from the saved order still gets a z (appended
+      // on top — matches "opened later" semantics).
+      if (snap.searchOpen && snap.search && restoredSearchZ === 0) {
         layerZ++;
         restoredSearchZ = layerZ;
+      }
+      for (let i = 0; i < snap.stack.length; i++) {
+        if (restoredZs[i] === 0) {
+          layerZ++;
+          restoredZs[i] = layerZ;
+        }
+      }
+      if (snap.artist && restoredArtistZ === 0) {
+        layerZ++;
+        restoredArtistZ = layerZ;
+      }
+
+      if (snap.searchOpen && snap.search) {
         setSearchState(snap.search);
         setSearchLayer({ z: restoredSearchZ });
       }
-
-      // Stack anchors restored with fresh monotonic z values; each level
-      // refetches its related list on mount (brief spinners per level).
-      const restored = snap.stack.map((ill) => {
-        layerZ++;
-        return { illust: ill, z: layerZ };
-      });
-      setStack(restored);
-
-      // Artist page (if one was open) — restored BELOW the stack (it
-      // refetches the artist's works on mount). The artist-above-stack
-      // corner case flips order on restore, but everything stays
-      // reachable; the common case (artist alone, or stack on top) is
-      // exact.
-      let restoredArtistZ = 0;
+      setStack(snap.stack.map((ill, i) => ({ illust: ill, z: restoredZs[i] })));
       if (snap.artist) {
-        layerZ++;
-        restoredArtistZ = layerZ;
         setArtist({ id: snap.artist.id, name: snap.artist.name, z: restoredArtistZ });
       }
+      layerSeq = order.filter((k) => {
+        if (k === "search") return snap.searchOpen && !!snap.search;
+        if (k === "artist") return !!snap.artist;
+        const i = Number(k.slice(1));
+        return Number.isInteger(i) && i >= 0 && i < snap.stack.length;
+      });
 
-      // The artist is restored AFTER the stack and therefore holds the
-      // HIGHEST z (it renders on top). topZ must be the max of every
-      // restored layer — pointing it anywhere lower makes the topmost
-      // layer mark itself obscured and suppress every image (the
-      // black-screen bug class).
+      // topZ must be the max of every restored layer — pointing it
+      // anywhere lower makes the topmost layer mark itself obscured and
+      // suppress every image (the black-screen bug class).
       setTopZ(
-        Math.max(
-          restored.length > 0 ? restored[restored.length - 1].z : 0,
-          restoredArtistZ,
-          restoredSearchZ
-        )
+        Math.max(restoredSearchZ, restoredArtistZ, ...restoredZs)
       );
 
       if (snap.modalOpen && snap.recs.length > 0) {
@@ -545,25 +591,44 @@ export default function App() {
       // an empty feed, and saving it would strand the next unlock on
       // "Nothing here yet".
       if (gateLocked()) return;
-      saveSnapshot({
-        feedType: feedType(),
-        rankContent: rankContent(),
-        rankMode: rankMode(),
-        newestR18: newestR18(),
-        topMode: topMode(),
-        illusts: illusts(),
-        nextUrl: nextUrl(),
-        scrollTop: feedScrollTop(),
-        stack: stack().map((s) => s.illust),
-        artist: artist() ? { id: artist()!.id, name: artist()!.name } : null,
-        recs: recs(),
-        recsSource: recsSource(),
-        modalOpen: modalOpen(),
-        searchOpen: searchLayer() !== null,
-        search: searchState(),
-      });
+      saveSnapshot(buildSnapshotState());
     }, 500);
   });
+
+  /** The full current state, as the debounced saver would write it. */
+  function buildSnapshotState() {
+    return {
+      feedType: feedType(),
+      rankContent: rankContent(),
+      rankMode: rankMode(),
+      newestR18: newestR18(),
+      topMode: topMode(),
+      illusts: illusts(),
+      nextUrl: nextUrl(),
+      scrollTop: feedScrollTop(),
+      stack: stack().map((s) => s.illust),
+      artist: artist() ? { id: artist()!.id, name: artist()!.name } : null,
+      recs: recs(),
+      recsSource: recsSource(),
+      modalOpen: modalOpen(),
+      searchOpen: searchLayer() !== null,
+      search: searchState(),
+      layerOrder: [...layerSeq],
+    };
+  }
+
+  /**
+   * Write the snapshot SYNCHRONOUSLY, overriding specific fields. Used
+   * by layer-close actions: iOS can jetsam-kill the page during the
+   * 250ms slide-out, long before the 500ms debounce fires — without
+   * this the stale snapshot resurrects the layer on the next reload and
+   * the user is trapped (reload → restore → reload until Safari gives
+   * up). A close must be permanent the instant the user asks for it.
+   */
+  function persistNow(overrides: Partial<ReturnType<typeof buildSnapshotState>>) {
+    if (gateLocked()) return;
+    saveSnapshot({ ...buildSnapshotState(), ...overrides });
+  }
 
   // IntersectionObserver on sentinel for infinite scroll
   onCleanup(() => {
@@ -723,7 +788,7 @@ export default function App() {
             userId={a().id}
             userName={a().name}
             zIndex={a().z}
-            obscured={a().z !== topZ()}
+            obscured={a().z !== topZ() || artistClosing()}
             closing={artistClosing()}
             onClose={closeArtist}
             onTap={pushRelated}
@@ -740,7 +805,7 @@ export default function App() {
           <SearchScreen
             zIndex={sl().z}
             closing={searchClosing()}
-            obscured={sl().z !== topZ()}
+            obscured={sl().z !== topZ() || searchClosing()}
             initial={searchState() ?? undefined}
             seedTag={searchSeed() ?? undefined}
             onState={setSearchState}
@@ -787,7 +852,7 @@ export default function App() {
             depth={i() + 1}
             maxDepth={MAX_STACK_DEPTH}
             closing={closingDepth() === i() + 1}
-            obscured={entry.z !== topZ()}
+            obscured={entry.z !== topZ() || closingDepth() === i() + 1}
             onClose={popRelated}
             onCloseAll={closeAllStacks}
             onPush={pushRelated}

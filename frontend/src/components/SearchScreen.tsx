@@ -438,7 +438,7 @@ export default function SearchScreen(props: {
                 onArtistTap={props.onArtistOpen}
                 onTagsTap={props.onTagsTap}
                 onTagOpen={props.onTagOpen}
-                suppressImages={props.obscured}
+                suppressImages={props.obscured || props.closing}
               />
             )}
           </For>
