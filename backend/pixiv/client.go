@@ -325,7 +325,7 @@ func (c *Client) GetRankingIllust(mode string) ([]byte, error) {
 // behind new_illust.php). lastID is the lastId cursor from the previous
 // page (empty for the first page). r18 toggles the adult stream.
 func (c *Client) GetNewestIllust(r18 bool, lastID string) ([]byte, error) {
-	if lastID != "" && !validID(lastID) {
+	if lastID != "" && !ValidID(lastID) {
 		return nil, fmt.Errorf("%w: invalid lastId", ErrInvalidParam)
 	}
 	u := fmt.Sprintf("https://www.pixiv.net/ajax/illust/new?limit=20&type=illust&r18=%t&lang=en", r18)
@@ -504,7 +504,8 @@ func (c *Client) doGet(u string) ([]byte, error) {
 	return body, nil
 }
 
-func validID(id string) bool {
+// ValidID reports whether id is a non-empty all-digits string.
+func ValidID(id string) bool {
 	for _, ch := range id {
 		if ch < '0' || ch > '9' {
 			return false
@@ -828,7 +829,7 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 func (c *Client) GetRelated(illustID string) ([]byte, error) {
 	// v1/illust/related was removed by Pixiv (404 upstream) — v2 works,
 	// same auth, same response shape, includes next_url pagination.
-	if !validID(illustID) {
+	if !ValidID(illustID) {
 		return nil, fmt.Errorf("%w: invalid illust id", ErrInvalidParam)
 	}
 	u := fmt.Sprintf("%s/v2/illust/related?illust_id=%s&filter=for_ios", baseURL, illustID)
@@ -837,7 +838,7 @@ func (c *Client) GetRelated(illustID string) ([]byte, error) {
 
 // GetUserIllusts returns the artist's works (app API, paginated).
 func (c *Client) GetUserIllusts(userID string) ([]byte, error) {
-	if !validID(userID) {
+	if !ValidID(userID) {
 		return nil, fmt.Errorf("invalid user id")
 	}
 	u := fmt.Sprintf("%s/v1/user/illusts?user_id=%s&filter=for_ios", baseURL, userID)
@@ -848,7 +849,7 @@ func (c *Client) GetUserIllusts(userID string) ([]byte, error) {
 // frame archive URL (zip), the frame file list with per-frame delays,
 // and the frame mime type. Web AJAX, session auth.
 func (c *Client) GetUgoiraMeta(illustID string) ([]byte, error) {
-	if !validID(illustID) {
+	if !ValidID(illustID) {
 		return nil, fmt.Errorf("%w: invalid illust id", ErrInvalidParam)
 	}
 	u := fmt.Sprintf("https://www.pixiv.net/ajax/illust/%s/ugoira_meta?lang=en", illustID)
@@ -878,7 +879,7 @@ func (c *Client) GetUgoiraMeta(illustID string) ([]byte, error) {
 }
 
 func (c *Client) BookmarkAdd(illustID string, isPrivate bool) error {
-	if !validID(illustID) {
+	if !ValidID(illustID) {
 		return fmt.Errorf("%w: invalid illust id", ErrInvalidParam)
 	}
 	restrict := "public"
@@ -926,7 +927,7 @@ func (c *Client) GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
 		return nil, fmt.Errorf("%w: invalid maxPages", ErrInvalidParam)
 	}
 	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
-	if !validID(uid) {
+	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
 	}
 
@@ -983,7 +984,7 @@ func (c *Client) GetBookmarkIllusts(restrict string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: invalid restrict", ErrInvalidParam)
 	}
 	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
-	if !validID(uid) {
+	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
 	}
 	u := fmt.Sprintf("%s/v1/user/bookmarks/illust?user_id=%s&restrict=%s&filter=for_ios", baseURL, uid, restrict)
@@ -991,7 +992,7 @@ func (c *Client) GetBookmarkIllusts(restrict string) ([]byte, error) {
 }
 
 func (c *Client) BookmarkDelete(illustID string) error {
-	if !validID(illustID) {
+	if !ValidID(illustID) {
 		return fmt.Errorf("%w: invalid illust id", ErrInvalidParam)
 	}
 	data := url.Values{"illust_id": {illustID}}
@@ -1054,7 +1055,7 @@ func (c *Client) ProxyNext(nextURL string) ([]byte, error) {
 // recommends for the given illust ("Related works" on the artwork page).
 // Web AJAX, session auth, no pagination — a finite ~18-work list.
 func (c *Client) GetWorkRecommend(illustID string) ([]byte, error) {
-	if !validID(illustID) {
+	if !ValidID(illustID) {
 		return nil, fmt.Errorf("%w: invalid illust id", ErrInvalidParam)
 	}
 	u := fmt.Sprintf("https://www.pixiv.net/ajax/illust/%s/recommend/init?limit=18", illustID)

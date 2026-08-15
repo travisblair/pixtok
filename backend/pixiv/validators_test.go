@@ -72,15 +72,15 @@ func TestValidImageURL(t *testing.T) {
 func TestValidID(t *testing.T) {
 	valid := []string{"1", "123456789", "148227434"}
 	for _, id := range valid {
-		if !validID(id) {
-			t.Errorf("validID(%q) = false, want true", id)
+		if !ValidID(id) {
+			t.Errorf("ValidID(%q) = false, want true", id)
 		}
 	}
 
 	invalid := []string{"", "abc", "12a", "-1", "+1", "1.5", "1e3", "１２３", " 1", "1 "}
 	for _, id := range invalid {
-		if validID(id) {
-			t.Errorf("validID(%q) = true, want false", id)
+		if ValidID(id) {
+			t.Errorf("ValidID(%q) = true, want false", id)
 		}
 	}
 }

@@ -47,6 +47,22 @@ export type SnapshotInput = Omit<AppSnapshot, "v">;
 
 export function saveSnapshot(snap: SnapshotInput): void {
   try {
+    // The saved list is the LAST MAX_SNAPSHOT_ITEMS works, so the
+    // scroll position must be made RELATIVE to that window — an
+    // absolute scrollTop from a long feed would exceed the truncated
+    // DOM height on restore and clamp to the bottom of the window
+    // (reviewer finding: users always landed at the deepest card).
+    let scrollTop = snap.scrollTop;
+    const total = snap.illusts.length;
+    if (total > MAX_SNAPSHOT_ITEMS) {
+      const cardH = typeof window !== "undefined" ? window.innerHeight : 0;
+      if (cardH > 0) {
+        scrollTop = Math.max(
+          0,
+          scrollTop - (total - MAX_SNAPSHOT_ITEMS) * cardH
+        );
+      }
+    }
     const out: AppSnapshot = {
       v: 1,
       feedType: snap.feedType,
@@ -56,7 +72,7 @@ export function saveSnapshot(snap: SnapshotInput): void {
       topMode: snap.topMode,
       illusts: snap.illusts.slice(-MAX_SNAPSHOT_ITEMS),
       nextUrl: snap.nextUrl,
-      scrollTop: Math.max(0, Math.round(snap.scrollTop)),
+      scrollTop: Math.max(0, Math.round(scrollTop)),
       stack: snap.stack.slice(0, MAX_STACK_DEPTH),
       artist: snap.artist,
       recs: snap.recs.slice(0, MAX_SNAPSHOT_ITEMS),

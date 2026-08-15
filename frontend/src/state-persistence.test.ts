@@ -80,6 +80,23 @@ describe("saveSnapshot/loadSnapshot", () => {
     expect(loaded.recs.length).toBe(MAX_SNAPSHOT_ITEMS);
   });
 
+  it("makes scrollTop relative to the truncated window (deep-scroll restore)", () => {
+    // Reviewer finding (Qwen): scrollTop was saved ABSOLUTE while the
+    // work list was truncated to the last 100 — restoring a deep scroll
+    // (e.g. card 45 of 140) clamped to the bottom of the truncated
+    // window instead of the user's actual position.
+    const snap = baseSnapshot();
+    snap.illusts = Array.from({ length: MAX_SNAPSHOT_ITEMS + 40 }, (_, i) =>
+      makeIllust({ id: i + 1 })
+    );
+    const cardH = 768; // jsdom default innerHeight
+    // Absolute scroll: 40 truncated cards + 5 cards into the window.
+    snap.scrollTop = 45 * cardH;
+    saveSnapshot(snap);
+    const loaded = loadSnapshot()!;
+    expect(loaded.scrollTop).toBe(5 * cardH);
+  });
+
   it("returns null for corrupt JSON", () => {
     localStorage.setItem(KEY, "{not json");
     expect(loadSnapshot()).toBeNull();

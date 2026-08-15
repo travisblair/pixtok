@@ -157,18 +157,19 @@ func loadEnvKey(name string) string {
 	return ""
 }
 
-// publicHTTPS reports whether the deployment serves the app over HTTPS
-// (PIXTOK_PUBLIC_HTTPS=true — Tailscale Funnel/ngrok). When set, the
-// gate cookie and the login proxy's rewritten pixiv cookies keep Secure
-// (reviewer finding: Secure was stripped unconditionally, so session
-// cookies could ride plaintext HTTP on the public tunnel).
-var publicHTTPS = func() bool {
+// publicHTTPSEnabled reports whether the deployment serves the app over
+// HTTPS (PIXTOK_PUBLIC_HTTPS=true — Tailscale Funnel/ngrok). When set,
+// the gate cookie and the login proxy's rewritten pixiv cookies keep
+// Secure (reviewer finding: Secure was stripped unconditionally, so
+// session cookies could ride plaintext HTTP on the public tunnel).
+// Read per-call (not at init) so tests can pin it with t.Setenv.
+func publicHTTPSEnabled() bool {
 	v := os.Getenv("PIXTOK_PUBLIC_HTTPS")
 	if v == "" {
 		v = loadEnvKey("PIXTOK_PUBLIC_HTTPS")
 	}
 	return v == "true" || v == "1"
-}()
+}
 
 type statusRecorder struct {
 	http.ResponseWriter

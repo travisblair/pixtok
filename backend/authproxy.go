@@ -57,7 +57,7 @@ func rewriteCookie(setCookie string) string {
 		// dev it must still go, or the browser won't store/send the
 		// cookie at all.
 		if strings.HasPrefix(lower, "domain=") ||
-			(lower == "secure" && !publicHTTPS) ||
+			(lower == "secure" && !publicHTTPSEnabled()) ||
 			strings.HasPrefix(lower, "expires=") ||
 			strings.HasPrefix(lower, "max-age=") ||
 			strings.HasPrefix(lower, "samesite=") {

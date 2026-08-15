@@ -214,7 +214,7 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 			Path:     "/",
 			MaxAge:   30 * 24 * 60 * 60,
 			HttpOnly: true,
-			Secure:   publicHTTPS,
+			Secure:   publicHTTPSEnabled(),
 			SameSite: http.SameSiteLaxMode,
 		})
 		w.Header().Set("Content-Type", "application/json")

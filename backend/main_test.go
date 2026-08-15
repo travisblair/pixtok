@@ -899,92 +899,6 @@ func doReqJSON(t *testing.T, h http.Handler, method, path, key, body string) *ht
 	return rr
 }
 
-func TestPkceBeginComplete(t *testing.T) {
-	var gotCode, gotVerifier string
-	f := &fakeAPI{
-		pkceExchangeFn: func(code, verifier string) (string, string, int, error) {
-			gotCode, gotVerifier = code, verifier
-			return "rt-1", "at-1", 3600, nil
-		},
-	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
-
-	rr := doReq(t, h, http.MethodPost, "/api/auth/pkce/begin", "secret")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("begin = %d, want 200", rr.Code)
-	}
-	var begin struct {
-		LoginURL string `json:"login_url"`
-		State    string `json:"state"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &begin); err != nil {
-		t.Fatalf("parse begin: %v", err)
-	}
-	if begin.State == "" || !strings.Contains(begin.LoginURL, "code_challenge=") {
-		t.Fatalf("begin body: %s", rr.Body.String())
-	}
-	if !strings.Contains(begin.LoginURL, "pixiv-android") {
-		t.Fatalf("login_url missing client: %s", begin.LoginURL)
-	}
-
-	// Complete with the state: exchange called, tokens persisted.
-	rr2 := doReqJSON(t, h, http.MethodPost, "/api/auth/pkce/complete", "secret",
-		fmt.Sprintf(`{"code":"the-code","state":%q}`, begin.State))
-	if rr2.Code != http.StatusOK {
-		t.Fatalf("complete = %d, want 200 (%s)", rr2.Code, rr2.Body.String())
-	}
-	if gotCode != "the-code" || gotVerifier == "" {
-		t.Fatalf("exchange got code=%q verifier=%q", gotCode, gotVerifier)
-	}
-
-	// Single-use: replaying the same state fails.
-	rr3 := doReqJSON(t, h, http.MethodPost, "/api/auth/pkce/complete", "secret",
-		fmt.Sprintf(`{"code":"again","state":%q}`, begin.State))
-	if rr3.Code != http.StatusBadRequest {
-		t.Fatalf("replayed state = %d, want 400", rr3.Code)
-	}
-}
-
-func TestPkceCompleteUnknownState(t *testing.T) {
-	f := &fakeAPI{}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
-	rr := doReqJSON(t, h, http.MethodPost, "/api/auth/pkce/complete", "secret",
-		`{"code":"x","state":"never-issued"}`)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("unknown state = %d, want 400", rr.Code)
-	}
-}
-
-func TestSessionCapture(t *testing.T) {
-	var gotSess, gotCsrf string
-	f := &fakeAPI{
-		scrapeCsrfFn: func(phpsessid string) (string, error) {
-			return "feedfacefeedfacefeedfacefeedface", nil
-		},
-		setWebSessionFn: func(phpsessid, csrf string) error {
-			gotSess, gotCsrf = phpsessid, csrf
-			return nil
-		},
-	}
-	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
-
-	rr := doReqJSON(t, h, http.MethodPost, "/api/auth/session", "secret",
-		`{"phpsessid":"127480663_ab12cd34ef56ab78cd90ef12ab34cd56"}`)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("session = %d, want 200 (%s)", rr.Code, rr.Body.String())
-	}
-	if gotSess == "" || gotCsrf != "feedfacefeedfacefeedfacefeedface" {
-		t.Fatalf("set got sess=%q csrf=%q", gotSess, gotCsrf)
-	}
-
-	// Malformed PHPSESSID → 400 before any client call.
-	rr2 := doReqJSON(t, h, http.MethodPost, "/api/auth/session", "secret",
-		`{"phpsessid":"javascript:alert(1)"}`)
-	if rr2.Code != http.StatusBadRequest {
-		t.Fatalf("bad session = %d, want 400", rr2.Code)
-	}
-}
-
 func TestAuthStatus(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
@@ -1126,6 +1040,7 @@ func TestAuthProxyStripsPixtokCookies(t *testing.T) {
 }
 
 func TestAuthProxyRewritesCookiesAndLocations(t *testing.T) {
+	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false") // pin: strip Secure for HTTP dev
 	_, targets := fakePixivUpstream(t)
 	withProxyTargets(t, targets)
 	f := &fakeAPI{}

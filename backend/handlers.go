@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -12,7 +11,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,8 +107,6 @@ func randomB64(bytes int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-var phpsessidRe = regexp.MustCompile(`^[0-9]+_[0-9a-fA-F]{16,}$`)
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -128,101 +124,13 @@ func newServer(api pixivAPI, cache *imageCache, apiKey string) http.Handler {
 func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 	pkce := newPkceStore()
 
-	// ── Login capture (the /api/auth/* protocol). All POST-only, all
-	// behind the API-key gate below; the login shim (Node, any OS) is
-	// the only caller. Credentials never touch these endpoints — only
-	// one-time OAuth codes and cookies the shim captured. ────────────
-
-	mux.HandleFunc("/api/auth/pkce/begin", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		verifier, err := randomB64(32)
-		if err != nil {
-			http.Error(w, "rng failure", http.StatusInternalServerError)
-			return
-		}
-		sum := sha256.Sum256([]byte(verifier))
-		challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-		state, err := randomB64(16)
-		if err != nil {
-			http.Error(w, "rng failure", http.StatusInternalServerError)
-			return
-		}
-		pkce.put(state, verifier)
-		loginURL := fmt.Sprintf(
-			"https://app-api.pixiv.net/web/v1/login?code_challenge=%s&code_challenge_method=S256&client=pixiv-android",
-			challenge,
-		)
-		writeJSON(w, map[string]string{"login_url": loginURL, "state": state})
-	})
-
-	mux.HandleFunc("/api/auth/pkce/complete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Code  string `json:"code"`
-			State string `json:"state"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
-			return
-		}
-		if req.Code == "" || req.State == "" {
-			http.Error(w, "code and state required", http.StatusBadRequest)
-			return
-		}
-		verifier, ok := pkce.take(req.State)
-		if !ok {
-			http.Error(w, "unknown or expired state", http.StatusBadRequest)
-			return
-		}
-		refreshTok, accessTok, expiresIn, err := api.ExchangePkce(req.Code, verifier)
-		if err != nil {
-			log.Printf("ERROR pkce exchange: %v", err)
-			http.Error(w, "pkce exchange failed", http.StatusBadGateway)
-			return
-		}
-		if err := api.SetTokens(refreshTok, accessTok, expiresIn); err != nil {
-			log.Printf("ERROR persisting tokens: %v", err)
-			http.Error(w, "persist failed", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, map[string]bool{"ok": true})
-	})
-
-	mux.HandleFunc("/api/auth/session", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Phpsessid string `json:"phpsessid"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
-			return
-		}
-		if !phpsessidRe.MatchString(req.Phpsessid) {
-			http.Error(w, "invalid phpsessid format", http.StatusBadRequest)
-			return
-		}
-		csrf, err := api.ScrapeCsrfFor(req.Phpsessid)
-		if err != nil {
-			log.Printf("ERROR csrf scrape: %v", err)
-			http.Error(w, "session validation failed", http.StatusBadGateway)
-			return
-		}
-		if err := api.SetWebSession(req.Phpsessid, csrf); err != nil {
-			log.Printf("ERROR persisting session: %v", err)
-			http.Error(w, "persist failed", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, map[string]bool{"ok": true})
-	})
+	// ── Login capture (the /api/auth/* protocol). ──
+	// The legacy manual-capture routes (POST /api/auth/pkce/begin,
+	// POST /api/auth/pkce/complete, POST /api/auth/session) were REMOVED
+	// (reviewer finding): they belonged to the deleted Node shim
+	// architecture and are unreachable in the proxied in-app flow
+	// (GET /api/auth/pkce/start → px/* proxy → server-side callback).
+	// /api/auth/status remains — the Account screen's health check.
 
 	mux.HandleFunc("/api/auth/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -283,7 +191,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 	mux.HandleFunc("GET /api/newest", func(w http.ResponseWriter, r *http.Request) {
 		r18 := r.URL.Query().Get("r18") == "true"
 		lastID := r.URL.Query().Get("lastId")
-		if lastID != "" && !validNumericID(lastID) {
+		if lastID != "" && !pixiv.ValidID(lastID) {
 			http.Error(w, "invalid lastId", http.StatusBadRequest)
 			return
 		}
@@ -362,7 +270,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			return
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/user/"), "/illusts")
-		if !validNumericID(id) {
+		if !pixiv.ValidID(id) {
 			http.Error(w, "invalid user id", http.StatusBadRequest)
 			return
 		}
@@ -575,7 +483,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 				return
 			}
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/illust/"), "/like")
-			if !validNumericID(id) {
+			if !pixiv.ValidID(id) {
 				http.Error(w, "invalid illust id", http.StatusBadRequest)
 				return
 			}
@@ -593,7 +501,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 				return
 			}
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/illust/"), "/unlike")
-			if !validNumericID(id) {
+			if !pixiv.ValidID(id) {
 				http.Error(w, "invalid illust id", http.StatusBadRequest)
 				return
 			}
@@ -613,7 +521,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 				return
 			}
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/illust/"), "/recs")
-			if !validNumericID(id) {
+			if !pixiv.ValidID(id) {
 				http.Error(w, "invalid illust id", http.StatusBadRequest)
 				return
 			}
@@ -644,7 +552,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 				return
 			}
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/illust/"), "/ugoira_meta")
-			if !validNumericID(id) {
+			if !pixiv.ValidID(id) {
 				http.Error(w, "invalid illust id", http.StatusBadRequest)
 				return
 			}
@@ -664,7 +572,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		}
 		if strings.HasSuffix(r.URL.Path, "/related") {
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/illust/"), "/related")
-			if !validNumericID(id) {
+			if !pixiv.ValidID(id) {
 				http.Error(w, "invalid illust id", http.StatusBadRequest)
 				return
 			}
@@ -852,21 +760,6 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-}
-
-// validNumericID reports whether s is a non-empty all-digits string.
-// Handler-level guard so client input errors map to 400, not a 502
-// from the upstream client.
-func validNumericID(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, ch := range s {
-		if ch < '0' || ch > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // apiKeyGate requires the shared key (set in .env as PIXTOK_API_KEY) on
