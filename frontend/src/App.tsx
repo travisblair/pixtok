@@ -1,4 +1,4 @@
-import { createSignal, createEffect, For, Show, onCleanup, onMount } from "solid-js";
+import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
 import { api } from "./api";
 import type { PixivIllust } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
@@ -84,11 +84,56 @@ export default function App() {
   // "artist") — persisted so a reload restores the SAME stacking order
   // instead of guessing (the old restore always put the artist on top,
   // flipping artist-under-stack sessions).
-  let layerSeq: string[] = [];
+  const [layerSeq, setLayerSeq] = createSignal<string[]>([]);
   // z-index of the topmost overlay (0 = nothing above the main feed).
-  // Only the top layer may keep image windows alive — covered layers
-  // unload to keep memory bounded (see FeedCard suppressImages).
-  const [topZ, setTopZ] = createSignal(0);
+  // DERIVED, never assigned: the single source of truth is the open
+  // order plus each layer's state. Every close path used to recompute
+  // this independently, and open-during-close races left it pointing at
+  // a layer that wasn't visually on top — the visible layer then marked
+  // itself obscured and unloaded every image (the black-screen class).
+  // Closing layers are skipped: they're already on the way out, so the
+  // layer beneath takes over immediately.
+  const topZ = createMemo(() => {
+    let z = 0;
+    for (const key of layerSeq()) {
+      if (key === "artist") {
+        const a = artist();
+        if (a && !artistClosing()) z = a.z;
+      } else if (key === "search") {
+        const sl = searchLayer();
+        if (sl && !searchClosing()) z = sl.z;
+      } else if (key.startsWith("s")) {
+        const i = Number(key.slice(1));
+        const entry = stack()[i];
+        if (entry && closingDepth() !== i + 1) z = entry.z;
+      }
+    }
+    return z;
+  });
+
+  // Dev invariant: a rendered, non-closing layer must never sit above
+  // topZ — that would suppress the visible layer's images. Log loudly
+  // so dogfood sessions catch any future desync before it ships.
+  if (import.meta.env.DEV) {
+    createEffect(() => {
+      const tz = topZ();
+      const offenders: string[] = [];
+      const a = artist();
+      if (a && !artistClosing() && a.z > tz) offenders.push(`artist(z=${a.z})`);
+      const sl = searchLayer();
+      if (sl && !searchClosing() && sl.z > tz) offenders.push(`search(z=${sl.z})`);
+      stack().forEach((entry, i) => {
+        if (closingDepth() !== i + 1 && entry.z > tz) {
+          offenders.push(`s${i}(z=${entry.z})`);
+        }
+      });
+      if (offenders.length > 0) {
+        console.warn(
+          `[z-index] layer(s) above topZ=${tz}: ${offenders.join(", ")} — images suppressed`
+        );
+      }
+    });
+  }
   // Pixiv's personalized feeds re-inject works across pages (the street
   // cursor explicitly carries overlap) — dedupe by id on append.
   const seenIds = new Set<number>();
@@ -235,8 +280,7 @@ export default function App() {
     }
     toast.hide(); // don't let the toast sit hidden under the stack
     layerZ++;
-    setTopZ(layerZ);
-    layerSeq.push(`s${stack().length}`);
+    setLayerSeq([...layerSeq(), `s${stack().length}`]);
     setStack(prev => [...prev, { illust, z: layerZ }]);
   }
 
@@ -247,14 +291,10 @@ export default function App() {
     setClosingDepth(depth); // play the slide-out on the top view
     // Flush the close to the snapshot before the animation — a kill
     // during the slide-out must not resurrect this level.
-    layerSeq = layerSeq.filter((k) => k !== `s${depth - 1}`);
+    setLayerSeq(layerSeq().filter((k) => k !== `s${depth - 1}`));
     persistNow({ stack: stack().slice(0, -1).map((s) => s.illust) });
     setTimeout(() => {
-      setStack(prev => {
-        const next = prev.slice(0, -1);
-        setTopZ(next.length > 0 ? next[next.length - 1].z : (artist()?.z ?? searchLayer()?.z ?? 0));
-        return next;
-      });
+      setStack(prev => prev.slice(0, -1));
       setClosingDepth(null);
     }, CLOSE_TIMEOUT_MS);
   }
@@ -265,34 +305,42 @@ export default function App() {
   // overlay z-indexes ABOVE the modal/toast strata and bury popups
   // underneath the feed layers.
   function resetLayerZIfIdle() {
-    if (stack().length === 0 && !artist() && !searchLayer()) {
+    if (
+      stack().length === 0 &&
+      !artist() &&
+      !searchLayer() &&
+      closingDepth() === null &&
+      !artistClosing() &&
+      !searchClosing()
+    ) {
       layerZ = LAYER_Z_BASE;
     }
   }
 
   function closeAllStacks() {
-    layerSeq = layerSeq.filter((k) => !k.startsWith("s") && k !== "artist");
-    persistNow({ stack: [], artist: null, modalOpen: false });
+    // Stacks and the modal close; an artist page (or search layer)
+    // beneath stays open and keeps its place in the open order. The
+    // old code silently persisted artist:null here — a reload dropped
+    // the layer you had just landed back on.
+    setLayerSeq(layerSeq().filter((k) => !k.startsWith("s")));
+    persistNow({ stack: [], modalOpen: false });
     setStack([]);
     setModalOpen(false);
-    setTopZ(artist()?.z ?? searchLayer()?.z ?? 0);
     resetLayerZIfIdle();
   }
 
   function openArtist(illust: PixivIllust) {
     layerZ++;
-    setTopZ(layerZ);
     setArtist({ id: illust.user.id, name: illust.user.name || illust.user.account, z: layerZ });
-    layerSeq.push("artist");
+    setLayerSeq([...layerSeq(), "artist"]);
   }
 
   // Search's artist rows carry a bare user identity (no illust object) —
   // same artist overlay, different entry shape.
   function openArtistUser(user: { id: number; name: string }) {
     layerZ++;
-    setTopZ(layerZ);
     setArtist({ id: user.id, name: user.name, z: layerZ });
-    layerSeq.push("artist");
+    setLayerSeq([...layerSeq(), "artist"]);
   }
 
   function closeArtist() {
@@ -303,13 +351,14 @@ export default function App() {
     // would miss it — the next reload resurrects the artist page with
     // no way out (reload → restore → reload loop until iOS kills the
     // tab). Same flush on every close action below.
-    layerSeq = layerSeq.filter((k) => k !== "artist");
+    const closingZ = artist()?.z;
+    setLayerSeq(layerSeq().filter((k) => k !== "artist"));
     persistNow({ artist: null });
     setTimeout(() => {
-      setArtist(null);
+      // Idempotent: if a NEW artist opened mid-animation (different z),
+      // this stale timer must not clear it.
+      setArtist(a => (closingZ !== undefined && a && a.z === closingZ ? null : a));
       setArtistClosing(false);
-      const s = stack();
-      setTopZ(s.length > 0 ? s[s.length - 1].z : searchLayer()?.z ?? 0);
       resetLayerZIfIdle();
     }, CLOSE_TIMEOUT_MS);
   }
@@ -317,9 +366,8 @@ export default function App() {
   function openSearch() {
     if (searchLayer()) return;
     layerZ++;
-    setTopZ(layerZ);
     setSearchLayer({ z: layerZ });
-    layerSeq.push("search");
+    setLayerSeq([...layerSeq(), "search"]);
   }
 
   /** Fresh search-layer state seeded with a tag (the tag's works page). */
@@ -360,13 +408,12 @@ export default function App() {
   function closeSearch() {
     if (searchClosing()) return;
     setSearchClosing(true); // play the slide-out
-    layerSeq = layerSeq.filter((k) => k !== "search");
+    const closingZ = searchLayer()?.z;
+    setLayerSeq(layerSeq().filter((k) => k !== "search"));
     persistNow({ searchOpen: false, search: null });
     setTimeout(() => {
-      setSearchLayer(null);
+      setSearchLayer(sl => (closingZ !== undefined && sl && sl.z === closingZ ? null : sl));
       setSearchClosing(false);
-      const s = stack();
-      setTopZ(s.length > 0 ? s[s.length - 1].z : (artist()?.z ?? 0));
       resetLayerZIfIdle();
     }, CLOSE_TIMEOUT_MS);
   }
@@ -512,19 +559,19 @@ export default function App() {
       if (snap.artist) {
         setArtist({ id: snap.artist.id, name: snap.artist.name, z: restoredArtistZ });
       }
-      layerSeq = order.filter((k) => {
-        if (k === "search") return snap.searchOpen && !!snap.search;
-        if (k === "artist") return !!snap.artist;
-        const i = Number(k.slice(1));
-        return Number.isInteger(i) && i >= 0 && i < snap.stack.length;
-      });
-
-      // topZ must be the max of every restored layer — pointing it
-      // anywhere lower makes the topmost layer mark itself obscured and
-      // suppress every image (the black-screen bug class).
-      setTopZ(
-        Math.max(restoredSearchZ, restoredArtistZ, ...restoredZs)
+      setLayerSeq(
+        order.filter((k) => {
+          if (k === "search") return snap.searchOpen && !!snap.search;
+          if (k === "artist") return !!snap.artist;
+          const i = Number(k.slice(1));
+          return Number.isInteger(i) && i >= 0 && i < snap.stack.length;
+        })
       );
+
+      // topZ is DERIVED from the restored open order + layer state —
+      // no assignment here (see the topZ memo). The modal's obscured
+      // flag (topZ() > 0) must still read 0 when nothing was restored
+      // above it.
 
       if (snap.modalOpen && snap.recs.length > 0) {
         setRecs(snap.recs);
@@ -613,7 +660,7 @@ export default function App() {
       modalOpen: modalOpen(),
       searchOpen: searchLayer() !== null,
       search: searchState(),
-      layerOrder: [...layerSeq],
+      layerOrder: [...layerSeq()],
     };
   }
 

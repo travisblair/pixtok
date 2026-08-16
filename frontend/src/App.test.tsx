@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import App from "./App";
 import { makeFeedOf, makeFeed, makeIllust } from "./test-fixtures";
@@ -934,5 +934,185 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(29)
     );
+  });
+
+  describe("z-index desync regressions (black-screen class)", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // Suppressed cards swap their src to a 1px GIF placeholder; alive
+    // cards point at the image proxy. This is the black screen signal.
+    const artistImgSrc = (c: HTMLElement) =>
+      c.querySelector(".artist-view img")?.getAttribute("src") ?? "";
+
+    async function openTwoDeepStack(container: HTMLElement) {
+      await fireEvent.click(
+        container.querySelector(".feed-card .card-overlay")!
+      );
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(1)
+      );
+      await fireEvent.click(
+        container
+          .querySelectorAll(".related-view:last-of-type .feed-card")[1]
+          .querySelector(".card-overlay")!
+      );
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(2)
+      );
+    }
+
+    it("popping a stack level under an open artist keeps the artist's images alive", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await openTwoDeepStack(container);
+
+      // Artist page on top of both stack levels.
+      await fireEvent.click(
+        container.querySelector(".related-view:last-of-type .card-artist a")!
+      );
+      await waitFor(() =>
+        expect(container.querySelector(".artist-view")).toBeTruthy()
+      );
+      vi.advanceTimersByTime(700); // flush image activation timers
+      expect(artistImgSrc(container)).toContain("/api/img");
+
+      // Pop the top stack level. The artist stays above the remaining
+      // stack — the old close path pointed topZ at that stack, marking
+      // the artist "obscured" and unloading every image (black screen).
+      await fireEvent.click(
+        container
+          .querySelectorAll(".related-view")[1]
+          .querySelector(".related-back")!
+      );
+      vi.advanceTimersByTime(260); // slide-out window elapses
+      await vi.runAllTicks();
+      expect(container.querySelectorAll(".related-view").length).toBe(1);
+      expect(artistImgSrc(container)).toContain("/api/img");
+    });
+
+    it("an artist opened during a stack's slide-out stays on top with images alive", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await openTwoDeepStack(container);
+
+      // Start popping the top level (260ms slide-out timer pending)…
+      await fireEvent.click(
+        container
+          .querySelectorAll(".related-view")[1]
+          .querySelector(".related-back")!
+      );
+      // …and, mid-animation, tap an artist name in the stack beneath.
+      await fireEvent.click(
+        container.querySelector(".related-view .card-artist a")!
+      );
+      await waitFor(() =>
+        expect(container.querySelector(".artist-view")).toBeTruthy()
+      );
+
+      // The stale pop timeout must NOT demote the artist to below the
+      // remaining stack (old code: topZ pointed at the stack).
+      vi.advanceTimersByTime(260);
+      await vi.runAllTicks();
+      expect(container.querySelectorAll(".related-view").length).toBe(1);
+      vi.advanceTimersByTime(700);
+      expect(artistImgSrc(container)).toContain("/api/img");
+    });
+
+    it("close-all over an artist lands back on the artist page with images alive", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+
+      await fireEvent.click(
+        container.querySelector(".feed-card .card-overlay")!
+      );
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(1)
+      );
+      await fireEvent.click(
+        container.querySelector(".related-view .card-artist a")!
+      );
+      await waitFor(() =>
+        expect(container.querySelector(".artist-view")).toBeTruthy()
+      );
+      vi.advanceTimersByTime(700);
+      expect(artistImgSrc(container)).toContain("/api/img");
+
+      // Push a stack from inside the artist page.
+      await fireEvent.click(
+        container.querySelector(".artist-view .feed-card .card-overlay")!
+      );
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(2)
+      );
+
+      // Close-all from the stack.
+      await fireEvent.click(container.querySelector(".close-all-btn")!);
+      await vi.runAllTicks();
+      expect(container.querySelectorAll(".related-view").length).toBe(0);
+      expect(container.querySelector(".artist-view")).toBeTruthy();
+      vi.advanceTimersByTime(700); // re-activation after un-obscuring
+      expect(artistImgSrc(container)).toContain("/api/img");
+
+      // The snapshot must keep the artist page (old code persisted
+      // artist:null — a reload would silently drop the layer beneath).
+      const snap = JSON.parse(
+        localStorage.getItem("pixtok_state_v2") ?? "{}"
+      );
+      expect(snap.artist).not.toBeNull();
+      expect(snap.layerOrder).toContain("artist");
+    });
+
+    it("a new artist opened during the old artist's slide-out survives the stale close timer", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+
+      // Open artist A from the first feed card.
+      await fireEvent.click(
+        container.querySelector(".feed-card .card-artist a")!
+      );
+      await waitFor(() =>
+        expect(container.querySelector(".artist-view")).toBeTruthy()
+      );
+      expect(
+        container.querySelector(".artist-name-badge")?.textContent
+      ).toContain("Artist 1");
+
+      // Back — slide-out starts, a stale 260ms timer is pending.
+      await fireEvent.click(
+        container.querySelector(".artist-view .related-back")!
+      );
+
+      // Mid-animation, tap a DIFFERENT artist in the feed beneath.
+      await fireEvent.click(
+        container.querySelectorAll(".feed-card .card-artist a")[1]!
+      );
+      await waitFor(() =>
+        expect(
+          container.querySelector(".artist-name-badge")?.textContent
+        ).toContain("Artist 2")
+      );
+
+      // The stale close timer fires: it must NOT clear the new artist.
+      vi.advanceTimersByTime(260);
+      await vi.runAllTicks();
+      expect(container.querySelector(".artist-view")).toBeTruthy();
+      expect(
+        container.querySelector(".artist-name-badge")?.textContent
+      ).toContain("Artist 2");
+    });
   });
 });
