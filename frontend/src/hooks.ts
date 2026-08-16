@@ -22,7 +22,10 @@ export function useFeedSentinel(
   getSentinel: () => HTMLDivElement | undefined,
   canLoad: () => boolean,
   loadMore: () => void,
-  rootMargin = "2400px"
+  // Plain string or accessor. The accessor form is TRACKED: when it
+  // returns a different margin the effect re-subscribes with it (grid
+  // vs strip modes need different prefetch distances — see App.tsx).
+  rootMargin: string | (() => string) = "2400px"
 ) {
   let observer: IntersectionObserver | undefined;
   onCleanup(() => observer?.disconnect());
@@ -35,16 +38,22 @@ export function useFeedSentinel(
     // re-subscribes when the sentinel mounts after unlock, and infinite
     // scroll stays dead.
     const loadable = canLoad();
+    const margin = typeof rootMargin === "function" ? rootMargin() : rootMargin;
     const sentinel = getSentinel();
     if (!sentinel || !loadable) return;
     const root = sentinel.closest<HTMLElement>(".feed-container") ?? undefined;
     observer = new IntersectionObserver(
       (entries) => {
+        // canLoad() re-check at fire time: the observer's initial
+        // callback after a re-subscribe must not fire when the screen
+        // marked itself unloadable (e.g. a failed page load — the
+        // caller's canLoad includes its error signal, which is what
+        // stops the failed-request → re-subscribe → re-fire storm).
         if (entries[0].isIntersecting && canLoad()) {
           loadMore();
         }
       },
-      { root, rootMargin }
+      { root, rootMargin: margin }
     );
     observer.observe(sentinel);
   });

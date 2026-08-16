@@ -391,3 +391,46 @@ describe("SearchScreen", () => {
     expect(container.textContent).toContain("Couldn't search");
   });
 });
+
+
+describe("SearchScreen pagination failure", () => {
+  it("a failed next page stops auto-pagination; the retry button recovers", async () => {
+    // Page 1 (last_page 2) succeeds → hasMore true → the sentinel
+    // auto-fires page 2, which fails → must NOT storm.
+    mockedApi.searchArtworks
+      .mockResolvedValueOnce(artworksResp(1, 2))
+      .mockRejectedValueOnce(new Error("429: rate limited"))
+      .mockResolvedValueOnce(artworksResp(2, 2));
+    const { container } = render(() => <SearchScreen {...baseProps} />);
+    const input = container.querySelector(".search-input") as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "fantasy" } });
+    await fireEvent.submit(input.closest("form")!);
+
+    await waitFor(() =>
+      expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(2)
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector(".feed-sentinel .mode-pill")?.textContent
+      ).toContain("Couldn't load")
+    );
+
+    // No storm: still exactly 2 after a long settle.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(2);
+
+    // Retry recovers: page 2 lands, 6 works total.
+    await fireEvent.click(
+      container.querySelector(".feed-sentinel .mode-pill")!
+    );
+    await waitFor(() =>
+      expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(3)
+    );
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(6)
+    );
+    // hasMore false (p=2 = last_page) → no further fires.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(3);
+  });
+});

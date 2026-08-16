@@ -222,6 +222,7 @@ export default function App() {
     setIllusts([]);
     setNextUrl(null);
     setLoading(false);
+    setLoadError(false); // fresh feed has no load error
     seenIds.clear();
     void loadMore(true); // fresh first page, sequenced AFTER the resets
   }
@@ -230,6 +231,7 @@ export default function App() {
     setIllusts([]);
     setNextUrl(null);
     setLoading(false);
+    setLoadError(false); // fresh feed has no load error
     seenIds.clear();
     void loadMore(true); // fresh first page, sequenced AFTER the resets
   }
@@ -702,8 +704,21 @@ export default function App() {
   });
   useFeedSentinel(
     () => sentinelRef,
-    () => !!nextUrl() && !loading(),
-    () => void loadMore()
+    // loadError() must gate pagination: without it, a failed page load
+    // re-subscribes the observer (loading flips false) and its initial
+    // callback fires immediately — an infinite 429 loop that rate-limits
+    // pixiv. With the guard, a failure shows the retry button and STOPS
+    // until the user taps it.
+    () => !!nextUrl() && !loading() && !loadError(),
+    () => void loadMore(),
+    // Prefetch distance depends on the renderer. The strip's 2400px is
+    // ~2.7 100dvh cards. Grid cells are ~123px: the same absolute
+    // margin would sit far inside the first page (30 cells ≈ 1300px),
+    // auto-firing pages on boot and chain-firing after every load.
+    // ~400px ≈ 3 rows of cells: enough prefetch, and the boot-time
+    // sentinel distance (~500px) stays OUTSIDE it, so nothing fires
+    // until the user actually scrolls near the bottom.
+    () => (feedViewMode() === "grid" ? "400px" : "2400px")
   );
 
   return (

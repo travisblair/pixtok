@@ -106,6 +106,12 @@ export async function setupApiMocks(page, options = {}) {
     total: 2,
   };
   const likeFails = options.likeFails ?? false;
+  // Fail the FIRST street continuation once (500), succeed afterwards —
+  // exercises the "pagination failure must not auto-retry" path.
+  const streetNextFailOnce = options.streetNextFailOnce ?? false;
+  let streetNextFailed = false;
+  // ALWAYS fail street continuations (persistent rate limit).
+  const streetNextFails = options.streetNextFails ?? false;
   const imgFailOnce = options.imgFailOnce ?? null;
 
   const mocks = {
@@ -224,6 +230,15 @@ export async function setupApiMocks(page, options = {}) {
     // on the body (not call count) keeps feed REVISITS working: switching
     // tabs and back re-requests page 1 and must get streetBatch again.
     const isFirstPage = body === "" || body === "{}";
+    if (streetNextFails && !isFirstPage) {
+      route.fulfill(json({ error: "rate limited" }, 429));
+      return;
+    }
+    if (streetNextFailOnce && !isFirstPage && !streetNextFailed) {
+      streetNextFailed = true;
+      route.fulfill(json({ error: "rate limited" }, 429));
+      return;
+    }
     const batch = isFirstPage ? streetBatch : streetNextBatch;
     route.fulfill(json(batch));
   });
@@ -325,9 +340,17 @@ export async function setupApiMocks(page, options = {}) {
   });
 
   // ── GET /api/next?url=… (pagination) ──────────────────────────────────
+  const nextFails = options.nextFails ?? false;
   await page.route(/\/api\/next(\?|$)/, (route) => {
+    // Record BEFORE the failure branch so specs can assert the request
+    // count even when the continuation 429s (the bounded-requests
+    // assertion needs to see failed attempts too).
     const url = new URL(route.request().url());
     mocks.nextCalls.push({ url: url.searchParams.get("url") });
+    if (nextFails) {
+      route.fulfill(json({ error: "rate limited" }, 429));
+      return;
+    }
     route.fulfill(json(nextBatch));
   });
 

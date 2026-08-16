@@ -302,7 +302,10 @@ export default function SearchScreen(props: {
 
   useFeedSentinel(
     () => sentinelRef,
-    () => hasMore() && !loading(),
+    // loadMoreError gates pagination: a failed page must stop
+    // auto-firing (same re-subscribe storm as App.tsx) and wait for the
+    // retry button instead.
+    () => hasMore() && !loading() && !loadMoreError(),
     loadMore
   );
 

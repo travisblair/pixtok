@@ -1222,3 +1222,89 @@ describe("App", () => {
       vi.unstubAllGlobals();
     });
   });
+
+
+  describe("pagination failure (429 storm regression)", () => {
+    it("a failed page load stops auto-pagination; the retry button recovers", async () => {
+      // jsdom's IO mock reports the sentinel intersecting immediately,
+      // so with a next_url the continuation fires on its own — same
+      // geometry as the grid-mode bug on a real phone.
+      mockedApi.getStreet
+        .mockResolvedValueOnce(makeFeedOf(30, 1, "/api/next?cursor=p2"))
+        .mockRejectedValueOnce(new Error("429: rate limited"))
+        .mockResolvedValueOnce(makeFeedOf(10, 100, null));
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await waitFor(() =>
+        expect(mockedApi.getStreet).toHaveBeenCalledTimes(2)
+      );
+      // The failure surfaces the retry button…
+      await waitFor(() =>
+        expect(
+          container.querySelector(".feed-sentinel .mode-pill")?.textContent
+        ).toContain("Couldn't load")
+      );
+      // …and MUST NOT auto-retry: after a long settle, still exactly 2.
+      await new Promise((r) => setTimeout(r, 400));
+      expect(mockedApi.getStreet).toHaveBeenCalledTimes(2);
+
+      // The retry button recovers.
+      await fireEvent.click(
+        container.querySelector(".feed-sentinel .mode-pill")!
+      );
+      await waitFor(() =>
+        expect(mockedApi.getStreet).toHaveBeenCalledTimes(3)
+      );
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(40)
+      );
+    });
+
+    it("a feed switch clears a stale load error so pagination can resume", async () => {
+      // Call order: #1 boot page, #2 continuation (fails), #3 fresh Home
+      // page after the feed switch, #4 its continuation (must fire —
+      // proving the stale loadError was cleared and canLoad is true
+      // again). The chain ENDS on a null next_url or jsdom's
+      // always-intersecting sentinel paginates forever by construction.
+      mockedApi.getStreet
+        .mockResolvedValueOnce(makeFeedOf(30, 1, "/api/next?cursor=p2"))
+        .mockRejectedValueOnce(new Error("429: rate limited"))
+        .mockResolvedValueOnce(makeFeedOf(30, 1, "/api/next?cursor=p2"))
+        .mockResolvedValueOnce(makeFeedOf(10, 100, null));
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(mockedApi.getStreet).toHaveBeenCalledTimes(2)
+      );
+      await waitFor(() =>
+        expect(
+          container.querySelector(".feed-sentinel .mode-pill")?.textContent
+        ).toContain("Couldn't load")
+      );
+
+      // Switch to Ranking and back to Home: the fresh Home load must be
+      // able to paginate (loadError reset by the feed switch).
+      await fireEvent.click(container.querySelector(".burger-pill")!);
+      await fireEvent.click(
+        [...container.querySelectorAll(".drawer-item")].find(
+          (b) => b.textContent === "Ranking"
+        )!
+      );
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await fireEvent.click(container.querySelector(".burger-pill")!);
+      await fireEvent.click(
+        [...container.querySelectorAll(".drawer-item")].find(
+          (b) => b.textContent === "Home"
+        )!
+      );
+      // Home auto-paginates again (30 + 10) — the error guard cleared.
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(40)
+      );
+      await new Promise((r) => setTimeout(r, 300));
+      expect(mockedApi.getStreet).toHaveBeenCalledTimes(4);
+    });
+  });

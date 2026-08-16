@@ -70,7 +70,10 @@ export default function RelatedView(props: {
 
   useFeedSentinel(
     () => sentinelRef,
-    () => !!nextUrl() && !loading(),
+    // Errors gate pagination: a failed page must stop auto-firing (the
+    // re-subscribe storm in App.tsx applies here too) and wait for the
+    // retry button.
+    () => !!nextUrl() && !loading() && !loadMoreError() && !error(),
     () => void loadMore(),
     "200px"
   );

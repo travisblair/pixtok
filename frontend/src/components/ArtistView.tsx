@@ -85,8 +85,12 @@ export default function ArtistView(props: {
 
   useFeedSentinel(
     () => sentinelRef,
-    () => !!nextUrl() && !loading(),
-    () => void loadMore()
+    // loadMoreError gates pagination: a failed page must stop
+    // auto-firing (see App.tsx — the same re-subscribe storm applies
+    // here) and wait for the retry button instead.
+    () => !!nextUrl() && !loading() && !loadMoreError(),
+    () => void loadMore(),
+    () => (artistViewMode() === "grid" ? "400px" : "2400px")
   );
 
   void loadMore();
