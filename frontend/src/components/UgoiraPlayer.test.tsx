@@ -463,15 +463,15 @@ describe("UgoiraPlayer", () => {
     expect(container.querySelector(".ugoira-badge")).toBeTruthy();
   });
 
-  it("a stalled zip download is aborted after 30s and shows the error badge", async () => {
+  it("a stalled zip download is aborted after the deadline and shows the error badge", async () => {
     installFetchMock({ stall: true });
     const { container } = renderPlayer();
     tapControl(container);
     expect(container.querySelector(".ugoira-spinner")).toBeTruthy();
-    vi.advanceTimersByTime(30_001);
+    vi.advanceTimersByTime(120_001);
     await flushMicrotasks();
     expect(container.querySelector(".ugoira-badge")).toBeTruthy();
-    // fetchCalls[0] = static poster (15s abort), [1] = frame zip (30s).
+    // fetchCalls[0] = static poster (15s abort), [1] = frame zip (120s).
     expect(fetchCalls[1].signal!.aborted).toBe(true);
   });
 

@@ -615,6 +615,15 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			return
 		}
 
+		// Ugoira zips are multi-MB: on the Pi the fetch+write can exceed
+		// the server's 15s WriteTimeout, killing the response mid-stream
+		// (observed live: failures pinned at exactly 15.0s). The image
+		// path gets its own bounded deadline — the tarpit pattern:
+		// ResponseController overrides the global for this response only.
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second)); err != nil {
+			log.Printf("WARNING img write deadline: %v", err)
+		}
+
 		// Check cache first
 		if data, ct, ok := cache.get(imgURL); ok {
 			w.Header().Set("Content-Type", ct)

@@ -153,8 +153,9 @@ export default function UgoiraPlayer(props: {
     const controller = new AbortController();
     zipAbort = controller;
     // The zip can be several MB — a stalled connection must not keep
-    // burning cellular data forever.
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+    // burning cellular data forever. 120s matches the backend's image
+    // deadline (the Pi can take well over 30s to relay a big zip).
+    const timeout = setTimeout(() => controller.abort(), 120_000);
     try {
       const meta = await api.getUgoiraMeta(props.illustId);
       const body = meta.body;

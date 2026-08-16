@@ -1110,7 +1110,13 @@ func (c *Client) ProxyImage(imgURL string) ([]byte, string, error) {
 	req.Header.Set("Referer", "https://www.pixiv.net/")
 	req.Header.Set("User-Agent", userAgent)
 
-	resp, err := c.newValidatedClient(validImageURL).Do(req)
+	// Images/zips are the slow path on the Pi Zero (multi-MB ugoira zips
+	// over a weak radio): give the image client a longer ceiling than
+	// the shared 30s client. Feeds stay strict; a stalled zip burns a
+	// bounded 2 minutes, then dies.
+	imgClient := c.newValidatedClient(validImageURL)
+	imgClient.Timeout = 120 * time.Second
+	resp, err := imgClient.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
