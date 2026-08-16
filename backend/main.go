@@ -296,6 +296,18 @@ func main() {
 		// running without it deserves a loud boot warning.
 		log.Printf("WARNING: PIXTOK_GATE_PASSWORD_HASH not set — password gate DISABLED")
 	}
+	// A plaintext dev password was hashed at boot with a fresh salt —
+	// without persistence every restart mints a different hash and
+	// re-locks every device. Persist the generated bcrypt hash into
+	// .env once so sessions survive; also strictly safer than leaving
+	// plaintext in the file.
+	if len(g.freshHash) > 0 {
+		if err := pixiv.UpdateEnvFile(map[string]string{
+			"PIXTOK_GATE_PASSWORD_HASH": string(g.freshHash),
+		}); err != nil {
+			log.Printf("WARNING: could not persist gate hash to .env (%v) — the gate will re-lock on restart", err)
+		}
+	}
 
 	// The .env file holds permanent pixiv credentials — warn if its
 	// permissions are loose (reviewer finding). The atomic rewrite

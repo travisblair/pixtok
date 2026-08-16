@@ -142,7 +142,9 @@ PIXTOK_PUBLIC_HTTPS=true   # HTTPS deployment → Secure cookies
 Generate the hash with `htpasswd -nbB user password` (cut at the second
 colon) or any bcrypt tool. Plaintext passwords are rejected at boot
 unless `PIXTOK_GATE_ALLOW_PLAINTEXT_DEV_ONLY=true` is set (local dev
-only — the hash lives in memory, so the cookie resets every restart).
+only). A plaintext dev password is hashed on first boot and the bcrypt
+hash is persisted back to `.env` — the gate then survives restarts
+without re-locking devices.
 Without a password the gate is disabled and the app is open to whoever
 can reach the URL. Set `PIXTOK_PUBLIC_HTTPS=true` when the app is
 served over HTTPS (Tailscale Funnel) so the gate cookie and the login

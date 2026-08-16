@@ -35,6 +35,11 @@ type gate struct {
 	mu      sync.Mutex
 	hash    []byte // bcrypt hash of the configured password; nil = gate disabled
 	enabled bool
+	// freshHash is the bcrypt hash generated THIS BOOT from a plaintext
+	// dev password (nil when a real hash was configured). main()
+	// persists it into .env so the next boot loads a stable hash and
+	// unlocked sessions survive restarts instead of re-locking.
+	freshHash []byte
 	// failure tarpit: progressive delays after 5 failures (per the
 	// auth-delay-tarpit pattern), capped concurrency.
 	failures     int
@@ -57,15 +62,17 @@ func newGate(passwordHash string, allowPlaintext bool) (*gate, error) {
 		if !allowPlaintext {
 			return nil, fmt.Errorf("PIXTOK_GATE_PASSWORD_HASH is not a valid bcrypt hash — set a real hash, or set PIXTOK_GATE_ALLOW_PLAINTEXT_DEV_ONLY=true for local dev")
 		}
-		// Dev convenience: hash the plaintext now (in-memory only; the
-		// cookie won't survive a restart, which is fine for local dev).
+		// Dev convenience: hash the plaintext now and hand main() the
+		// hash to persist into .env, so the password is upgraded to a
+		// stable bcrypt hash and unlocked sessions survive restarts.
 		h, err := bcrypt.GenerateFromPassword([]byte(passwordHash), bcrypt.DefaultCost)
 		if err != nil {
 			return nil, fmt.Errorf("hash gate password: %w", err)
 		}
 		g.hash = h
+		g.freshHash = h
 		g.enabled = true
-		log.Printf("gate enabled (plaintext password hashed at boot — dev-only; set a bcrypt hash in .env for persistent sessions)")
+		log.Printf("gate enabled (plaintext password hashed at boot — persisting the bcrypt hash to .env so sessions survive restarts)")
 		return g, nil
 	}
 	g.hash = []byte(passwordHash)

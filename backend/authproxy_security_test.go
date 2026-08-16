@@ -146,6 +146,48 @@ func TestGateAcceptsBcryptHashWithoutFlag(t *testing.T) {
 	}
 }
 
+// A plaintext dev password hashed at boot previously used a fresh salt
+// per boot, so every restart re-locked every device. Now the generated
+// hash is surfaced for persistence: main() writes it to .env, and a
+// "restarted" gate built from that hash must mint the same cookie.
+func TestGatePlaintextUpgradeSurvivesRestart(t *testing.T) {
+	boot1, err := newGate("plaintext-pass", true)
+	if err != nil {
+		t.Fatalf("newGate(plaintext, allow) = %v", err)
+	}
+	if len(boot1.freshHash) == 0 {
+		t.Fatal("plaintext boot must surface a freshHash for persistence")
+	}
+	if _, err := bcrypt.Cost(boot1.freshHash); err != nil {
+		t.Fatalf("freshHash is not a valid bcrypt hash: %v", err)
+	}
+
+	// Simulated restart: the persisted hash loads without the dev flag.
+	boot2, err := newGate(string(boot1.freshHash), false)
+	if err != nil {
+		t.Fatalf("newGate(persisted freshHash) = %v", err)
+	}
+	if boot1.validToken() != boot2.validToken() {
+		t.Fatal("cookie token changed across restart — devices would re-lock")
+	}
+}
+
+// A properly configured bcrypt hash needs no upgrade — freshHash must
+// stay nil so main() doesn't rewrite .env on every boot.
+func TestGateBcryptHashHasNoFreshHash(t *testing.T) {
+	h, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+	g, err := newGate(string(h), false)
+	if err != nil {
+		t.Fatalf("newGate(bcrypt) = %v", err)
+	}
+	if len(g.freshHash) != 0 {
+		t.Fatal("bcrypt-configured gate must not surface a freshHash (would rewrite .env every boot)")
+	}
+}
+
 // ── Security headers middleware (reviewer finding) ────────────────────
 
 func TestSecurityHeadersMiddleware(t *testing.T) {

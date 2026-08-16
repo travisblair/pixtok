@@ -651,7 +651,7 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 	c.accessToken = accessToken
 	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-5 * time.Minute)
 	c.mu.Unlock()
-	return updateEnvFile(map[string]string{
+	return UpdateEnvFile(map[string]string{
 		"PIXIV_REFRESH_TOKEN": refreshToken,
 	})
 }
@@ -663,7 +663,7 @@ func (c *Client) SetWebSession(phpsessid, csrfToken string) error {
 	c.phpSessID = phpsessid
 	c.csrfTokenCache = csrfToken
 	c.csrfMu.Unlock()
-	return updateEnvFile(map[string]string{
+	return UpdateEnvFile(map[string]string{
 		"PIXIV_PHPSESSID":   phpsessid,
 		"PIXTOK_CSRF_TOKEN": csrfToken,
 	})
@@ -680,7 +680,7 @@ func (c *Client) AuthHealth() (appOK bool, webOK bool) {
 	return appOK, webOK
 }
 
-// updateEnvFile rewrites the given KEY=value lines in ../.env (creating
+// UpdateEnvFile rewrites the given KEY=value lines in ../.env (creating
 // missing keys), atomically via a unique temp file + rename. Serialized
 // by envFileMu: two overlapping login flows must not interleave their
 // read-modify-write (or rename a shared temp path out from under each
@@ -710,7 +710,7 @@ func envFilePath() string {
 	return candidates[0]
 }
 
-func updateEnvFile(kv map[string]string) error {
+func UpdateEnvFile(kv map[string]string) error {
 	envFileMu.Lock()
 	defer envFileMu.Unlock()
 

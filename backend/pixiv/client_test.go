@@ -132,7 +132,7 @@ func TestUpdateEnvFileRewritesKeys(t *testing.T) {
 	if err := os.WriteFile(".env", []byte("PIXIV_REFRESH_"+"TOKEN"+"=old\nOTHER=x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "new-token"}); err != nil {
+	if err := UpdateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "new-token"}); err != nil {
 		t.Fatalf("updateEnvFile: %v", err)
 	}
 	got, err := os.ReadFile(".env")
@@ -156,7 +156,7 @@ func TestUpdateEnvFileRejectsNewlineValue(t *testing.T) {
 	if err := os.WriteFile(".env", []byte("PIXIV_REFRESH_"+"TOKEN"+"=old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "abc\ndef"}); err == nil {
+	if err := UpdateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "abc\ndef"}); err == nil {
 		t.Fatal("newline-bearing value accepted — .env would be corrupted")
 	}
 	// The file must be untouched.
