@@ -83,10 +83,13 @@ export const api = {
     });
   },
 
-  // Continuation of a newest page — next_url is a relative /api/newest
-  // path, so fetch it as-is through the same proxy.
+  // Continuation of a newest page — next_url arrives as a relative
+  // "/api/newest?...". request() prepends the /api base, so the prefix
+  // must come OFF first: passing it through untouched fetched
+  // /api/api/newest — a 404 on every continuation (retry can't help,
+  // the URL is structurally wrong).
   getNewestNext(url: string) {
-    return request<import("./types").FeedResponse>(url, {
+    return request<import("./types").FeedResponse>(url.replace(/^\/api/, ""), {
       signal: AbortSignal.timeout(15_000),
     });
   },

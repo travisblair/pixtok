@@ -196,7 +196,11 @@ export async function setupApiMocks(page, options = {}) {
   await prefsRoute(/\/api\/prefs\/artist-view-mode$/, "artistViewMode");
 
   // ── GET /api/newest?r18=…&lastId=… (newest-upload firehose) ────────────
-  await page.route(/\/api\/newest(\?|$)/, (route) => {
+  // The (?<!\/api) lookbehind keeps a double-prefixed URL
+  // (/api/api/newest) from matching — it must fall through to the
+  // hermeticity guard and fail loudly instead of being swallowed by the
+  // mock (that leniency hid the real continuation bug for weeks).
+  await page.route(/(?<!\/api)\/api\/newest(\?|$)/, (route) => {
     const url = new URL(route.request().url());
     const r18 = url.searchParams.get("r18") === "true";
     const lastId = url.searchParams.get("lastId") ?? "";
