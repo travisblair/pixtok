@@ -95,6 +95,10 @@ test.describe("Multi-page slider", () => {
     await expect
       .poll(() => firstCard.locator(".page-counter").textContent())
       .toBe("51/120");
+    // Wait for the settle detector (2 x 120ms polls) to commit the
+    // resting page — the load window follows the SETTLED page, and the
+    // counter can flip from the live scroll event first.
+    await settle();
     await expect(pageImg(0)).toHaveAttribute("src", /^data:/);
     await expect(pageImg(49)).toHaveAttribute("src", /\/api\/img/);
     await expect(pageImg(50)).toHaveAttribute("src", /\/api\/img/);
@@ -109,6 +113,7 @@ test.describe("Multi-page slider", () => {
     await expect
       .poll(() => firstCard.locator(".page-counter").textContent())
       .toBe("101/120");
+    await settle();
     await expect(pageImg(50)).toHaveAttribute("src", /^data:/);
     await expect(pageImg(99)).toHaveAttribute("src", /\/api\/img/);
     await expect(pageImg(100)).toHaveAttribute("src", /\/api\/img/);

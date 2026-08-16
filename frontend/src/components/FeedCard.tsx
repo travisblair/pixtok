@@ -8,7 +8,7 @@ import {
 import type { PixivIllust } from "../types";
 import { api } from "../api";
 import {
-  shouldLoadPage,
+  sliderWindowBounds,
   computeLoadDelay,
   sliderWindowSize,
   normalizeTagPairs,
@@ -38,6 +38,13 @@ export default function FeedCard(props: {
   const [error, setError] = createSignal<Set<number>>(new Set());
   const [attempts, setAttempts] = createSignal<Record<number, number>>({});
   const [currentPage, setCurrentPage] = createSignal(0);
+  // Settled page (drives the load window) vs live page (drives the
+  // counter). iOS momentum + scroll-snap: the last scroll event can
+  // fire MID-snap with a rounded index that doesn't match the resting
+  // page, and no further event fires once the snap lands. The settle
+  // detector polls scrollLeft until it's still, then commits the true
+  // page; the load window follows the settled page.
+  const [settledPage, setSettledPage] = createSignal(0);
   // SHARED bookmark state (store.ts) — the same illust is mounted in the
   // main feed AND as a stack anchor AND possibly in the recs modal; all
   // instances must reflect the same heart.
@@ -57,6 +64,8 @@ export default function FeedCard(props: {
   let rootRef: HTMLDivElement | undefined;
   let unloadTimer: ReturnType<typeof setTimeout> | undefined;
   let loadTimer: ReturnType<typeof setTimeout> | undefined;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  let settleRead: number | undefined;
 
   const pages = props.illust.meta_pages?.length
     ? props.illust.meta_pages
@@ -196,6 +205,7 @@ export default function FeedCard(props: {
       clearTimeout(unloadTimer);
       clearTimeout(loadTimer);
     });
+    onCleanup(() => clearTimeout(settleTimer));
   });
 
   // When the card deactivates, reset per-page state so re-activation
@@ -209,12 +219,12 @@ export default function FeedCard(props: {
   });
 
   function shouldLoad(i: number) {
-    return shouldLoadPage({
-      active: active(),
-      currentPage: currentPage(),
-      pageIndex: i,
-      windowSize,
-    });
+    const [lo, hi] = sliderWindowBounds(
+      currentPage(),
+      settledPage(),
+      windowSize
+    );
+    return active() && i >= lo && i <= hi;
   }
 
   // Prune load/error state for pages that leave the load window. Without
@@ -223,6 +233,7 @@ export default function FeedCard(props: {
   // srcs were swapped to the 1px placeholder on the way out).
   createEffect(() => {
     void currentPage();
+    void settledPage();
     void active();
     const keep = (i: number) => shouldLoad(i);
     setLoaded((prev) => {
@@ -280,6 +291,27 @@ export default function FeedCard(props: {
     if (!pagesRef) return;
     const idx = Math.round(pagesRef.scrollLeft / pagesRef.clientWidth);
     setCurrentPage(idx);
+    // Re-arm the settle detector. While the snap/momentum animation is
+    // still moving scrollLeft, keep polling; when two reads agree, the
+    // slider is at rest and THAT page owns the load window.
+    clearTimeout(settleTimer);
+    settleRead = undefined;
+    settleTimer = setTimeout(checkSettle, 120);
+  }
+
+  function checkSettle() {
+    if (!pagesRef) return;
+    const left = pagesRef.scrollLeft;
+    const idx = Math.round(left / pagesRef.clientWidth);
+    if (settleRead !== undefined && Math.abs(left - settleRead) < 2) {
+      // At rest (or the snap finished): commit the true resting page.
+      setSettledPage(idx);
+      setCurrentPage(idx); // the counter catches up to reality
+      settleRead = undefined;
+      return;
+    }
+    settleRead = left;
+    settleTimer = setTimeout(checkSettle, 120);
   }
 
   function renderPage(page: (typeof pages)[0], i: number) {

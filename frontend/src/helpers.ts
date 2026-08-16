@@ -105,6 +105,26 @@ export function filterBlockedTags(
  * placeholder). Pages outside the ±window around the current page are
  * not loaded even when the card is active.
  */
+/**
+ * Load-window bounds for a slider, spanning the live page AND the
+ * settled page. During a swipe the two disagree — iOS scroll-snap fires
+ * its last scroll event mid-snap, with a rounded index that doesn't
+ * match the resting page. Spanning both keeps boundary pages from
+ * flapping their src between the proxy URL and the 1px placeholder;
+ * iOS aborts in-flight decodes on src swaps and sometimes never
+ * restarts them (the black-page bug). Once the swipe settles, live ===
+ * settled and the span collapses to the normal ±window.
+ */
+export function sliderWindowBounds(
+  livePage: number,
+  settledPage: number,
+  windowSize: number
+): [number, number] {
+  const lo = Math.min(livePage, settledPage) - windowSize;
+  const hi = Math.max(livePage, settledPage) + windowSize;
+  return [lo, hi];
+}
+
 export function shouldLoadPage(args: {
   active: boolean;
   currentPage: number;

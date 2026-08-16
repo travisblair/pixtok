@@ -7,6 +7,7 @@ import {
   normalizeTagPairs,
   filterBlockedTags,
   sliderWindowSize,
+  sliderWindowBounds,
   PRELOAD_PAGES,
   LARGE_SLIDER_PAGES,
 } from "./helpers";
@@ -174,5 +175,25 @@ describe("computeLoadDelay", () => {
 
   it("handles zero viewport defensively", () => {
     expect(computeLoadDelay({ distPx: 100, viewportPx: 0 })).toBe(0);
+  });
+});
+
+describe("sliderWindowBounds", () => {
+  it("collapses to the normal ±window once live and settled agree", () => {
+    expect(sliderWindowBounds(5, 5, 2)).toEqual([3, 7]);
+    expect(sliderWindowBounds(0, 0, 1)).toEqual([-1, 1]);
+  });
+
+  it("spans live and settled mid-swipe so boundary pages don't flap", () => {
+    // Last scroll event rounded to page 2 while the snap is carrying the
+    // slider to page 3: pages 1-6 stay in the window until it settles.
+    expect(sliderWindowBounds(2, 3, 1)).toEqual([1, 4]);
+    // Wide disagreement (long fling): the whole span stays alive
+    // transiently; it collapses back after the settle commits.
+    expect(sliderWindowBounds(1, 8, 1)).toEqual([0, 9]);
+  });
+
+  it("treats a backwards swipe symmetrically", () => {
+    expect(sliderWindowBounds(6, 4, 1)).toEqual([3, 7]);
   });
 });
