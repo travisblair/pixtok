@@ -160,6 +160,27 @@ cd frontend && npm install && npm run dev
 - Frontend: Vite dev server on `:5173`; set `VITE_ALLOWED_HOSTS` in
   `.env` to expose it on a tailnet/funnel
 
+## Deployment security
+
+pixtok holds permanent Pixiv credentials — treat the machine running it
+like a password vault entry. How you expose it matters more than the
+gate:
+
+- **Best:** private network (Tailscale, WireGuard) + HTTPS + optional
+  gate. Nobody outside the network can even reach the app; the gate is
+  then pure defense-in-depth. This is how pixtok is deployed.
+- **Acceptable:** reverse proxy (Caddy/nginx) + HTTPS + strong
+  authentication + gate, for a deliberate public hostname.
+- **Risky:** direct public exposure with only the gate password. The
+  gate is a small custom application standing in as your entire
+  internet-facing perimeter.
+
+The password gate is application-level authentication, not a network
+boundary — keep it enabled, but don't let it be the only thing between
+the internet and your Pixiv session. Tailscale Funnel is not recommended
+unless you need access from a device that can't join the tailnet; every
+device in this project's use case can.
+
 ## Tech
 
 - **Backend:** Go — proxies the Pixiv app API and web AJAX endpoints,
