@@ -450,5 +450,23 @@ func handlePkceCallback(w http.ResponseWriter, r *http.Request, api pixivAPI, pk
 		log.Printf("WARN no PHPSESSID on callback — web session not captured")
 	}
 
+	// The session is now captured server-side — expire every cookie the
+	// login flow planted on OUR origin that isn't ours (pixiv's
+	// PHPSESSID, device_token, analytics). The browser must not keep a
+	// live Pixiv credential it no longer needs. pixtok_* cookies (gate,
+	// login flow) survive. Symmetric with the upstream forwarding
+	// allowlist above: only pixtok_* + pixiv cookies ever exist here.
+	for _, c := range r.Cookies() {
+		if strings.HasPrefix(c.Name, "pixtok_") {
+			continue
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:   c.Name,
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
+		})
+	}
+
 	http.Redirect(w, r, "/?auth=done", http.StatusFound)
 }

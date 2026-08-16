@@ -1380,6 +1380,8 @@ func TestPkceCallbackCompletesServerSide(t *testing.T) {
 		"/api/auth/px/app/web/v1/users/auth/pixiv/callback?state=pixivs-own-state&code=THE-CODE", nil)
 	req.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: flowID})
 	req.AddCookie(&http.Cookie{Name: "PHPSESSID", Value: "upstreamsession123"})
+	req.AddCookie(&http.Cookie{Name: "device_token", Value: "devtok123"})
+	req.AddCookie(&http.Cookie{Name: gateCookie, Value: "app-session-token"})
 	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1395,6 +1397,30 @@ func TestPkceCallbackCompletesServerSide(t *testing.T) {
 	}
 	if !setSessionCalled || setSessValue != "upstreamsession123" {
 		t.Fatalf("SetWebSession not called with the captured session (called=%v value=%q)", setSessionCalled, setSessValue)
+	}
+
+	// The callback must expire every pixiv cookie the login flow planted
+	// on our origin (the session was captured server-side — the browser
+	// must not keep a live copy), while OUR cookies (gate, login flow)
+	// survive untouched.
+	setCookies := map[string]string{}
+	for _, line := range rr.Header().Values("Set-Cookie") {
+		name := strings.SplitN(line, "=", 2)[0]
+		setCookies[name] = line
+	}
+	for _, want := range []string{"PHPSESSID", "device_token"} {
+		line, ok := setCookies[want]
+		if !ok {
+			t.Fatalf("callback did not expire %s cookie (Set-Cookie: %v)", want, rr.Header().Values("Set-Cookie"))
+		}
+		if !strings.Contains(line, "Max-Age=0") {
+			t.Fatalf("%s expiry lacks Max-Age=0: %q", want, line)
+		}
+	}
+	for _, forbid := range []string{gateCookie, loginFlowCookie} {
+		if line, ok := setCookies[forbid]; ok {
+			t.Fatalf("callback must NOT touch our own %s cookie, got: %q", forbid, line)
+		}
 	}
 }
 
