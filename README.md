@@ -45,7 +45,7 @@ infinite scroll; each card is a full-screen page.
 
 ### Related stacks
 
-Tap any work card to open it in a stack: the work is on top with its
+Tap on any image card to open it in a "stack": the work is on top with its
 related works loading beneath it. Scroll for more, or tap another work
 inside the stack to drill deeper (up to 10 levels — the "N/10" badge
 shows the depth). ← Back returns one level; ✕ closes the whole stack
