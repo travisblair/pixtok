@@ -41,6 +41,16 @@ jobs:
       - run: npm ci
       - name: Typecheck + build
         run: npm run build
+      # The prod-serve e2e spec boots the real Go binary with the
+      # embedded frontend — build it here, AFTER npm run build has
+      # populated backend/static (vite outDir), so go:embed finds the
+      # fresh assets.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - name: Build prod server binary (embeds backend/static)
+        run: go build -o pixtok-server .
+        working-directory: backend
       - name: Unit tests
         run: npx vitest run
       - name: Install Playwright browsers
