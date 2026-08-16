@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -253,6 +254,39 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// cacheConfigFromEnv reads the image-cache sizing knobs with Mac-sized
+// defaults. The Pi Zero deploy runs 64MB/300 entries/6h (its whole RAM is
+// 512MB — the default budget alone would starve it). Malformed values
+// log and fall back: cache sizing is performance, not security — never
+// block boot on it.
+func cacheConfigFromEnv() (time.Duration, int, int64) {
+	ttl := 24 * time.Hour
+	if v := loadEnvKey("PIXTOK_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			ttl = d
+		} else {
+			log.Printf("WARNING: bad PIXTOK_CACHE_TTL %q — using default", v)
+		}
+	}
+	entries := 2000
+	if v := loadEnvKey("PIXTOK_CACHE_ENTRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			entries = n
+		} else {
+			log.Printf("WARNING: bad PIXTOK_CACHE_ENTRIES %q — using default", v)
+		}
+	}
+	maxBytes := int64(512 << 20)
+	if v := loadEnvKey("PIXTOK_CACHE_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxBytes = n
+		} else {
+			log.Printf("WARNING: bad PIXTOK_CACHE_BYTES %q — using default", v)
+		}
+	}
+	return ttl, entries, maxBytes
+}
+
 func main() {
 	client, err := pixiv.NewClient()
 	if err != nil {
@@ -260,7 +294,7 @@ func main() {
 	}
 	log.Printf("pixiv client initialized, refresh token loaded")
 
-	imgCache := newImageCache(24*time.Hour, 2000, 512<<20)
+	imgCache := newImageCache(cacheConfigFromEnv())
 
 	// Durable user prefs (blocked tags) — localStorage on the device
 	// proved unreliable, so prefs live in a small SQLite DB next to the
@@ -271,7 +305,10 @@ func main() {
 	}
 
 	// Loopback only — the Vite dev proxy (and only it) should reach us.
-	addr := "127.0.0.1:8080"
+	addr := loadEnvKey("PIXTOK_LISTEN")
+	if addr == "" {
+		addr = "127.0.0.1:8080"
+	}
 	apiKey := loadEnvKey("PIXTOK_API_KEY")
 	if apiKey == "" {
 		log.Printf("WARNING: PIXTOK_API_KEY not set — API key gate DISABLED (loopback-only dev mode)")
@@ -321,11 +358,36 @@ func main() {
 		}
 	}
 
+	// Prod serving: the Go binary serves the embedded frontend and the
+	// gate cookie is the sole /api credential — a browser can never hold
+	// the API key the dev proxy injects, so the key gate is skipped.
+	// FAIL-CLOSED: frontend serving without an enabled gate would mean
+	// an unauthenticated public app — refuse to boot.
+	serveFrontend := loadEnvKey("PIXTOK_SERVE_FRONTEND") == "true"
+	if err := validateProdServe(serveFrontend, g.enabled); err != nil {
+		log.Fatalf("prod serve config: %v", err)
+	}
+	if serveFrontend && apiKey != "" {
+		log.Printf("PIXTOK_API_KEY is set but ignored in frontend-serve mode — the gate cookie is the auth")
+	}
+
+	var handler http.Handler
+	if serveFrontend {
+		root := http.NewServeMux()
+		root.Handle("/api/", g.middleware(mux))
+		root.Handle("/ajax/", g.middleware(mux))
+		root.Handle("/health", g.middleware(mux))
+		root.Handle("/", staticHandler())
+		handler = root
+	} else {
+		handler = apiKeyGate(apiKey, g.middleware(mux))
+	}
+
 	rl := newRateLimiter(nil)
 
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      originCheck(securityHeaders(logRequests(rl.middleware(apiKeyGate(apiKey, g.middleware(mux)))))),
+		Handler:      originCheck(securityHeaders(logRequests(rl.middleware(handler)))),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
