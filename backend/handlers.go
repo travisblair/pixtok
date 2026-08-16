@@ -714,45 +714,13 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 		}
 	})
 
-	mux.HandleFunc("/api/prefs/image-size", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			v, err := store.GetImageSize()
-			if err != nil {
-				log.Printf("ERROR prefs image-size get: %v", err)
-				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
-				return
-			}
-			writeJSON(w, map[string]any{"value": v})
-
-		case http.MethodPut:
-			var body struct {
-				Value string `json:"value"`
-			}
-			if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
-				http.Error(w, "invalid body", http.StatusBadRequest)
-				return
-			}
-			if body.Value != "large" && body.Value != "medium" {
-				http.Error(w, "invalid image size", http.StatusBadRequest)
-				return
-			}
-			if err := store.SetImageSize(body.Value); err != nil {
-				log.Printf("ERROR prefs image-size set: %v", err)
-				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
-				return
-			}
-			writeJSON(w, map[string]any{"value": body.Value})
-
-		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	// View-mode prefs (feed tabs + artist page library): strip | grid.
-	// Same handler shape as image-size — one closure parameterized over
-	// the store accessors so the two routes can't drift apart.
-	registerViewMode := func(path string, get func() (string, error), set func(string) error) {
+	// Prefs routes share ONE shape (image-size + the two view modes):
+	// GET returns {"value": v}; PUT validates a whitelist in the
+	// HANDLER (400 for bad values) and maps any store error to a logged
+	// 500 — a DB failure must never masquerade as a client error (that
+	// conflation shipped once: the view-mode PUT reported "invalid view
+	// mode" for a disk error, unlogged).
+	registerPrefRoute := func(path, errLabel string, get func() (string, error), set func(string) error, allowed ...string) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
@@ -772,20 +740,33 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 					http.Error(w, "invalid body", http.StatusBadRequest)
 					return
 				}
-				if err := set(body.Value); err != nil {
-					// set() validates strip|grid — anything else is a 400.
-					http.Error(w, "invalid view mode", http.StatusBadRequest)
+				v := strings.TrimSpace(body.Value)
+				ok := false
+				for _, a := range allowed {
+					if v == a {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					http.Error(w, "invalid "+errLabel, http.StatusBadRequest)
 					return
 				}
-				writeJSON(w, map[string]any{"value": body.Value})
+				if err := set(v); err != nil {
+					log.Printf("ERROR prefs %s set: %v", path, err)
+					http.Error(w, "prefs unavailable", http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, map[string]any{"value": v})
 
 			default:
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
 	}
-	registerViewMode("/api/prefs/feed-view-mode", store.GetFeedViewMode, store.SetFeedViewMode)
-	registerViewMode("/api/prefs/artist-view-mode", store.GetArtistViewMode, store.SetArtistViewMode)
+	registerPrefRoute("/api/prefs/image-size", "image size", store.GetImageSize, store.SetImageSize, "large", "medium")
+	registerPrefRoute("/api/prefs/feed-view-mode", "view mode", store.GetFeedViewMode, store.SetFeedViewMode, "strip", "grid")
+	registerPrefRoute("/api/prefs/artist-view-mode", "view mode", store.GetArtistViewMode, store.SetArtistViewMode, "strip", "grid")
 }
 
 // apiKeyGate requires the shared key (set in .env as PIXTOK_API_KEY) on

@@ -2072,3 +2072,64 @@ func TestPrefsViewModesRejectInvalid(t *testing.T) {
 		}
 	}
 }
+
+// Method enforcement, malformed bodies, the body cap, and value trimming
+// on the prefs routes — the view-mode routes shipped without any of
+// these covered.
+func TestPrefsRoutesEnforceMethodBodyCapAndTrim(t *testing.T) {
+	store, err := openPrefs(":memory:")
+	if err != nil {
+		t.Fatalf("open prefs: %v", err)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerPrefs(mux, store)
+	h := apiKeyGate("secret", mux)
+
+	paths := []string{
+		"/api/prefs/feed-view-mode",
+		"/api/prefs/artist-view-mode",
+		"/api/prefs/image-size",
+	}
+	for _, path := range paths {
+		// 405 on unhandled methods.
+		for _, method := range []string{http.MethodPost, http.MethodDelete} {
+			req := httptest.NewRequest(method, path, nil)
+			req.Header.Set("X-Api-Key", "secret")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("%s %s = %d, want 405", method, path, rr.Code)
+			}
+		}
+		// Malformed JSON → 400.
+		req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(`{nope`))
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("malformed PUT %s = %d, want 400", path, rr.Code)
+		}
+		// Oversized body (>4KB cap) → 400.
+		req = httptest.NewRequest(http.MethodPut, path,
+			strings.NewReader(`{"value":"`+strings.Repeat("x", 5000)+`"}`))
+		req.Header.Set("X-Api-Key", "secret")
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("oversized PUT %s = %d, want 400", path, rr.Code)
+		}
+	}
+
+	// Values are trimmed before validation/storage (" grid " == "grid").
+	req := httptest.NewRequest(http.MethodPut, "/api/prefs/feed-view-mode",
+		strings.NewReader(`{"value":" grid "}`))
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("trimmed PUT = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if v, err := store.GetFeedViewMode(); err != nil || v != "grid" {
+		t.Fatalf("stored value = %q, %v; want grid (trimmed)", v, err)
+	}
+}

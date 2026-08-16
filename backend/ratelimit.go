@@ -72,7 +72,13 @@ func newRateLimiter(now func() time.Time) *rateLimiter {
 }
 
 func (rl *rateLimiter) tierFor(r *http.Request) *bucket {
-	if strings.HasPrefix(r.URL.Path, "/api/img/") {
+	// The image route is exact-match "GET /api/img?url=..." — the old
+	// prefix check ("/api/img/") never matched it, so every image
+	// request metered into the shared reads bucket and the 300/min
+	// images bucket was dead code (grid bursts then 429'd against the
+	// 120/min reads tier, feeding the pagination storm). Keep the
+	// prefix case for any future sub-routes.
+	if r.URL.Path == "/api/img" || strings.HasPrefix(r.URL.Path, "/api/img/") {
 		return &rl.images
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

@@ -18,12 +18,12 @@ func TestRateLimitImagesTier(t *testing.T) {
 	h := lim.middleware(noContentHandler())
 
 	for i := 0; i < imagesPerMinute; i++ {
-		rr := hitGet(h, "/api/img/123/c/480x960/img-master/img/1_p0.jpg")
+		rr := hitGet(h, "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg%2F1.jpg")
 		if rr.Code != http.StatusNoContent {
 			t.Fatalf("request %d = %d, want 204", i+1, rr.Code)
 		}
 	}
-	rr := hitGet(h, "/api/img/123/c/480x960/img-master/img/1_p0.jpg")
+	rr := hitGet(h, "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg%2F1.jpg")
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("over-limit images request = %d, want 429", rr.Code)
 	}
@@ -38,7 +38,7 @@ func TestRateLimitTiersAreIndependent(t *testing.T) {
 
 	// Exhaust the images bucket completely...
 	for i := 0; i < imagesPerMinute; i++ {
-		hitGet(h, "/api/img/1/c/x/img/1_p0.jpg")
+		hitGet(h, "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg%2F1.jpg")
 	}
 	// ...reads and mutations must be unaffected.
 	if rr := hitGet(h, "/api/next?url=https%3A%2F%2Fapp-api.pixiv.net%2Fx"); rr.Code != http.StatusNoContent {

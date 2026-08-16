@@ -3,8 +3,10 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 func testStaticFS() (fstest.MapFS, []byte) {
@@ -82,5 +84,74 @@ func TestValidateProdServeFailClosed(t *testing.T) {
 	}
 	if err := validateProdServe(false, false); err != nil {
 		t.Fatalf("dev mode (no frontend serving) without gate = %v, want nil", err)
+	}
+}
+
+// The prod-mode chain (main()'s serveFrontend wiring) exercised in CI
+// without touching pixiv: static SPA serves unauthenticated, everything
+// under /api is gated, and a real unlock opens it. The prod-serve e2e
+// spec was removed from CI because it needed a live pixiv token — this
+// pins the same chain with a fake API instead.
+func TestProdServeChainStaticAndGate(t *testing.T) {
+	g, err := newGate("ci-test-password", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	fsys := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<html>pixtok</html>")},
+	}
+	inner := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerGateRoutes(inner, g)
+
+	root := http.NewServeMux()
+	root.Handle("/api/", g.middleware(inner))
+	root.Handle("/ajax/", g.middleware(inner))
+	root.Handle("/health", g.middleware(inner))
+	root.Handle("/", staticHandlerFrom(fsys, []byte("<html>pixtok</html>")))
+
+	// Static serves without any cookie.
+	rr := httptest.NewRecorder()
+	root.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "pixtok") {
+		t.Fatalf("static = %d %q, want 200 app shell", rr.Code, rr.Body.String())
+	}
+
+	// API is locked without the cookie.
+	rr = httptest.NewRecorder()
+	root.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/gate/status", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"locked":true`) {
+		t.Fatalf("status without cookie = %d %q, want locked:true", rr.Code, rr.Body.String())
+	}
+	rr = httptest.NewRecorder()
+	root.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/top", nil))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("gated feed without cookie = %d, want 403", rr.Code)
+	}
+
+	// A real unlock sets the cookie; the same cookie opens the API.
+	req := httptest.NewRequest(http.MethodPost, "/api/gate",
+		strings.NewReader(`{"password":"ci-test-password"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	root.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unlock = %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var gateC *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == gateCookie {
+			gateC = c
+		}
+	}
+	if gateC == nil {
+		t.Fatal("unlock response did not set the gate cookie")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/gate/status", nil)
+	req.AddCookie(gateC)
+	rr = httptest.NewRecorder()
+	root.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"locked":false`) {
+		t.Fatalf("status with cookie = %d %q, want unlocked", rr.Code, rr.Body.String())
 	}
 }

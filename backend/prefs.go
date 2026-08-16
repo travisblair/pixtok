@@ -144,7 +144,7 @@ func (s *prefsStore) viewMode(key string) (string, error) {
 	if v != "grid" {
 		return "strip", nil
 	}
-	return v, nil
+	return "grid", nil
 }
 
 // GetFeedViewMode returns how feed tabs render: "strip" (default,
