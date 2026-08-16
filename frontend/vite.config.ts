@@ -40,8 +40,32 @@ function loadAllowedHosts(): string[] {
     .filter(Boolean);
 }
 
+// The CSP the Go backend applies to app pages (see main.go) — mirrored
+// here for dev so the phone and desktop exercise the exact same policy
+// the production build will get. Skipped on the proxied auth paths:
+// pixiv's login SPA rides through our origin and would break.
+const APP_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; " +
+  "base-uri 'none'; form-action 'self'";
+
+function cspForAppPages() {
+  return {
+    name: "pixtok-csp",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const p = req.url || "";
+        if (!p.startsWith("/api/auth/px/") && !p.startsWith("/ajax/")) {
+          res.setHeader("Content-Security-Policy", APP_CSP);
+        }
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [solid(), cspForAppPages()],
   server: {
     // Bind all interfaces: Tailscale Funnel dials 127.0.0.1, direct
     // tailnet access (phone) arrives on the 100.x interface. allowedHosts

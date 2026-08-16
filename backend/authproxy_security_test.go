@@ -163,4 +163,38 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", k, got, want)
 		}
 	}
+	if csp := rr.Header().Get("Content-Security-Policy"); csp == "" {
+		t.Fatal("CSP header missing on app-page response")
+	} else {
+		for _, want := range []string{"default-src 'self'", "script-src 'self'", "img-src 'self' data: blob:"} {
+			if !strings.Contains(csp, want) {
+				t.Fatalf("CSP %q lacks %q", csp, want)
+			}
+		}
+	}
+}
+
+// The login SPA is pixiv's own HTML proxied through our origin — a
+// restrictive CSP on it would break pixiv's scripts. CSP must skip the
+// proxied auth paths (the SPA lives under /api/auth/px/www/; its XHRs
+// under /ajax/).
+func TestSecurityHeadersSkipCSPOnProxiedAuth(t *testing.T) {
+	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	for _, path := range []string{
+		"/api/auth/px/www/login",
+		"/api/auth/px/accounts/",
+		"/api/auth/px/app/web/v1/users/auth/pixiv/callback",
+		"/ajax/login",
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		if csp := rr.Header().Get("Content-Security-Policy"); csp != "" {
+			t.Fatalf("CSP leaked onto proxied auth path %s: %q", path, csp)
+		}
+		if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("%s: other security headers must remain; nosniff = %q", path, got)
+		}
+	}
 }

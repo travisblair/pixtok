@@ -225,9 +225,19 @@ func logRequests(next http.Handler) http.Handler {
 	})
 }
 
-// securityHeaders sets a minimal browser-hardening policy on every
-// response (reviewer finding: the backend sent none). nosniff matters
-// most around proxied image/auth content.
+// appCSP is the Content-Security-Policy for pages the app itself owns.
+// Scripts locked to 'self'; styles allow inline attributes (SolidJS
+// positions layers with inline style attributes); images are same-origin
+// through /api/img plus canvas data:/blob: sources for ugoira.
+const appCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; " +
+	"base-uri 'none'; form-action 'self'"
+
+// securityHeaders sets a browser-hardening policy on every response
+// (reviewer finding: the backend sent none). nosniff matters most around
+// proxied image/auth content. CSP is skipped on the proxied auth paths
+// (/api/auth/px/*, /ajax/*): pixiv's own login SPA is served through our
+// origin there, and a restrictive CSP would break pixiv's scripts.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -235,6 +245,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "geolocation=(), camera=(), microphone=()")
+		p := r.URL.Path
+		if !strings.HasPrefix(p, "/api/auth/px/") && !strings.HasPrefix(p, "/ajax/") {
+			h.Set("Content-Security-Policy", appCSP)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
