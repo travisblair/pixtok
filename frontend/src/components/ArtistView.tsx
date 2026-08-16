@@ -1,9 +1,10 @@
-import { createSignal, createEffect, For } from "solid-js";
+import { createSignal, createEffect, For, Show } from "solid-js";
 import { api } from "../api";
 import type { PixivIllust } from "../types";
 import FeedCard from "./FeedCard";
+import GridFeed from "./GridFeed";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
-import { blockedTags } from "../store";
+import { blockedTags, artistViewMode } from "../store";
 import { useFeedSentinel } from "../hooks";
 
 /**
@@ -95,19 +96,36 @@ export default function ArtistView(props: {
       class={props.closing ? "artist-view exit" : "artist-view enter"}
       style={{ "z-index": props.zIndex }}
     >
-      <div class="feed-container">
-        <For each={illusts()}>
-          {(illust) => (
-            <FeedCard
-              illust={illust}
+      <div
+        class={
+          artistViewMode() === "grid"
+            ? "feed-container grid-container"
+            : "feed-container"
+        }
+      >
+        <Show
+          when={artistViewMode() === "strip"}
+          fallback={
+            <GridFeed
+              illusts={illusts()}
               onTap={props.onTap}
-              onArtistTap={props.onArtistTap}
-              onTagsTap={props.onTagsTap}
-              onTagOpen={props.onTagOpen}
               suppressImages={props.obscured || props.closing}
             />
-          )}
-        </For>
+          }
+        >
+          <For each={illusts()}>
+            {(illust) => (
+              <FeedCard
+                illust={illust}
+                onTap={props.onTap}
+                onArtistTap={props.onArtistTap}
+                onTagsTap={props.onTagsTap}
+                onTagOpen={props.onTagOpen}
+                suppressImages={props.obscured || props.closing}
+              />
+            )}
+          </For>
+        </Show>
         <div ref={sentinelRef} class="feed-sentinel">
           {loading() && <div class="spinner" />}
           {error() && !loading() && <span>Couldn't load this artist's works</span>}

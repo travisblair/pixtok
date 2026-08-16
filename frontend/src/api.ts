@@ -165,6 +165,44 @@ export const api = {
     );
   },
 
+  // View modes (strip | grid) — feed tabs and artist pages toggle
+  // independently; both default strip. Same prefs-DB pattern as
+  // image-size: GET at boot, PUT on change (queued so rapid toggles
+  // apply in order).
+  getFeedViewMode() {
+    return request<{ value: "strip" | "grid" }>("/prefs/feed-view-mode", {
+      signal: AbortSignal.timeout(10_000),
+    });
+  },
+
+  async setFeedViewMode(value: string) {
+    await queuedPrefWrite(() =>
+      request<{ value: string }>("/prefs/feed-view-mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+        signal: AbortSignal.timeout(10_000),
+      })
+    );
+  },
+
+  getArtistViewMode() {
+    return request<{ value: "strip" | "grid" }>("/prefs/artist-view-mode", {
+      signal: AbortSignal.timeout(10_000),
+    });
+  },
+
+  async setArtistViewMode(value: string) {
+    await queuedPrefWrite(() =>
+      request<{ value: string }>("/prefs/artist-view-mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+        signal: AbortSignal.timeout(10_000),
+      })
+    );
+  },
+
   // Search — the site's search pages. Works search carries the tag's
   // popular block (the search-page recommendations) + related tags.
   // Filter params are the verified set (live-probed Aug 2026): order,

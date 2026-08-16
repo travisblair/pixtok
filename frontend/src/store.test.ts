@@ -12,6 +12,14 @@ import {
   setImageSize,
   setImageSizeFromServer,
   clearImageSize,
+  feedViewMode,
+  setFeedViewMode,
+  setFeedViewModeFromServer,
+  clearFeedViewMode,
+  artistViewMode,
+  setArtistViewMode,
+  setArtistViewModeFromServer,
+  clearArtistViewMode,
 } from "./store";
 
 // The store calls the REAL api module (test-setup imports store.ts before
@@ -23,6 +31,8 @@ beforeEach(() => {
   clearLikeStates();
   clearBlockedTags();
   clearImageSize();
+  clearFeedViewMode();
+  clearArtistViewMode();
   fetchCalls = [];
   vi.stubGlobal(
     "fetch",
@@ -118,5 +128,44 @@ describe("image size (backend-backed)", () => {
     expect(JSON.parse(fetchCalls[0].init?.body as string)).toEqual({
       value: "medium",
     });
+  });
+});
+
+
+describe("view modes (backend-backed)", () => {
+  it("default to strip and apply server values without a PUT", () => {
+    expect(feedViewMode()).toBe("strip");
+    expect(artistViewMode()).toBe("strip");
+    setFeedViewModeFromServer("grid");
+    setArtistViewModeFromServer("grid");
+    expect(feedViewMode()).toBe("grid");
+    expect(artistViewMode()).toBe("grid");
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("treat unknown server values as strip", () => {
+    setFeedViewModeFromServer("carousel");
+    setArtistViewModeFromServer("");
+    expect(feedViewMode()).toBe("strip");
+    expect(artistViewMode()).toBe("strip");
+  });
+
+  it("persists a user change via PUT, one call per mode", async () => {
+    setFeedViewMode("grid");
+    setArtistViewMode("grid");
+    expect(feedViewMode()).toBe("grid");
+    expect(artistViewMode()).toBe("grid");
+    await vi.waitFor(() => {
+      expect(fetchCalls).toHaveLength(2);
+    });
+    const urls = fetchCalls.map((c) => c.url).sort();
+    expect(urls).toEqual([
+      "/api/prefs/artist-view-mode",
+      "/api/prefs/feed-view-mode",
+    ]);
+    for (const c of fetchCalls) {
+      expect(c.init?.method).toBe("PUT");
+      expect(JSON.parse(c.init?.body as string)).toEqual({ value: "grid" });
+    }
   });
 });

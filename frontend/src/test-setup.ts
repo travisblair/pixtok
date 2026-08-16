@@ -5,6 +5,8 @@ import {
   clearBlockedTags,
   clearStackHint,
   clearImageSize,
+  clearFeedViewMode,
+  clearArtistViewMode,
 } from "./store";
 
 afterEach(() => {
@@ -15,6 +17,8 @@ afterEach(() => {
   clearBlockedTags();
   clearStackHint();
   clearImageSize();
+  clearFeedViewMode();
+  clearArtistViewMode();
 });
 
 // jsdom has no IntersectionObserver — mock it with an implementation that

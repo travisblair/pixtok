@@ -159,6 +159,36 @@ export async function setupApiMocks(page, options = {}) {
     route.fulfill(json({ ok: true }));
   });
 
+  // ── Prefs (backend DB) — stateful so a toggle PUT survives a reload ──
+  // and a reload's boot GETs read back the last written value (this is
+  // what makes "toggle persists across reload" testable in e2e).
+  const prefsState = {
+    blockedTags: options.blockedTags ?? [],
+    imageSize: options.imageSize ?? "large",
+    feedViewMode: options.feedViewMode ?? "strip",
+    artistViewMode: options.artistViewMode ?? "strip",
+  };
+  const prefsRoute = (pattern, key) =>
+    page.route(pattern, (route) => {
+      if (route.request().method() === "PUT") {
+        try {
+          const body = JSON.parse(route.request().postData() ?? "{}");
+          prefsState[key] = body.tags ?? body.value ?? prefsState[key];
+        } catch {
+          // malformed body — keep the current value
+        }
+      }
+      route.fulfill(
+        json(key.startsWith("feedViewMode") || key.startsWith("artistViewMode") || key === "imageSize"
+          ? { value: prefsState[key] }
+          : { tags: prefsState[key] })
+      );
+    });
+  await prefsRoute(/\/api\/prefs\/blocked-tags$/, "blockedTags");
+  await prefsRoute(/\/api\/prefs\/image-size$/, "imageSize");
+  await prefsRoute(/\/api\/prefs\/feed-view-mode$/, "feedViewMode");
+  await prefsRoute(/\/api\/prefs\/artist-view-mode$/, "artistViewMode");
+
   // ── GET /api/newest?r18=…&lastId=… (newest-upload firehose) ────────────
   await page.route(/\/api\/newest(\?|$)/, (route) => {
     const url = new URL(route.request().url());

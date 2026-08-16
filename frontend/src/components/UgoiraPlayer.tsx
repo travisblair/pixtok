@@ -49,6 +49,12 @@ export default function UgoiraPlayer(props: {
   // the player reports status back for the control's label/icon.
   toggleSignal?: number;
   onStatus?: (s: PlayerStatus) => void;
+  // Display budget overrides: grid cells are ~120 CSS px wide, so a
+  // cell player downscales frames much harder than a strip card does
+  // (360px frames are ~1/5 of an 800px frame's pixels — several cells
+  // animating at once must not jetsam iOS). Omitted = strip defaults.
+  maxFrameSide?: number;
+  maxPosterSide?: number;
 }) {
   const [status, setStatus] = createSignal<PlayerStatus>("idle");
   const [error, setError] = createSignal(false);
@@ -123,7 +129,7 @@ export default function UgoiraPlayer(props: {
       );
       if (!res.ok) throw new Error(`static fetch failed: ${res.status}`);
       const blob = await res.blob();
-      const frame = await loadFrame(blob, POSTER_MAX_SIDE);
+      const frame = await loadFrame(blob, props.maxPosterSide ?? POSTER_MAX_SIDE);
       if (seq !== loadSeq) return; // torn down or superseded while fetching
       staticFrame = frame;
       drawStatic();
@@ -175,7 +181,10 @@ export default function UgoiraPlayer(props: {
         body.frames.map((f) => {
           const data = unzipped[f.file];
           if (!data) throw new Error(`missing frame ${f.file}`);
-          return loadFrame(new Blob([data], { type: mime }));
+          return loadFrame(
+            new Blob([data], { type: mime }),
+            props.maxFrameSide ?? MAX_FRAME_SIDE
+          );
         })
       );
       if (seq !== loadSeq) return;

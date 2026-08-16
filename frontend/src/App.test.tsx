@@ -19,6 +19,10 @@ vi.mock("./api", () => ({
     setBlockedTags: vi.fn(async () => {}),
     getImageSize: vi.fn(),
     setImageSize: vi.fn(async () => {}),
+    getFeedViewMode: vi.fn(),
+    setFeedViewMode: vi.fn(async () => {}),
+    getArtistViewMode: vi.fn(),
+    setArtistViewMode: vi.fn(async () => {}),
     gateStatus: vi.fn(),
     gateUnlock: vi.fn(async () => {}),
     getBookmarks: vi.fn(),
@@ -64,6 +68,12 @@ beforeEach(() => {
   mockedApi.setBlockedTags.mockReset().mockResolvedValue(undefined);
   mockedApi.getImageSize.mockReset().mockResolvedValue({ value: "large" });
   mockedApi.setImageSize.mockReset().mockResolvedValue(undefined);
+  mockedApi.getFeedViewMode.mockReset().mockResolvedValue({ value: "strip" });
+  mockedApi.setFeedViewMode.mockReset().mockResolvedValue(undefined);
+  mockedApi.getArtistViewMode
+    .mockReset()
+    .mockResolvedValue({ value: "strip" });
+  mockedApi.setArtistViewMode.mockReset().mockResolvedValue(undefined);
   mockedApi.gateStatus.mockReset().mockResolvedValue({ locked: false });
   mockedApi.gateUnlock.mockReset().mockResolvedValue({ ok: true });
   mockedApi.getBookmarks
@@ -1116,3 +1126,99 @@ describe("App", () => {
     });
   });
 });
+
+
+  describe("grid view mode", () => {
+    it("grid toggle renders cells in the main feed; stack layers stay strip", async () => {
+      mockedApi.getFeedViewMode.mockResolvedValue({ value: "grid" });
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".grid-cell").length).toBe(30)
+      );
+      // No strip cards, no text overlays in the main feed.
+      expect(container.querySelectorAll(".feed-card")).toHaveLength(0);
+      expect(container.querySelector(".card-title")).toBeNull();
+
+      // Tapping a cell pushes a related stack — which ALWAYS renders strip.
+      await fireEvent.click(container.querySelector(".grid-cell")!);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view .feed-card").length).toBeGreaterThan(0)
+      );
+      expect(mockedApi.getRelated).toHaveBeenCalledWith(1);
+    });
+
+    it("seeds the artist-view mode at boot from the server", async () => {
+      mockedApi.getArtistViewMode.mockResolvedValue({ value: "grid" });
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      // Feed still strip; artist page would be grid — assert the seed
+      // call was made and the main feed is untouched.
+      expect(mockedApi.getArtistViewMode).toHaveBeenCalled();
+      expect(mockedApi.getFeedViewMode).toHaveBeenCalled();
+      expect(container.querySelectorAll(".grid-cell")).toHaveLength(0);
+    });
+
+    it("settings toggle persists the feed view mode via PUT", async () => {
+      // store.ts holds the REAL api module (test-setup loads it before
+      // the vi.mock hoist) — stub fetch at the network edge to observe
+      // the prefs PUT, same technique as store.test.ts.
+      const fetchCalls: { url: string; init?: RequestInit }[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: RequestInit) => {
+          fetchCalls.push({ url, init });
+          return new Response(JSON.stringify({ value: "grid" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        })
+      );
+
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+
+      // Open Settings from the drawer.
+      await fireEvent.click(container.querySelector(".burger-pill")!);
+      await fireEvent.click(
+        [...container.querySelectorAll(".drawer-item")].find(
+          (b) => b.textContent?.includes("Settings")
+        )!
+      );
+      await waitFor(() =>
+        expect(container.querySelector(".modal-dialog")).toBeTruthy()
+      );
+
+      // Feeds row → Grid.
+      const feedsRow = container.querySelector(
+        '[data-testid="feed-view-row"]'
+      )!;
+      await fireEvent.click(
+        [...feedsRow.querySelectorAll(".mode-pill")].find(
+          (b) => b.textContent === "Grid"
+        )!
+      );
+
+      // The main feed swaps to grid cells immediately.
+      await waitFor(() =>
+        expect(container.querySelectorAll(".grid-cell").length).toBe(30)
+      );
+      expect(container.querySelectorAll(".feed-card")).toHaveLength(0);
+
+      // The change is persisted: a PUT with {value:"grid"} hit the prefs
+      // endpoint (queued writes settle across microtasks).
+      await vi.waitFor(() => {
+        expect(
+          fetchCalls.some(
+            (c) =>
+              c.url === "/api/prefs/feed-view-mode" &&
+              c.init?.method === "PUT"
+          )
+        ).toBe(true);
+      });
+      vi.unstubAllGlobals();
+    });
+  });

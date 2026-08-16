@@ -1976,3 +1976,99 @@ func TestGateDisabledWithoutPassword(t *testing.T) {
 		t.Fatalf("disabled gate blocks = %d, want 200", rr.Code)
 	}
 }
+
+func TestPrefsViewModesDefaultAndRoundtrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "prefs.db")
+	store, err := openPrefs(dbPath)
+	if err != nil {
+		t.Fatalf("open prefs: %v", err)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerPrefs(mux, store)
+	h := apiKeyGate("secret", mux)
+
+	paths := []string{"/api/prefs/feed-view-mode", "/api/prefs/artist-view-mode"}
+
+	// Never-set modes read as the strip default.
+	for _, path := range paths {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s default = %d", path, rr.Code)
+		}
+		var out struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if out.Value != "strip" {
+			t.Fatalf("default %s = %q, want strip", path, out.Value)
+		}
+	}
+
+	// PUT both to grid.
+	for _, path := range paths {
+		req := httptest.NewRequest(http.MethodPut, path,
+			strings.NewReader(`{"value":"grid"}`))
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT %s = %d (body: %s)", path, rr.Code, rr.Body.String())
+		}
+	}
+
+	// Reopen the DB fresh — both modes must survive (the whole point of
+	// keeping view modes in the prefs DB instead of localStorage).
+	store2, err := openPrefs(dbPath)
+	if err != nil {
+		t.Fatalf("reopen prefs: %v", err)
+	}
+	if v, err := store2.GetFeedViewMode(); err != nil || v != "grid" {
+		t.Fatalf("persisted feed mode = %q, %v; want grid", v, err)
+	}
+	if v, err := store2.GetArtistViewMode(); err != nil || v != "grid" {
+		t.Fatalf("persisted artist mode = %q, %v; want grid", v, err)
+	}
+}
+
+func TestPrefsViewModesRejectInvalid(t *testing.T) {
+	store, err := openPrefs(":memory:")
+	if err != nil {
+		t.Fatalf("open prefs: %v", err)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerPrefs(mux, store)
+	h := apiKeyGate("secret", mux)
+
+	for _, path := range []string{"/api/prefs/feed-view-mode", "/api/prefs/artist-view-mode"} {
+		req := httptest.NewRequest(http.MethodPut, path,
+			strings.NewReader(`{"value":"carousel"}`))
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("PUT %s invalid = %d, want 400", path, rr.Code)
+		}
+		// The invalid write must not have touched the stored value.
+		req2 := httptest.NewRequest(http.MethodGet, path, nil)
+		req2.Header.Set("X-Api-Key", "secret")
+		rr2 := httptest.NewRecorder()
+		h.ServeHTTP(rr2, req2)
+		if rr2.Code != http.StatusOK {
+			t.Fatalf("GET %s after invalid PUT = %d", path, rr2.Code)
+		}
+		var out struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal(rr2.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if out.Value != "strip" {
+			t.Fatalf("value after invalid PUT = %q, want strip", out.Value)
+		}
+	}
+}

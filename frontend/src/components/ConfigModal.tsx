@@ -5,6 +5,10 @@ import {
   removeBlockedTag,
   imageSize,
   setImageSize,
+  feedViewMode,
+  setFeedViewMode,
+  artistViewMode,
+  setArtistViewMode,
 } from "../store";
 import BaseModal from "./BaseModal";
 
@@ -29,6 +33,55 @@ export default function ConfigModal(props: { onClose: () => void }) {
       }
     >
       <section>
+        <h3>View</h3>
+        <p class="hint">
+          Feeds and artist pages render as the default full-screen strip
+          or a compact thumbnail grid. Stacks and the recommendations
+          modal always stay strip.
+        </p>
+        <div class="config-view-row" data-testid="feed-view-row">
+          <span class="config-view-label">Feeds</span>
+          <button
+            type="button"
+            class={
+              feedViewMode() !== "grid" ? "mode-pill active" : "mode-pill"
+            }
+            onClick={() => setFeedViewMode("strip")}
+          >
+            Strip
+          </button>
+          <button
+            type="button"
+            class={
+              feedViewMode() === "grid" ? "mode-pill active" : "mode-pill"
+            }
+            onClick={() => setFeedViewMode("grid")}
+          >
+            Grid
+          </button>
+        </div>
+        <div class="config-view-row" data-testid="artist-view-row">
+          <span class="config-view-label">Artist pages</span>
+          <button
+            type="button"
+            class={
+              artistViewMode() !== "grid" ? "mode-pill active" : "mode-pill"
+            }
+            onClick={() => setArtistViewMode("strip")}
+          >
+            Strip
+          </button>
+          <button
+            type="button"
+            class={
+              artistViewMode() === "grid" ? "mode-pill active" : "mode-pill"
+            }
+            onClick={() => setArtistViewMode("grid")}
+          >
+            Grid
+          </button>
+        </div>
+
         <h3>Image quality</h3>
         <p class="hint">
           Data saver loads smaller images (540px where the feed has

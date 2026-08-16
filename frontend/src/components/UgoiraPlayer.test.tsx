@@ -303,6 +303,40 @@ describe("UgoiraPlayer", () => {
     expect(canvasesInCreationOrder[1].height).toBe(100);
   });
 
+  it("honours a smaller frame budget (grid cells: 360px frames)", async () => {
+    // The grid renderer passes maxFrameSide=360 / maxPosterSide=720 so a
+    // cell's canvases stay ~1/5 of a strip card's frame pixels.
+    frameSizeQueue.push([1600, 1200], [1600, 1200], [1600, 1200]);
+    const [sig, setSig] = createSignal(0);
+    const { container } = render(() => (
+      <>
+        <button data-testid="ctl" type="button" onClick={() => setSig((x) => x + 1)}>
+          ctl
+        </button>
+        <span data-testid="st">status</span>
+        <UgoiraPlayer
+          illustId={7701}
+          staticUrl="https://i.pximg.net/img-original/static.jpg"
+          title="うごイラ"
+          toggleSignal={sig()}
+          maxFrameSide={360}
+          maxPosterSide={720}
+        />
+      </>
+    ));
+    tapControl(container);
+    await flushMicrotasks();
+
+    // Poster (static frame): capped at 720 (1600x1200 -> 720x540).
+    expect(canvasesInCreationOrder[0].width).toBe(720);
+    expect(canvasesInCreationOrder[0].height).toBe(540);
+    // Animation frames: capped at 360 (1600x1200 -> 360x270).
+    expect(canvasesInCreationOrder[1].width).toBe(360);
+    expect(canvasesInCreationOrder[1].height).toBe(270);
+    expect(canvasesInCreationOrder[2].width).toBe(360);
+    expect(canvasesInCreationOrder[2].height).toBe(270);
+  });
+
   it("steps frames honouring each frame's delay", async () => {
     frameSizeQueue.push([100, 100], [1600, 1200], [400, 300]);
     const { container } = renderPlayer();

@@ -2,8 +2,17 @@ import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount }
 import { api } from "./api";
 import type { PixivIllust } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
-import { blockedTags, seedLikedIds, setBlockedTagsList, setImageSizeFromServer } from "./store";
+import {
+  blockedTags,
+  seedLikedIds,
+  setBlockedTagsList,
+  setImageSizeFromServer,
+  feedViewMode,
+  setFeedViewModeFromServer,
+  setArtistViewModeFromServer,
+} from "./store";
 import FeedCard from "./components/FeedCard";
+import GridFeed from "./components/GridFeed";
 import RankingSelector from "./components/RankingSelector";
 import ContentPills from "./components/ContentPills";
 import NavigationDrawer from "./components/NavigationDrawer";
@@ -479,6 +488,16 @@ export default function App() {
       .getImageSize()
       .then((d) => setImageSizeFromServer(d.value))
       .catch(() => {});
+    // View modes are global prefs (server DB), not session state — they
+    // seed like blocked tags and never touch the snapshot.
+    void api
+      .getFeedViewMode()
+      .then((d) => setFeedViewModeFromServer(d.value))
+      .catch(() => {});
+    void api
+      .getArtistViewMode()
+      .then((d) => setArtistViewModeFromServer(d.value))
+      .catch(() => {});
 
     const snap = loadSnapshot();
     if (snap) {
@@ -703,7 +722,11 @@ export default function App() {
 
       <Show when={!gateLocked()}>
       <div
-        class="feed-container"
+        class={
+          feedViewMode() === "grid"
+            ? "feed-container grid-container"
+            : "feed-container"
+        }
         ref={feedContainerRef}
         onScroll={(e) =>
           setFeedScrollTop((e.currentTarget as HTMLElement).scrollTop)
@@ -760,18 +783,29 @@ export default function App() {
             </div>
           }
         >
-          <For each={illusts()}>
-            {(illust) => (
-              <FeedCard
-                illust={illust}
+          <Show
+            when={feedViewMode() === "strip"}
+            fallback={
+              <GridFeed
+                illusts={illusts()}
                 onLike={handleLike}
                 onTap={pushRelated}
-                onArtistTap={openArtist}
-                onTagsTap={setTagsIllust}
-                onTagOpen={openTagPage}
               />
-            )}
-          </For>
+            }
+          >
+            <For each={illusts()}>
+              {(illust) => (
+                <FeedCard
+                  illust={illust}
+                  onLike={handleLike}
+                  onTap={pushRelated}
+                  onArtistTap={openArtist}
+                  onTagsTap={setTagsIllust}
+                  onTagOpen={openTagPage}
+                />
+              )}
+            </For>
+          </Show>
         </Show>
 
         {/* Sentinel for infinite scroll — full-height while the feed is

@@ -133,6 +133,57 @@ export function clearImageSize() {
 
 export { imageSize };
 
+// ── View modes (feeds + artist pages render strip | grid) ──────────────
+//
+// Global prefs, NOT session state: they live in the backend prefs DB
+// like blocked tags + image size, so a reload never needs the snapshot
+// to carry them. Strips everywhere by default; the Settings modal has
+// one toggle row for feed tabs and one for artist pages.
+
+export type ViewMode = "strip" | "grid";
+
+const [feedViewMode, setFeedViewModeRaw] = createSignal<ViewMode>("strip");
+
+/** Applies the value loaded from the server (no PUT round-trip). */
+export function setFeedViewModeFromServer(v: string) {
+  setFeedViewModeRaw(v === "grid" ? "grid" : "strip");
+}
+
+/** User action: update locally + persist to the prefs DB. */
+export function setFeedViewMode(v: ViewMode) {
+  setFeedViewModeRaw(v);
+  void api.setFeedViewMode(v).catch(() => {
+    // Backend unreachable — the setting applies for this session only.
+  });
+}
+
+/** Test hook. */
+export function clearFeedViewMode() {
+  setFeedViewModeRaw("strip");
+}
+
+const [artistViewMode, setArtistViewModeRaw] = createSignal<ViewMode>("strip");
+
+/** Applies the value loaded from the server (no PUT round-trip). */
+export function setArtistViewModeFromServer(v: string) {
+  setArtistViewModeRaw(v === "grid" ? "grid" : "strip");
+}
+
+/** User action: update locally + persist to the prefs DB. */
+export function setArtistViewMode(v: ViewMode) {
+  setArtistViewModeRaw(v);
+  void api.setArtistViewMode(v).catch(() => {
+    // Backend unreachable — the setting applies for this session only.
+  });
+}
+
+/** Test hook. */
+export function clearArtistViewMode() {
+  setArtistViewModeRaw("strip");
+}
+
+export { feedViewMode, artistViewMode };
+
 // ── One-time stack hint ("Related works — ← Back returns") ──────────────
 
 const HINT_KEY = "pixtok_stack_hint_dismissed";

@@ -129,3 +129,46 @@ func (s *prefsStore) SetImageSize(v string) error {
 	}
 	return s.set(imageSizeKey, v)
 }
+
+const feedViewModeKey = "feed_view_mode"
+const artistViewModeKey = "artist_view_mode"
+
+// viewMode reads a view-mode pref. Anything that isn't "grid" reads as
+// the default "strip" — corrupt or legacy values degrade to the default
+// rather than breaking rendering.
+func (s *prefsStore) viewMode(key string) (string, error) {
+	v, err := s.get(key)
+	if err != nil {
+		return "", err
+	}
+	if v != "grid" {
+		return "strip", nil
+	}
+	return v, nil
+}
+
+// GetFeedViewMode returns how feed tabs render: "strip" (default,
+// full-bleed 100dvh cards) or "grid" (square thumbnails).
+func (s *prefsStore) GetFeedViewMode() (string, error) {
+	return s.viewMode(feedViewModeKey)
+}
+
+func (s *prefsStore) SetFeedViewMode(v string) error {
+	if v != "strip" && v != "grid" {
+		return fmt.Errorf("invalid feed view mode")
+	}
+	return s.set(feedViewModeKey, v)
+}
+
+// GetArtistViewMode returns how the artist page library renders — same
+// values as the feed toggle, but independent of it.
+func (s *prefsStore) GetArtistViewMode() (string, error) {
+	return s.viewMode(artistViewModeKey)
+}
+
+func (s *prefsStore) SetArtistViewMode(v string) error {
+	if v != "strip" && v != "grid" {
+		return fmt.Errorf("invalid artist view mode")
+	}
+	return s.set(artistViewModeKey, v)
+}
