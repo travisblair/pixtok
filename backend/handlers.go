@@ -71,7 +71,8 @@ const pkceMaxEntries = 32
 func (s *pkceStore) put(state, verifier string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Shed stale entries; if still full, drop the oldest arbitrary one.
+	// Shed stale entries; if still full, drop an arbitrary one (map
+	// iteration makes no attempt at LRU — that's fine at this scale).
 	for st, e := range s.entries {
 		if time.Now().After(e.expires) {
 			delete(s.entries, st)
