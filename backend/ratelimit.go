@@ -1,0 +1,97 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Per-tier limits. Deliberately generous: these exist to bound a runaway
+// or compromised client, not to police a single user's browsing. Tune
+// down only if server.log shows upstream pressure.
+const (
+	imagesPerMinute    = 300 // /api/img — phone scrolls are bursty
+	readsPerMinute     = 120 // /api/next, /api/search*, GETs
+	mutationsPerMinute = 60  // POST/PUT/DELETE (likes, prefs, gate unlock)
+)
+
+// bucket is a simple token bucket with a refill rate derived from the
+// per-minute limit (limit/60 per second) and a burst capacity equal to
+// the limit itself: a full minute of budget can be spent instantly, then
+// it refills at the steady rate.
+type bucket struct {
+	mu      sync.Mutex
+	tokens  float64
+	last    time.Time
+	perSec  float64
+	burst   float64
+	limiter *rateLimiter
+}
+
+// take consumes one token if available. Returns seconds until the next
+// token on refusal (0 on success).
+func (b *bucket) take() (bool, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.limiter.now()
+	if b.last.IsZero() {
+		b.last = now
+	}
+	elapsed := now.Sub(b.last).Seconds()
+	if elapsed > 0 {
+		b.tokens = math.Min(b.burst, b.tokens+elapsed*b.perSec)
+		b.last = now
+	}
+	if b.tokens >= 1 {
+		b.tokens--
+		return true, 0
+	}
+	wait := (1 - b.tokens) / b.perSec
+	return false, int(math.Ceil(wait))
+}
+
+type rateLimiter struct {
+	images    bucket
+	reads     bucket
+	mutations bucket
+	now       func() time.Time
+}
+
+func newRateLimiter(now func() time.Time) *rateLimiter {
+	if now == nil {
+		now = time.Now
+	}
+	rl := &rateLimiter{now: now}
+	rl.images = bucket{tokens: imagesPerMinute, perSec: imagesPerMinute / 60.0, burst: imagesPerMinute, limiter: rl}
+	rl.reads = bucket{tokens: readsPerMinute, perSec: readsPerMinute / 60.0, burst: readsPerMinute, limiter: rl}
+	rl.mutations = bucket{tokens: mutationsPerMinute, perSec: mutationsPerMinute / 60.0, burst: mutationsPerMinute, limiter: rl}
+	return rl
+}
+
+func (rl *rateLimiter) tierFor(r *http.Request) *bucket {
+	if strings.HasPrefix(r.URL.Path, "/api/img/") {
+		return &rl.images
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return &rl.mutations
+	}
+	return &rl.reads
+}
+
+// middleware returns 429 + Retry-After when the request's tier bucket is
+// empty. Placed outside the API-key gate so unauthenticated probes are
+// throttled too.
+func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := rl.tierFor(r)
+		if ok, retry := b.take(); !ok {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
