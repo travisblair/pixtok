@@ -19,3 +19,8 @@ pixtok.db
 .hermes/
 CRAWL-NOTES.md
 server.log
+
+# Frontend build output (embedded by the Go binary)
+backend/static/*
+!backend/static/.gitkeep
+backend/pixtok

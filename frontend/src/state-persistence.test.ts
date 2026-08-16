@@ -26,6 +26,7 @@ function baseSnapshot(): SnapshotInput {
     modalOpen: true,
     searchOpen: false,
     search: null,
+    layerOrder: ["s0", "artist"],
   };
 }
 

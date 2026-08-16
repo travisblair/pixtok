@@ -1,5 +1,7 @@
 import { defineConfig } from "vitest/config";
+import type { Connect, Plugin, ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
+import type { ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -49,23 +51,32 @@ const APP_CSP =
   "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; " +
   "base-uri 'none'; form-action 'self'";
 
-function cspForAppPages() {
+function cspForAppPages(): Plugin {
   return {
     name: "pixtok-csp",
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        const p = req.url || "";
-        if (!p.startsWith("/api/auth/px/") && !p.startsWith("/ajax/")) {
-          res.setHeader("Content-Security-Policy", APP_CSP);
+    configureServer(server: ViteDevServer) {
+      server.middlewares.use(
+        (req: Connect.IncomingMessage, res: ServerResponse, next: Connect.NextFunction) => {
+          const p = req.url || "";
+          if (!p.startsWith("/api/auth/px/") && !p.startsWith("/ajax/")) {
+            res.setHeader("Content-Security-Policy", APP_CSP);
+          }
+          next();
         }
-        next();
-      });
+      );
     },
   };
 }
 
 export default defineConfig({
   plugins: [solid(), cspForAppPages()],
+  build: {
+    // The Go backend embeds the built frontend (backend/static) so the
+    // production server is a single binary. Must live inside the Go
+    // module (module root is backend/) for go:embed to reach it.
+    outDir: "../backend/static",
+    emptyOutDir: true,
+  },
   server: {
     // Bind all interfaces: Tailscale Funnel dials 127.0.0.1, direct
     // tailnet access (phone) arrives on the 100.x interface. allowedHosts

@@ -152,6 +152,8 @@ proxy's rewritten pixiv cookies keep `Secure`.
 
 ### 3. Run
 
+Development (Vite + HMR; the dev proxy injects the API key):
+
 ```
 cd backend && go run .
 cd frontend && npm install && npm run dev
@@ -161,6 +163,20 @@ cd frontend && npm install && npm run dev
   injects a shared API key)
 - Frontend: Vite dev server on `:5173`; set `VITE_ALLOWED_HOSTS` in
   `.env` to expose it on a tailnet/funnel
+
+Production (single binary serving the built frontend):
+
+```
+cd frontend && npm run build      # → backend/static (embedded)
+cd backend && go build -o pixtok-server .
+./pixtok-server                   # serves app + API on 127.0.0.1:8080
+```
+
+Prod serving needs `PIXTOK_SERVE_FRONTEND=true` and an enabled gate —
+without a gate password the backend refuses to boot (fail-closed). In
+this mode the gate cookie is the API credential (the browser can't hold
+the API key, so the key is ignored), and Tailscale `serve --bg 8080`
+gives the phone a stable HTTPS URL.
 
 ## Deployment security
 
