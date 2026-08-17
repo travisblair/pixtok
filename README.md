@@ -16,7 +16,8 @@ yourself, reach it from your own devices — that's the intended model.
 ## Features
 
 Everything opens from the ☰ drawer. Feeds scroll vertically with
-infinite scroll; each card is a full-screen page.
+infinite scroll; in the default strip view each card is a full-screen
+page.
 
 ### Feeds
 
@@ -29,6 +30,15 @@ infinite scroll; each card is a full-screen page.
   the pills above the feed.
 - **Discover** — the site-wide recommended feed.
 - **Bookmarks** — everything you've bookmarked on Pixiv, as a feed.
+
+### View modes
+
+Feeds and artist pages render as a full-screen strip (default) or a
+compact square-thumbnail grid — Settings → View toggles them
+independently. Stacks and the recommendations modal always stay strip.
+Grid cells are deliberately minimal (image, heart, ugoira badge); the
+strip carries the text overlays. Grid cells load square_medium thumbs
+and skip the scroll-based unload window — cheap to keep in memory.
 
 ### Search
 
@@ -84,7 +94,8 @@ list any time in Settings.
 ### Settings
 
 ☰ → Settings: image quality (**Full** or **Data saver** — 540px images
-for cellular) and your blocked-tags list.
+for cellular), feed and artist view modes (**Strip** or **Grid**), and
+your blocked-tags list.
 
 ### Session persistence
 
