@@ -1095,6 +1095,66 @@ func (c *Client) GetWorkRecommend(illustID string) ([]byte, error) {
 	return body, nil
 }
 
+// SetFollow follows or unfollows a user via the app API. Form-encoded
+// like every other v1 mutation; restrict is "public" or "private".
+// Verified live Aug 2026 (add → detail is_followed=true → delete →
+// false round trip).
+func (c *Client) SetFollow(userID string, restrict string, follow bool) error {
+	if !ValidID(userID) {
+		return fmt.Errorf("invalid user id %q", userID)
+	}
+	action := "delete"
+	if follow {
+		action = "add"
+	}
+	data := url.Values{
+		"user_id":  {userID},
+		"restrict": {restrict},
+	}
+	req, err := http.NewRequest("POST", baseURL+"/v1/user/follow/"+action, strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := c.doWith(c.http, req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("follow %s returned %d", action, resp.StatusCode)
+	}
+	return nil
+}
+
+// IsFollowed returns the current follow state from /v1/user/detail.
+func (c *Client) IsFollowed(userID string) (bool, error) {
+	if !ValidID(userID) {
+		return false, fmt.Errorf("invalid user id %q", userID)
+	}
+	req, err := http.NewRequest("GET", baseURL+"/v1/user/detail?user_id="+url.QueryEscape(userID), nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.doWith(c.http, req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false, fmt.Errorf("user detail returned %d", resp.StatusCode)
+	}
+	var out struct {
+		User struct {
+			IsFollowed bool `json:"is_followed"`
+		} `json:"user"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, err
+	}
+	return out.User.IsFollowed, nil
+}
+
 func (c *Client) ProxyImage(imgURL string) ([]byte, string, error) {
 	// img URLs come from the CLIENT — enforce the CDN allowlist so
 	// /api/img can't be used as an open proxy into the LAN.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // recTransport records the request URL and returns a canned 200 JSON —
@@ -312,5 +313,93 @@ func TestSearchArtworksRejectsBadValues(t *testing.T) {
 				t.Fatalf("invalid params made an upstream request: %q", rt.lastURI)
 			}
 		})
+	}
+}
+
+// captureTransport records the request it serves and answers a canned
+// JSON body — lets follow tests pin method/path/query/body without a
+// network.
+type captureTransport struct {
+	method, path, query, body string
+	status                    int
+	respBody                  string
+}
+
+func (r *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.method, r.path, r.query = req.Method, req.URL.Path, req.URL.RawQuery
+	if req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		r.body = string(b)
+	}
+	return &http.Response{
+		StatusCode: r.status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(r.respBody)),
+		Request:    req,
+	}, nil
+}
+
+func newFollowClient(rt http.RoundTripper) *Client {
+	return &Client{
+		accessToken: "tok",
+		expiresAt:   time.Now().Add(time.Hour),
+		http:        &http.Client{Transport: rt},
+	}
+}
+
+func TestSetFollowAddAndDelete(t *testing.T) {
+	rt := &captureTransport{status: 200}
+	c := newFollowClient(rt)
+	if err := c.SetFollow("12345", "public", true); err != nil {
+		t.Fatalf("follow add: %v", err)
+	}
+	if rt.method != http.MethodPost || rt.path != "/v1/user/follow/add" {
+		t.Fatalf("add request = %s %s", rt.method, rt.path)
+	}
+	if rt.body != "restrict=public&user_id=12345" { // url.Values.Encode sorts keys
+		t.Fatalf("add body = %q", rt.body)
+	}
+
+	rt = &captureTransport{status: 200}
+	c = newFollowClient(rt)
+	if err := c.SetFollow("12345", "public", false); err != nil {
+		t.Fatalf("follow delete: %v", err)
+	}
+	if rt.method != http.MethodPost || rt.path != "/v1/user/follow/delete" {
+		t.Fatalf("delete request = %s %s", rt.method, rt.path)
+	}
+}
+
+func TestSetFollowSurfacesUpstreamError(t *testing.T) {
+	rt := &captureTransport{status: 400}
+	c := newFollowClient(rt)
+	if err := c.SetFollow("12345", "public", true); err == nil {
+		t.Fatal("400 upstream accepted")
+	}
+}
+
+func TestSetFollowRejectsBadID(t *testing.T) {
+	c := newFollowClient(&captureTransport{status: 200})
+	if err := c.SetFollow("not-an-id", "public", true); err == nil {
+		t.Fatal("bad user id accepted")
+	}
+}
+
+func TestIsFollowedParsesDetail(t *testing.T) {
+	rt := &captureTransport{status: 200, respBody: `{"user":{"is_followed":true}}`}
+	c := newFollowClient(rt)
+	got, err := c.IsFollowed("12345")
+	if err != nil || !got {
+		t.Fatalf("IsFollowed = %v, %v; want true", got, err)
+	}
+	if rt.method != http.MethodGet || rt.path != "/v1/user/detail" || rt.query != "user_id=12345" {
+		t.Fatalf("detail request = %s %s?%s", rt.method, rt.path, rt.query)
+	}
+
+	rt = &captureTransport{status: 200, respBody: `{"user":{"is_followed":false}}`}
+	c = newFollowClient(rt)
+	got, err = c.IsFollowed("12345")
+	if err != nil || got {
+		t.Fatalf("IsFollowed = %v, %v; want false", got, err)
 	}
 }
