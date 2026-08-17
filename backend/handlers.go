@@ -35,6 +35,10 @@ type pixivAPI interface {
 	BookmarkDelete(illustID string) error
 	GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
 	GetBookmarkIllusts(restrict string) ([]byte, error)
+	GetBookmarkPage(tag string, offset, limit int, order string) ([]byte, error)
+	GetBookmarkTags() ([]byte, error)
+	SetFollow(userID, restrict string, follow bool) error
+	IsFollowed(userID string) (bool, error)
 	SearchArtworks(word string, opts pixiv.SearchOpts, page int) ([]byte, error)
 	SearchUsers(nick, sMode string, page int) ([]byte, error)
 	ProxyNext(nextURL string) ([]byte, error)
@@ -338,13 +342,32 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 	// default — pixtok likes are private). Standard app-API passthrough;
 	// pagination rides the existing /api/next route.
 	mux.HandleFunc("GET /api/bookmarks", func(w http.ResponseWriter, r *http.Request) {
-		restrict := r.URL.Query().Get("restrict")
-		if restrict == "" {
-			restrict = "private"
+		// The bookmarks PAGE experience (crawl-verified): tag filter +
+		// blind offset pagination + sort, via the web AJAX endpoint.
+		// limit 48 matches the site's own page size. rest=show is the
+		// page's default (public bookmarks).
+		tag := r.URL.Query().Get("tag")
+		if len(tag) > 64 {
+			http.Error(w, "invalid tag", http.StatusBadRequest)
+			return
 		}
-		body, err := api.GetBookmarkIllusts(restrict)
+		offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+		if err != nil || offset < 0 || offset > 100000 {
+			http.Error(w, "invalid offset", http.StatusBadRequest)
+			return
+		}
+		order := r.URL.Query().Get("order")
+		if order == "" {
+			order = "desc"
+		}
+		if order != "desc" && order != "asc" {
+			http.Error(w, "invalid order", http.StatusBadRequest)
+			return
+		}
+		const pageSize = 48
+		body, err := api.GetBookmarkPage(tag, offset, pageSize, order)
 		if err != nil {
-			log.Printf("ERROR bookmarks: %v", err)
+			log.Printf("ERROR bookmark page: %v", err)
 			if errors.Is(err, pixiv.ErrInvalidParam) {
 				http.Error(w, "invalid parameter", http.StatusBadRequest)
 				return
@@ -352,8 +375,69 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
+		out, err := transformBookmarkPage(body, tag, offset, pageSize, order)
+		if err != nil {
+			log.Printf("ERROR bookmark transform: %v", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		w.Write(out)
+	})
+
+	mux.HandleFunc("GET /api/bookmarks/tags", func(w http.ResponseWriter, r *http.Request) {
+		body, err := api.GetBookmarkTags()
+		if err != nil {
+			log.Printf("ERROR bookmark tags: %v", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		out, err := transformBookmarkTags(body)
+		if err != nil {
+			log.Printf("ERROR bookmark tags transform: %v", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(out)
+	})
+
+	// Follow/unfollow — account-mutating, POST only (same rule as
+	// like/unlike). /followed reports the current state for the follow
+	// button. Method-specific patterns: the artist route owns the
+	// methodless GET /api/user/ subtree, and method-specific wins there.
+	handleFollow := func(w http.ResponseWriter, r *http.Request, follow bool) {
+		id := r.PathValue("id")
+		if !pixiv.ValidID(id) {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+		if err := api.SetFollow(id, "public", follow); err != nil {
+			log.Printf("ERROR follow (%v): %v", follow, err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	}
+	mux.HandleFunc("POST /api/user/{id}/follow", func(w http.ResponseWriter, r *http.Request) {
+		handleFollow(w, r, true)
+	})
+	mux.HandleFunc("POST /api/user/{id}/unfollow", func(w http.ResponseWriter, r *http.Request) {
+		handleFollow(w, r, false)
+	})
+	mux.HandleFunc("GET /api/user/{id}/followed", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if !pixiv.ValidID(id) {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+		followed, err := api.IsFollowed(id)
+		if err != nil {
+			log.Printf("ERROR follow state: %v", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"followed": followed})
 	})
 
 	mux.HandleFunc("GET /api/search/artworks", func(w http.ResponseWriter, r *http.Request) {

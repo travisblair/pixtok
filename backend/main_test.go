@@ -49,6 +49,10 @@ type fakeAPI struct {
 	bookmarkDelFn     func(id string) error
 	bookmarkIDsFn     func(restrict string, maxPages int) ([]string, error)
 	bookmarkIllustsFn func(restrict string) ([]byte, error)
+	bookmarkPageFn    func(tag string, offset, limit int, order string) ([]byte, error)
+	bookmarkTagsFn    func() ([]byte, error)
+	setFollowFn       func(userID, restrict string, follow bool) error
+	isFollowedFn      func(userID string) (bool, error)
 	searchArtFn       func(word string, opts pixiv.SearchOpts, page int) ([]byte, error)
 	searchUsrFn       func(nick, sMode string, page int) ([]byte, error)
 	proxyNextFn       func(url string) ([]byte, error)
@@ -1749,17 +1753,26 @@ func TestSearchUsersEndpoint(t *testing.T) {
 	}
 }
 
-func TestBookmarksEndpointPassthrough(t *testing.T) {
+func TestBookmarksPageEndpoint(t *testing.T) {
+	// A one-work page from the crawl-verified web-AJAX shape.
+	pageJSON := `{"error":false,"message":"","body":{"works":[{
+		"id":"148045266","title":"Remielle","illustType":0,"xRestrict":0,"restrict":0,
+		"url":"https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/08/05/15/53/58/148045266_p0_square1200.jpg",
+		"tags":["ZZZ"],"userId":"83540148","userName":"swean","width":2048,"height":3072,
+		"pageCount":1,"isBookmarkable":true,
+		"bookmarkData":{"id":"38388957251","private":false},
+		"aiType":2,"profileImageUrl":"https://i.pximg.net/user-profile/img/1_50.gif"
+	}],"total":12504}}`
 	f := &fakeAPI{
-		bookmarkIllustsFn: func(restrict string) ([]byte, error) {
-			if restrict != "private" {
-				t.Fatalf("restrict = %q, want private", restrict)
+		bookmarkPageFn: func(tag string, offset, limit int, order string) ([]byte, error) {
+			if tag != "abc" || offset != 48 || limit != 48 || order != "asc" {
+				t.Fatalf("page args = %q/%d/%d/%q", tag, offset, limit, order)
 			}
-			return []byte(`{"illusts":[{"id":1,"title":"bm"}],"next_url":"https://app-api.pixiv.net/v1/user/bookmarks/illust?offset=30"}`), nil
+			return []byte(pageJSON), nil
 		},
 	}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
-	req := httptest.NewRequest(http.MethodGet, "/api/bookmarks", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/bookmarks?tag=abc&offset=48&order=asc", nil)
 	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1768,15 +1781,138 @@ func TestBookmarksEndpointPassthrough(t *testing.T) {
 	}
 	var out struct {
 		Illusts []struct {
-			ID int `json:"id"`
+			ID   string `json:"id"`
+			Type string `json:"type"`
 		} `json:"illusts"`
-		NextURL string `json:"next_url"`
+		NextURL *string `json:"next_url"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if len(out.Illusts) != 1 || out.Illusts[0].ID != 1 || out.NextURL == "" {
-		t.Fatalf("passthrough wrong: %+v", out)
+	if len(out.Illusts) != 1 || out.Illusts[0].ID != "148045266" {
+		t.Fatalf("illusts wrong: %+v", out.Illusts)
+	}
+	// Blind offset pagination: offset+48 < total → next_url built locally.
+	wantNext := "/api/bookmarks?tag=abc&offset=96&order=asc"
+	if out.NextURL == nil || *out.NextURL != wantNext {
+		t.Fatalf("next_url = %v, want %q", out.NextURL, wantNext)
+	}
+}
+
+func TestBookmarksPageNextURLTerminates(t *testing.T) {
+	// offset 48 + limit 48 == total 96 → next_url must be null.
+	f := &fakeAPI{
+		bookmarkPageFn: func(tag string, offset, limit int, order string) ([]byte, error) {
+			return []byte(`{"error":false,"message":"","body":{"works":[],"total":96}}`), nil
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	req := httptest.NewRequest(http.MethodGet, "/api/bookmarks?offset=48", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("bookmarks = %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"next_url":null`) {
+		t.Fatalf("next_url not null at the end: %s", rr.Body.String())
+	}
+}
+
+func TestBookmarksPageRejectsBadParams(t *testing.T) {
+	f := &fakeAPI{}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	for _, q := range []string{"?offset=-1", "?offset=abc", "?offset=999999", "?order=sideways", "?tag=" + strings.Repeat("x", 65)} {
+		req := httptest.NewRequest(http.MethodGet, "/api/bookmarks"+q, nil)
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("GET /api/bookmarks%s = %d, want 400", q, rr.Code)
+		}
+	}
+}
+
+func TestBookmarksTagsEndpoint(t *testing.T) {
+	f := &fakeAPI{
+		bookmarkTagsFn: func() ([]byte, error) {
+			return []byte(`{"error":false,"message":"","body":{"public":[{"tag":"未分類","cnt":12504}],"private":[{"tag":"未分類","cnt":2418}]}}`), nil
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	req := httptest.NewRequest(http.MethodGet, "/api/bookmarks/tags", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tags = %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"name":"未分類"`) || !strings.Contains(rr.Body.String(), `"count":12504`) {
+		t.Fatalf("tags shape wrong: %s", rr.Body.String())
+	}
+}
+
+func TestFollowRoutes(t *testing.T) {
+	var gotAdd, gotDel, gotState string
+	f := &fakeAPI{
+		setFollowFn: func(userID, restrict string, follow bool) error {
+			if userID != "12345" || restrict != "public" {
+				t.Fatalf("setFollow(%q, %q)", userID, restrict)
+			}
+			if follow {
+				gotAdd = userID
+			} else {
+				gotDel = userID
+			}
+			return nil
+		},
+		isFollowedFn: func(userID string) (bool, error) {
+			gotState = userID
+			return true, nil
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	post := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	if rr := post("/api/user/12345/follow"); rr.Code != http.StatusOK || gotAdd != "12345" {
+		t.Fatalf("follow = %d, add=%q", rr.Code, gotAdd)
+	}
+	if rr := post("/api/user/12345/unfollow"); rr.Code != http.StatusOK || gotDel != "12345" {
+		t.Fatalf("unfollow = %d, del=%q", rr.Code, gotDel)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/user/12345/followed", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"followed":true`) || gotState != "12345" {
+		t.Fatalf("followed = %d %s state=%q", rr.Code, rr.Body.String(), gotState)
+	}
+}
+
+func TestFollowRoutesRejectBadInput(t *testing.T) {
+	f := &fakeAPI{}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	// Bad id.
+	req := httptest.NewRequest(http.MethodPost, "/api/user/abc/follow", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad id = %d, want 400", rr.Code)
+	}
+	// GET must not mutate: no follow route matches GET — the artist
+	// subtree catches it (404). The mutation itself is POST-only.
+	req = httptest.NewRequest(http.MethodGet, "/api/user/12345/follow", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("GET follow = %d, want 404", rr.Code)
 	}
 }
 
@@ -2132,4 +2268,32 @@ func TestPrefsRoutesEnforceMethodBodyCapAndTrim(t *testing.T) {
 	if v, err := store.GetFeedViewMode(); err != nil || v != "grid" {
 		t.Fatalf("stored value = %q, %v; want grid (trimmed)", v, err)
 	}
+}
+
+func (f *fakeAPI) GetBookmarkPage(tag string, offset, limit int, order string) ([]byte, error) {
+	if f.bookmarkPageFn != nil {
+		return f.bookmarkPageFn(tag, offset, limit, order)
+	}
+	return []byte(`{"error":false,"message":"","body":{"works":[],"total":0}}`), nil
+}
+
+func (f *fakeAPI) GetBookmarkTags() ([]byte, error) {
+	if f.bookmarkTagsFn != nil {
+		return f.bookmarkTagsFn()
+	}
+	return []byte(`{"error":false,"message":"","body":{"public":[],"private":[]}}`), nil
+}
+
+func (f *fakeAPI) SetFollow(userID, restrict string, follow bool) error {
+	if f.setFollowFn != nil {
+		return f.setFollowFn(userID, restrict, follow)
+	}
+	return nil
+}
+
+func (f *fakeAPI) IsFollowed(userID string) (bool, error) {
+	if f.isFollowedFn != nil {
+		return f.isFollowedFn(userID)
+	}
+	return false, nil
 }

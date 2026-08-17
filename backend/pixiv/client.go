@@ -1002,6 +1002,114 @@ func (c *Client) GetBookmarkIllusts(restrict string) ([]byte, error) {
 	return c.doGet(u)
 }
 
+// GetBookmarkPage fetches one offset page of the user's bookmarks via
+// the web AJAX endpoint behind pixiv's bookmarks page (crawl-verified
+// Aug 2026): tag is a bookmark-tag name (URL-encoded upstream), offset
+// is blind (the response carries total), order desc|asc.
+func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([]byte, error) {
+	if offset < 0 || limit < 1 || limit > 48 {
+		return nil, fmt.Errorf("%w: invalid offset/limit", ErrInvalidParam)
+	}
+	if order != "desc" && order != "asc" {
+		return nil, fmt.Errorf("%w: invalid order", ErrInvalidParam)
+	}
+	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
+	if !ValidID(uid) {
+		return nil, fmt.Errorf("cannot resolve user id from web session")
+	}
+
+	do := func() ([]byte, error) {
+		token, err := c.csrfToken()
+		if err != nil {
+			return nil, err
+		}
+		u := fmt.Sprintf("https://www.pixiv.net/ajax/user/%s/illusts/bookmarks?tag=%s&offset=%d&limit=%d&rest=show&order=%s&mode=all&lang=en",
+			uid, url.QueryEscape(tag), offset, limit, order)
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("x-csrf-token", token)
+		req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+		req.Header.Set("User-Agent", webUA)
+		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONBody))
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != 200 {
+			return nil, &statusError{op: "bookmark page", status: resp.StatusCode, body: truncate(string(body), 200)}
+		}
+		return body, nil
+	}
+
+	body, err := do()
+	var se *statusError
+	if err != nil && errors.As(err, &se) && (se.status == 400 || se.status == 401) {
+		c.csrfMu.Lock()
+		c.csrfTokenCache = ""
+		c.csrfMu.Unlock()
+		body, err = do()
+	}
+	return body, err
+}
+
+// GetBookmarkTags fetches the user's bookmark-tag list (web AJAX,
+// crawl-verified): body.public/private arrays of {tag, cnt}.
+func (c *Client) GetBookmarkTags() ([]byte, error) {
+	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
+	if !ValidID(uid) {
+		return nil, fmt.Errorf("cannot resolve user id from web session")
+	}
+	do := func() ([]byte, error) {
+		token, err := c.csrfToken()
+		if err != nil {
+			return nil, err
+		}
+		u := fmt.Sprintf("https://www.pixiv.net/ajax/user/%s/illusts/bookmark/tags?lang=en", uid)
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("x-csrf-token", token)
+		req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+		req.Header.Set("User-Agent", webUA)
+		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONBody))
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != 200 {
+			return nil, &statusError{op: "bookmark tags", status: resp.StatusCode, body: truncate(string(body), 200)}
+		}
+		return body, nil
+	}
+
+	body, err := do()
+	var se *statusError
+	if err != nil && errors.As(err, &se) && (se.status == 400 || se.status == 401) {
+		c.csrfMu.Lock()
+		c.csrfTokenCache = ""
+		c.csrfMu.Unlock()
+		body, err = do()
+	}
+	return body, err
+}
+
 func (c *Client) BookmarkDelete(illustID string) error {
 	if !ValidID(illustID) {
 		return fmt.Errorf("%w: invalid illust id", ErrInvalidParam)

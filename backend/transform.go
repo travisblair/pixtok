@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -658,4 +659,80 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 		out.Users = append(out.Users, row)
 	}
 	return out, nil
+}
+
+// bookmarkPageEnvelope is the raw web-AJAX bookmarks page response
+// (crawl-verified Aug 2026): {error, message, body:{works[], total}}.
+type bookmarkPageEnvelope struct {
+	Error   bool   `json:"error"`
+	Message string `json:"message"`
+	Body    struct {
+		Works []webIllust `json:"works"`
+		Total int         `json:"total"`
+	} `json:"body"`
+}
+
+// transformBookmarkPage converts a bookmarks page response to the
+// standard FeedResponse. Pagination is a blind offset against total, so
+// next_url is built locally as a self-referential /api/bookmarks URL and
+// null once offset+limit reaches total.
+func transformBookmarkPage(raw []byte, tag string, offset, limit int, order string) ([]byte, error) {
+	var env bookmarkPageEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, err
+	}
+	if env.Error {
+		return nil, fmt.Errorf("pixiv bookmark page: %s", env.Message)
+	}
+	out := feedResponse{Illusts: mapWebIllusts(env.Body.Works, limit)}
+	if next := offset + limit; next < env.Body.Total {
+		u := fmt.Sprintf("/api/bookmarks?tag=%s&offset=%d&order=%s", url.QueryEscape(tag), next, order)
+		out.NextURL = &u
+	}
+	return json.Marshal(out)
+}
+
+// bookmarkTagsEnvelope is the raw tags response (crawl-verified):
+// {error, message, body:{public:[{tag,cnt}], private:[{tag,cnt}]}}.
+type bookmarkTagsEnvelope struct {
+	Error bool `json:"error"`
+	Body  struct {
+		Public  []bookmarkTag `json:"public"`
+		Private []bookmarkTag `json:"private"`
+	} `json:"body"`
+}
+
+type bookmarkTag struct {
+	Tag string `json:"tag"`
+	Cnt int    `json:"cnt"`
+}
+
+// transformBookmarkTags maps the tags endpoint to
+// {public:[{name,count}], private:[{name,count}]}.
+func transformBookmarkTags(raw []byte) ([]byte, error) {
+	var env bookmarkTagsEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, err
+	}
+	if env.Error {
+		return nil, fmt.Errorf("pixiv bookmark tags error")
+	}
+	type outTag struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	out := struct {
+		Public  []outTag `json:"public"`
+		Private []outTag `json:"private"`
+	}{
+		Public:  make([]outTag, 0, len(env.Body.Public)),
+		Private: make([]outTag, 0, len(env.Body.Private)),
+	}
+	for _, t := range env.Body.Public {
+		out.Public = append(out.Public, outTag{Name: t.Tag, Count: t.Cnt})
+	}
+	for _, t := range env.Body.Private {
+		out.Private = append(out.Private, outTag{Name: t.Tag, Count: t.Cnt})
+	}
+	return json.Marshal(out)
 }
