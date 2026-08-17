@@ -7,6 +7,9 @@ vi.mock("../api", () => ({
   api: {
     like: vi.fn(async () => {}),
     unlike: vi.fn(async () => {}),
+    follow: vi.fn(async () => {}),
+    unfollow: vi.fn(async () => {}),
+    getFollowed: vi.fn(),
   },
 }));
 
@@ -14,11 +17,13 @@ import { api } from "../api";
 const mockedApi = api as unknown as {
   like: ReturnType<typeof vi.fn>;
   unlike: ReturnType<typeof vi.fn>;
+  getFollowed: ReturnType<typeof vi.fn>;
 };
 
 beforeEach(() => {
   mockedApi.like.mockReset().mockResolvedValue(undefined);
   mockedApi.unlike.mockReset().mockResolvedValue(undefined);
+  mockedApi.getFollowed.mockReset().mockResolvedValue({ followed: false });
 });
 
 describe("FeedCard", () => {

@@ -6,6 +6,7 @@ import GridFeed from "./GridFeed";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
 import { blockedTags, artistViewMode } from "../store";
 import { useFeedSentinel } from "../hooks";
+import FollowButton from "./FollowButton";
 
 /**
  * Full-screen feed of one artist's works (app API /v1/user/illusts,
@@ -149,6 +150,7 @@ export default function ArtistView(props: {
       <div class="artist-name-badge overlay-pill" aria-live="polite">
         {props.userName}
       </div>
+      <FollowButton userId={props.userId} label={props.userName} />
     </div>
   );
 }

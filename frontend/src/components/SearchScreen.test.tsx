@@ -9,6 +9,9 @@ vi.mock("../api", () => ({
     searchUsers: vi.fn(),
     like: vi.fn(async () => {}),
     unlike: vi.fn(async () => {}),
+    follow: vi.fn(async () => {}),
+    unfollow: vi.fn(async () => {}),
+    getFollowed: vi.fn(),
     getUgoiraMeta: vi.fn(async () => ({ error: false, body: { src: "z", frames: [] } })),
   },
 }));
@@ -52,6 +55,7 @@ function usersResp() {
 beforeEach(() => {
   mockedApi.searchArtworks.mockReset().mockResolvedValue(artworksResp(1, 1));
   mockedApi.searchUsers.mockReset().mockResolvedValue(usersResp());
+  mockedApi.getFollowed.mockReset().mockResolvedValue({ followed: false });
 });
 
 const baseProps = {

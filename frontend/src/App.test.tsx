@@ -26,10 +26,15 @@ vi.mock("./api", () => ({
     gateStatus: vi.fn(),
     gateUnlock: vi.fn(async () => {}),
     getBookmarks: vi.fn(),
+    getBookmarksNext: vi.fn(),
+    getBookmarkTags: vi.fn(),
     searchArtworks: vi.fn(),
     searchUsers: vi.fn(),
     like: vi.fn(async () => {}),
     unlike: vi.fn(async () => {}),
+    follow: vi.fn(async () => {}),
+    unfollow: vi.fn(async () => {}),
+    getFollowed: vi.fn(),
   },
 }));
 
@@ -79,6 +84,15 @@ beforeEach(() => {
   mockedApi.getBookmarks
     .mockReset()
     .mockResolvedValue(makeFeedOf(8, 4000));
+  mockedApi.getBookmarksNext
+    .mockReset()
+    .mockResolvedValue({ illusts: [], next_url: null });
+  mockedApi.getBookmarkTags
+    .mockReset()
+    .mockResolvedValue({ public: [], private: [] });
+  mockedApi.follow.mockReset().mockResolvedValue({ ok: true });
+  mockedApi.unfollow.mockReset().mockResolvedValue({ ok: true });
+  mockedApi.getFollowed.mockReset().mockResolvedValue({ followed: false });
   mockedApi.searchArtworks.mockReset().mockResolvedValue({
     illusts: makeFeedOf(3, 2000).illusts,
     total: 900,

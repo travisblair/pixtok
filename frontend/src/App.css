@@ -546,6 +546,15 @@
   text-overflow: ellipsis;
 }
 
+/* Follow toggle in the artist header — top-right, mirroring the layer
+   convention (back top-left, badges top-center, counters top-right). */
+.artist-view > .follow-btn {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 2;
+}
+
 /* Related-view push navigation: slide in from the RIGHT (iOS push).
    Horizontal, never vertical — vertical would read as feed scrolling. */
 .related-view.enter {
@@ -1480,4 +1489,25 @@
   font-size: 0.9rem;
   color: #ccc;
   min-width: 90px;
+}
+
+/* Follow button (artist header + card artist rows) */
+.follow-btn {
+  border: 1px solid var(--pill-border, rgba(255,255,255,0.35));
+  background: rgba(0,0,0,0.45);
+  color: #fff;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.follow-btn.following {
+  background: rgba(255,255,255,0.92);
+  color: #111;
+}
+.follow-btn.small {
+  padding: 2px 8px;
+  font-size: 12px;
+  margin-left: 6px;
 }

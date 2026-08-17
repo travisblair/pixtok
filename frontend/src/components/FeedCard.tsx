@@ -15,6 +15,7 @@ import {
 } from "../helpers";
 import { getLikeState, imageSize } from "../store";
 import UgoiraPlayer from "./UgoiraPlayer";
+import FollowButton from "./FollowButton";
 
 const PIXEL =
   "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
@@ -23,6 +24,7 @@ const CARD_MARGIN = "600% 0px 600% 0px"; // load/unload threshold: 6 viewports
 export default function FeedCard(props: {
   illust: PixivIllust;
   onLike?: (illust: PixivIllust) => void;
+  onUnlike?: (illust: PixivIllust) => void;
   onTap?: (illust: PixivIllust) => void;
   onArtistTap?: (illust: PixivIllust) => void;
   onTagsTap?: (illust: PixivIllust) => void;
@@ -259,6 +261,7 @@ export default function FeedCard(props: {
         props.onLike?.(props.illust);
       } else {
         await api.unlike(props.illust.id);
+        props.onUnlike?.(props.illust); // bookmarks tab removes the card
       }
     } catch {
       setLiked(!newLiked); // revert on failure
@@ -469,6 +472,11 @@ export default function FeedCard(props: {
           >
             {artistName}
           </a>
+          <FollowButton
+            userId={props.illust.user.id}
+            label={artistName}
+            small
+          />
         </p>
         {/* Tag chips: natural row-major wrap (fill row 1 fully, stopping
             before the gear, then row 2). When tags need more than two

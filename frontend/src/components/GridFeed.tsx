@@ -23,6 +23,7 @@ const PIXEL =
 export default function GridFeed(props: {
   illusts: PixivIllust[];
   onLike?: (illust: PixivIllust) => void;
+  onUnlike?: (illust: PixivIllust) => void;
   onTap?: (illust: PixivIllust) => void;
   // True when this grid's layer is covered by another full-screen layer
   // (artist page under a stack). Unlike the scroll window, covered-layer
@@ -37,6 +38,7 @@ export default function GridFeed(props: {
           <GridCell
             illust={illust}
             onLike={props.onLike}
+            onUnlike={props.onUnlike}
             onTap={props.onTap}
             suppressImages={props.suppressImages}
           />
@@ -49,6 +51,7 @@ export default function GridFeed(props: {
 function GridCell(props: {
   illust: PixivIllust;
   onLike?: (illust: PixivIllust) => void;
+  onUnlike?: (illust: PixivIllust) => void;
   onTap?: (illust: PixivIllust) => void;
   suppressImages?: boolean;
 }) {
@@ -95,6 +98,7 @@ function GridCell(props: {
         props.onLike?.(props.illust);
       } else {
         await api.unlike(props.illust.id);
+        props.onUnlike?.(props.illust); // bookmarks tab removes the cell
       }
     } catch {
       setLiked(!newLiked); // revert on failure

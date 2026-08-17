@@ -56,6 +56,12 @@ export default function App() {
   const [rankMode, setRankMode] = createSignal("day");
   // Newest tab: all | r18 content filter.
   const [newestR18, setNewestR18] = createSignal(false);
+  // Bookmarks tab: tag pills from the bookmarks page (public list) +
+  // the active tag filter ("" = all bookmarks).
+  const [bookmarkTags, setBookmarkTags] = createSignal<
+    { name: string; count: number }[]
+  >([]);
+  const [bookmarkTag, setBookmarkTag] = createSignal("");
   // Illustrations (top page) tab: all | r18.
   const [topMode, setTopMode] = createSignal("all");
   const [illusts, setIllusts] = createSignal<PixivIllust[]>([]);
@@ -176,12 +182,13 @@ export default function App() {
         // /illustration top page: fixed grid, no pagination.
         data = await api.getTopIllust(topMode());
       } else if (feedType() === "bookmarks") {
-        // The user's bookmarked works — app-API passthrough, paginated
-        // via next_url like the other app feeds.
+        // Bookmarks PAGE (web AJAX, crawl-verified): tag-filtered with
+        // blind offset pagination. next_url is self-referential
+        // /api/bookmarks and must NOT ride /api/next (SSRF allowlist).
         data =
           !fresh && nextUrl()
-            ? await api.getNextPage(nextUrl()!)
-            : await api.getBookmarks();
+            ? await api.getBookmarksNext(nextUrl()!)
+            : await api.getBookmarks(bookmarkTag());
       } else if (nextUrl() && !fresh) {
         data = await api.getNextPage(nextUrl()!);
       } else {
@@ -225,6 +232,22 @@ export default function App() {
     setLoadError(false); // fresh feed has no load error
     seenIds.clear();
     void loadMore(true); // fresh first page, sequenced AFTER the resets
+  }
+
+  // Bookmarks tab: switching the tag filter reloads the page from zero.
+  function selectBookmarkTag(tag: string) {
+    if (tag === bookmarkTag()) return;
+    reqSeq++; // invalidate any in-flight load
+    setBookmarkTag(tag);
+    resetFeedAndReload();
+  }
+
+  // The bookmarks tab IS the bookmark page: unbookmarking removes the
+  // work from the feed (no other tab filters its list on unlike).
+  function handleUnlike(illust: PixivIllust) {
+    if (feedType() === "bookmarks") {
+      setIllusts((prev) => prev.filter((x) => x.id !== illust.id));
+    }
   }
 
   function resetFeedAndReload() {
@@ -500,6 +523,12 @@ export default function App() {
       .getArtistViewMode()
       .then((d) => setArtistViewModeFromServer(d.value))
       .catch(() => {});
+    // Bookmark tags feed the bookmarks-tab pills (public list only —
+    // the page's default view).
+    void api
+      .getBookmarkTags()
+      .then((d) => setBookmarkTags(d.public))
+      .catch(() => {});
 
     const snap = loadSnapshot();
     if (snap) {
@@ -773,6 +802,32 @@ export default function App() {
             <Show when={feedType() === "top"}>
               <ContentPills content={topMode()} onChange={changeTopMode} />
             </Show>
+            <Show when={feedType() === "bookmarks"}>
+              <div class="mode-pill-row no-scrollbar fade-edges">
+                <button
+                  type="button"
+                  class={bookmarkTag() === "" ? "mode-pill active" : "mode-pill"}
+                  onClick={() => selectBookmarkTag("")}
+                >
+                  All
+                </button>
+                <For each={bookmarkTags()}>
+                  {(tag) => (
+                    <button
+                      type="button"
+                      class={
+                        bookmarkTag() === tag.name
+                          ? "mode-pill active"
+                          : "mode-pill"
+                      }
+                      onClick={() => selectBookmarkTag(tag.name)}
+                    >
+                      {tag.name}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
           </div>
           <Show when={feedType() === "illustrations"}>
             <RankingSelector
@@ -804,6 +859,7 @@ export default function App() {
               <GridFeed
                 illusts={illusts()}
                 onLike={handleLike}
+                onUnlike={handleUnlike}
                 onTap={pushRelated}
               />
             }
@@ -813,6 +869,7 @@ export default function App() {
                 <FeedCard
                   illust={illust}
                   onLike={handleLike}
+                  onUnlike={handleUnlike}
                   onTap={pushRelated}
                   onArtistTap={openArtist}
                   onTagsTap={setTagsIllust}

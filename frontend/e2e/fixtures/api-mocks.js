@@ -130,6 +130,10 @@ export async function setupApiMocks(page, options = {}) {
     topIllustModes: [], // every `mode` observed on /api/topillust
     searchCalls: [], // [{ word, order, r18, p }]
     searchUsersCalls: [], // [{ nick, p }]
+    bookmarkCalls: [], // [{ tag, offset }]
+    followedCalls: [], // [{ id }]
+    followCalls: [], // [{ id }]
+    unfollowCalls: [], // [{ id }]
     imgCalls: 0,
     imgFailures: [], // proxied URLs that got the fail-once 500
   };
@@ -194,6 +198,53 @@ export async function setupApiMocks(page, options = {}) {
   await prefsRoute(/\/api\/prefs\/image-size$/, "imageSize");
   await prefsRoute(/\/api\/prefs\/feed-view-mode$/, "feedViewMode");
   await prefsRoute(/\/api\/prefs\/artist-view-mode$/, "artistViewMode");
+
+  // ── Bookmarks page (tag pills + offset pagination) ──────────────────
+  // The seed must cover the bookmark-page works so their hearts render
+  // bookmarked (an unliked heart on this page would LIKE on tap).
+  await page.route(/\/api\/bookmarks\/ids$/, (route) => {
+    route.fulfill(json({ ids: [9501, 9502, 9503, 9504, 9505, 9506] }));
+  });
+  // The (?<!\/api) lookbehind mirrors the newest route: a double-prefixed
+  // URL must fall through to the hermeticity guard.
+  await page.route(/(?<!\/api)\/api\/bookmarks\/tags$/, (route) => {
+    route.fulfill(
+      json({
+        public: [{ name: "tag-one", count: 3 }],
+        private: [],
+      })
+    );
+  });
+  await page.route(/(?<!\/api)\/api\/bookmarks(\?|$)/, (route) => {
+    const url = new URL(route.request().url());
+    const tag = url.searchParams.get("tag") ?? "";
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    mocks.bookmarkCalls.push({ tag, offset });
+    route.fulfill(
+      json(
+        offset === 0
+          ? { illusts: makeFeedOf(6, 9501, null).illusts, next_url: "/api/bookmarks?tag=" + tag + "&offset=48" }
+          : { illusts: [], next_url: null }
+      )
+    );
+  });
+
+  // ── Follow (artist header + card rows) ───────────────────────────────
+  await page.route(/\/api\/user\/(\d+)\/followed$/, (route) => {
+    const id = Number(route.request().url().match(/\/user\/(\d+)\/followed$/)[1]);
+    mocks.followedCalls.push({ id });
+    route.fulfill(json({ followed: false }));
+  });
+  await page.route(/\/api\/user\/(\d+)\/follow$/, (route) => {
+    const id = Number(route.request().url().match(/\/user\/(\d+)\/follow$/)[1]);
+    mocks.followCalls.push({ id });
+    route.fulfill(json({ ok: true }));
+  });
+  await page.route(/\/api\/user\/(\d+)\/unfollow$/, (route) => {
+    const id = Number(route.request().url().match(/\/user\/(\d+)\/unfollow$/)[1]);
+    mocks.unfollowCalls.push({ id });
+    route.fulfill(json({ ok: true }));
+  });
 
   // ── GET /api/newest?r18=…&lastId=… (newest-upload firehose) ────────────
   // The (?<!\/api) lookbehind keeps a double-prefixed URL

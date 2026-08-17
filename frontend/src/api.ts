@@ -261,10 +261,49 @@ export const api = {
     });
   },
 
-  // The Bookmarks tab feed (app-API passthrough, private by default —
-  // pixtok likes are private). Pagination rides /api/next.
-  getBookmarks() {
-    return request<import("./types").FeedResponse>("/bookmarks", {
+  // The Bookmarks tab feed — the bookmarks PAGE (web AJAX, crawl-
+  // verified): tag filter + blind offset pagination. next_url arrives as
+  // a self-referential /api/bookmarks?tag=...&offset=... URL.
+  getBookmarks(tag = "") {
+    return request<import("./types").FeedResponse>(
+      `/bookmarks?tag=${encodeURIComponent(tag)}`,
+      { signal: AbortSignal.timeout(15_000) }
+    );
+  },
+
+  // Continuation: next_url carries its own /api prefix — strip it like
+  // getNewestNext (request() prepends the base).
+  getBookmarksNext(url: string) {
+    return request<import("./types").FeedResponse>(url.replace(/^\/api/, ""), {
+      signal: AbortSignal.timeout(15_000),
+    });
+  },
+
+  getBookmarkTags() {
+    return request<{
+      public: { name: string; count: number }[];
+      private: { name: string; count: number }[];
+    }>("/bookmarks/tags", { signal: AbortSignal.timeout(15_000) });
+  },
+
+  // Follow (live-verified app-API endpoints). restrict is fixed public
+  // server-side — following is a public action on pixiv.
+  follow(userId: number) {
+    return request<{ ok: boolean }>(`/user/${userId}/follow`, {
+      method: "POST",
+      signal: AbortSignal.timeout(15_000),
+    });
+  },
+
+  unfollow(userId: number) {
+    return request<{ ok: boolean }>(`/user/${userId}/unfollow`, {
+      method: "POST",
+      signal: AbortSignal.timeout(15_000),
+    });
+  },
+
+  getFollowed(userId: number) {
+    return request<{ followed: boolean }>(`/user/${userId}/followed`, {
       signal: AbortSignal.timeout(15_000),
     });
   },
