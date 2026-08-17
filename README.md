@@ -29,7 +29,9 @@ page.
   rankings, male & female, with R18 variants; pick content and mode with
   the pills above the feed.
 - **Discover** — the site-wide recommended feed.
-- **Bookmarks** — everything you've bookmarked on Pixiv, as a feed.
+- **Bookmarks** — the bookmarks page: everything you've bookmarked, with
+  tag-filter pills and inline unbookmark (the heart removes the work
+  from the list).
 
 ### View modes
 
@@ -65,7 +67,9 @@ back to the feed. Each level remembers its scroll position.
 
 Tap an artist's name on any card — or an artist row in Search →
 Artists — to open their library. Scroll for more works; tap any work to
-open a stack on top of the artist page.
+open a stack on top of the artist page. **Follow** the artist from the
+top-right of the page header, or via the small + / ✓ next to any card's
+artist name — the state is your real Pixiv follow state.
 
 ### Recommendations (the like modal)
 
