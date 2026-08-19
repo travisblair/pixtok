@@ -37,9 +37,10 @@ vi.mock("./api", () => ({
     getFollowed: vi.fn(),
   },
   setOnGateLocked: vi.fn(),
+  setOnRequestError: vi.fn(),
 }));
 
-import { api, setOnGateLocked } from "./api";
+import { api, setOnGateLocked, setOnRequestError } from "./api";
 const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 beforeEach(() => {
@@ -50,6 +51,7 @@ beforeEach(() => {
   // The gate-lock listener is registered per-mount; a stale handler
   // bound to an unmounted component's signal would silently no-op.
   vi.mocked(setOnGateLocked).mockReset();
+  vi.mocked(setOnRequestError).mockReset();
   // Distinct id ranges per feed so cross-feed bleed is visible in
   // assertions (street 1.., top 1000.., recommended/workRecs 500..,
   // related 900..).
@@ -290,6 +292,23 @@ describe("App", () => {
         container.querySelector(".artist-view img.card-image")?.getAttribute("src")
       ).toContain("/api/img")
     );
+  });
+
+  it("surfaces request failures in the red top toast; tap dismisses", async () => {
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+    const reg = vi.mocked(setOnRequestError);
+    expect(reg).toHaveBeenCalledTimes(1);
+    // Simulate a request() failure firing mid-session (the detection
+    // itself is pinned in api.test.ts and the e2e spec).
+    reg.mock.calls[0][0]("Request failed (502)");
+    const toastEl = container.querySelector(".error-toast");
+    expect(toastEl).not.toBeNull();
+    expect(toastEl!.textContent).toContain("Request failed (502)");
+    fireEvent.click(toastEl!);
+    expect(container.querySelector(".error-toast")).toBeNull();
   });
 
   it("re-shows the gate screen when a mid-session request hits a locked gate", async () => {

@@ -1,5 +1,5 @@
 import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
-import { api, setOnGateLocked } from "./api";
+import { api, setOnGateLocked, setOnRequestError } from "./api";
 import type { PixivIllust } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
 import {
@@ -558,6 +558,16 @@ export default function App() {
   // changeFeedType/changeRanking* (sequenced after the state resets) —
   // never via an effect, whose timing can read stale signal values.
   const [gateLocked, setGateLocked] = createSignal(true);
+  // Red top error toast: every failed request surfaces here for 2s
+  // (tap to dismiss). Latest message wins; a burst of failures just
+  // keeps restarting the timer on the same banner.
+  const [errorToastMsg, setErrorToastMsg] = createSignal<string | null>(null);
+  let errorToastTimer: ReturnType<typeof setTimeout> | undefined;
+  function raiseErrorToast(message: string) {
+    setErrorToastMsg(message);
+    clearTimeout(errorToastTimer);
+    errorToastTimer = setTimeout(() => setErrorToastMsg(null), 2000);
+  }
   let booted = false;
 
   // boot runs everything the app needs at startup — seeds, snapshot
@@ -702,6 +712,7 @@ export default function App() {
     // — hidden follow buttons, dead feeds — with no path back to
     // unlocking except a manual reload.
     setOnGateLocked(() => setGateLocked(true));
+    setOnRequestError(raiseErrorToast);
     // Edge-back gesture: document-level so it works over every layer;
     // touchmove is non-passive because the gesture preventDefaults
     // once it claims a horizontal drag.
@@ -786,6 +797,8 @@ export default function App() {
   onCleanup(() => {
     clearTimeout(persistTimer);
     setOnGateLocked(null);
+    setOnRequestError(null);
+    clearTimeout(errorToastTimer);
     document.removeEventListener("touchstart", edgeBackStart);
     document.removeEventListener("touchmove", edgeBackMove);
     document.removeEventListener("touchend", edgeBackEnd);
@@ -1070,6 +1083,21 @@ export default function App() {
           />
         )}
       </For>
+      </Show>
+
+      {/* Red error toast — any failed request surfaces here for 2s;
+          tap to dismiss. Above every layer, modal, and the bottom
+          toast (z-120). */}
+      <Show when={errorToastMsg()}>
+        {(msg) => (
+          <div
+            class="error-toast"
+            role="alert"
+            onClick={() => setErrorToastMsg(null)}
+          >
+            {msg()}
+          </div>
+        )}
       </Show>
     </>
   );

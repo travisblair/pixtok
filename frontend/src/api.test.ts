@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { api, setOnGateLocked } from "./api";
+import { api, setOnGateLocked, setOnRequestError } from "./api";
 
 // The newest-feed continuation once fetched /api/api/newest (request()
 // prepends the /api base over next_url's own /api prefix) — a 404 on
@@ -124,6 +124,79 @@ describe("mid-session gate re-lock detection", () => {
     const fn = vi.fn();
     setOnGateLocked(fn);
     await api.getNewest(false);
+    expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+// Any failed request surfaces in the red top error toast — except gate
+// locks (the GateScreen owns those) and superseded-request aborts.
+describe("request error notifications", () => {
+  const origFetch = globalThis.fetch;
+  let status = 200;
+  let body = "{}";
+  let rejectWith: unknown = null;
+
+  beforeEach(() => {
+    status = 200;
+    body = JSON.stringify({ illusts: [], next_url: null });
+    rejectWith = null;
+    globalThis.fetch = vi.fn(async () => {
+      if (rejectWith) throw rejectWith;
+      return new Response(body, {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+    setOnRequestError(null);
+  });
+
+  it("fires 'Request failed (N)' on HTTP errors", async () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    status = 502;
+    body = "upstream error";
+    await expect(api.getNewest(false)).rejects.toThrow("502");
+    expect(fn).toHaveBeenCalledWith("Request failed (502)");
+  });
+
+  it("fires 'Network error' on fetch rejection", async () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    rejectWith = new TypeError("Failed to fetch");
+    await expect(api.getNewest(false)).rejects.toThrow();
+    expect(fn).toHaveBeenCalledWith("Network error");
+  });
+
+  it("fires 'Request timed out' on TimeoutError", async () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    const te = new Error("boom");
+    te.name = "TimeoutError";
+    rejectWith = te;
+    await expect(api.getNewest(false)).rejects.toThrow();
+    expect(fn).toHaveBeenCalledWith("Request timed out");
+  });
+
+  it("stays silent on AbortError (superseded request, not a failure)", async () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    const ae = new Error("aborted");
+    ae.name = "AbortError";
+    rejectWith = ae;
+    await expect(api.getNewest(false)).rejects.toThrow();
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("stays silent on a gate-locked 403 (the GateScreen owns that UX)", async () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    status = 403;
+    body = "gate locked\n";
+    await expect(api.getNewest(false)).rejects.toThrow("403");
     expect(fn).not.toHaveBeenCalled();
   });
 });

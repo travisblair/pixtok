@@ -48,7 +48,17 @@ function normalizeIds(data: unknown): unknown {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, init);
+  } catch (err) {
+    // AbortError = superseded by a newer request (like double-taps) —
+    // not a failure. Timeouts and network drops surface in the toast.
+    const name = abortName(err);
+    if (name === "TimeoutError") onRequestError?.("Request timed out");
+    else if (name !== "AbortError") onRequestError?.("Network error");
+    throw err;
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     // Mid-session gate re-lock: the app boots unlocked, then the gate
@@ -59,11 +69,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // the GateScreen instead (App registers the listener on mount).
     if (res.status === 403 && text.includes("gate locked")) {
       onGateLocked?.();
+    } else {
+      // Every other failure surfaces in the red error toast (2s, tap
+      // to dismiss) — a failed feed, follow state, or like should
+      // never pass silently.
+      onRequestError?.(`Request failed (${res.status})`);
     }
     throw new Error(`${res.status}: ${text || res.statusText}`);
   }
-  const data = await res.json();
-  return normalizeIds(data) as T;
+  try {
+    const data = await res.json();
+    return normalizeIds(data) as T;
+  } catch (err) {
+    onRequestError?.("Bad response");
+    throw err;
+  }
+}
+
+function abortName(err: unknown): string | null {
+  return typeof err === "object" && err !== null && "name" in err
+    ? String((err as { name?: unknown }).name)
+    : null;
 }
 
 // Listener for mid-session gate re-locks (see request()). App registers
@@ -73,6 +99,15 @@ let onGateLocked: (() => void) | null = null;
 
 export function setOnGateLocked(handler: (() => void) | null) {
   onGateLocked = handler;
+}
+
+// Listener for request failures (see request()). App renders the red
+// top error toast; gate locks and superseded-request aborts are the
+// only failures that stay silent here (they have their own UX).
+let onRequestError: ((message: string) => void) | null = null;
+
+export function setOnRequestError(handler: ((message: string) => void) | null) {
+  onRequestError = handler;
 }
 
 // Preference writes serialize through this queue (reviewer finding:
