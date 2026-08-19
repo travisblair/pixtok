@@ -38,6 +38,7 @@ vi.mock("./api", () => ({
   },
   setOnGateLocked: vi.fn(),
   setOnRequestError: vi.fn(),
+  logEvent: vi.fn(),
 }));
 
 import { api, setOnGateLocked, setOnRequestError } from "./api";

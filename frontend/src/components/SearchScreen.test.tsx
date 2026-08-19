@@ -14,6 +14,7 @@ vi.mock("../api", () => ({
     getFollowed: vi.fn(),
     getUgoiraMeta: vi.fn(async () => ({ error: false, body: { src: "z", frames: [] } })),
   },
+  logEvent: vi.fn(),
 }));
 
 import { api } from "../api";

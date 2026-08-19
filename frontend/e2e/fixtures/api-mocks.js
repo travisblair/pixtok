@@ -404,6 +404,17 @@ export async function setupApiMocks(page, options = {}) {
     );
   });
 
+  // ── Client breadcrumbs (POST /api/log) — recorded, answered ok ──────
+  mocks.logEvents = []; // [{ session, scope, msg, data }]
+  await page.route(/(?<!\/api)\/api\/log$/, (route) => {
+    try {
+      mocks.logEvents.push(route.request().postDataJSON());
+    } catch {
+      // best-effort recording — the breadcrumb still gets its 200
+    }
+    route.fulfill(json({ ok: true }));
+  });
+
   // ── GET /api/next?url=… (pagination) ──────────────────────────────────
   const nextFails = options.nextFails ?? false;
   await page.route(/\/api\/next(\?|$)/, (route) => {

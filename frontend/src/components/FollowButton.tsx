@@ -1,5 +1,5 @@
 import { createSignal, onMount, Show } from "solid-js";
-import { api } from "../api";
+import { api, logEvent } from "../api";
 
 /**
  * Follow toggle — used in the artist page header (full label) and on
@@ -7,6 +7,8 @@ import { api } from "../api";
  * state immediately and the POST is authoritative; on failure the state
  * reverts. Per-mount fetch of /followed (follow state is cheap and
  * never bulk-seeded); unknown state hides the button entirely.
+ * Every mount + outcome leaves a breadcrumb so a phone with no DevTools
+ * can explain why a button did or didn't appear.
  */
 export default function FollowButton(props: {
   userId: number;
@@ -17,10 +19,20 @@ export default function FollowButton(props: {
   const [busy, setBusy] = createSignal(false);
 
   onMount(() => {
+    logEvent("follow", "mount", { id: props.userId });
     api
       .getFollowed(props.userId)
-      .then((d) => setFollowed(d.followed))
-      .catch(() => setFollowed(null)); // unknown — hide the button
+      .then((d) => {
+        logEvent("follow", "ok", { id: props.userId, followed: d.followed });
+        setFollowed(d.followed);
+      })
+      .catch((err) => {
+        logEvent("follow", "fail", {
+          id: props.userId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        setFollowed(null); // unknown — hide the button
+      });
   });
 
   async function toggle(e: Event) {

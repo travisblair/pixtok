@@ -1,5 +1,5 @@
 import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
-import { api, setOnGateLocked, setOnRequestError } from "./api";
+import { api, setOnGateLocked, setOnRequestError, logEvent } from "./api";
 import type { PixivIllust } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
 import {
@@ -61,6 +61,11 @@ const EDGE_BACK_ARM_DX = 8; // horizontal travel before it claims the touch
 const EDGE_BACK_POP_DX = 72; // release displacement that pops
 const EDGE_BACK_FLING_DX = 36; // min displacement for the velocity path
 const EDGE_BACK_FLING_V = 0.55; // px/ms
+// One pop per gesture, and never two within one close animation: iOS
+// can emit duplicate/canceled touch sequences from a single physical
+// swipe, and a stray second touchend after the layer is gone would pop
+// the NEXT level too ("swiped from layer 3, landed on layer 1").
+const EDGE_BACK_POP_COOLDOWN = 350; // ms ≈ close animation + margin
 
 export default function App() {
   const [feedType, setFeedType] = createSignal<FeedType>("home");
@@ -334,6 +339,7 @@ export default function App() {
     if (closingDepth() !== null) return; // already animating out
     const depth = stack().length;
     if (depth === 0) return;
+    logEvent("layers", "popRelated", { depth, after: depth - 1 });
     setClosingDepth(depth); // play the slide-out on the top view
     // Flush the close to the snapshot before the animation — a kill
     // during the slide-out must not resurrect this level.
@@ -368,6 +374,7 @@ export default function App() {
     // beneath stays open and keeps its place in the open order. The
     // old code silently persisted artist:null here — a reload dropped
     // the layer you had just landed back on.
+    logEvent("layers", "closeAll", { depth: stack().length });
     setLayerSeq(layerSeq().filter((k) => !k.startsWith("s")));
     persistNow({ stack: [], modalOpen: false });
     setStack([]);
@@ -391,6 +398,7 @@ export default function App() {
 
   function closeArtist() {
     if (artistClosing()) return;
+    logEvent("layers", "closeArtist", { layers: layerSeq().length });
     setArtistClosing(true); // play the slide-out
     // The close MUST hit the snapshot immediately: the page can be
     // jetsam-killed during the 250ms slide-out, and the debounced save
@@ -453,6 +461,7 @@ export default function App() {
 
   function closeSearch() {
     if (searchClosing()) return;
+    logEvent("layers", "closeSearch", { layers: layerSeq().length });
     setSearchClosing(true); // play the slide-out
     const closingZ = searchLayer()?.z;
     setLayerSeq(layerSeq().filter((k) => k !== "search"));
@@ -467,8 +476,11 @@ export default function App() {
   // ── Edge-back gesture ───────────────────────────────────────────────
   // See the constants above for thresholds. Armed on a left-edge touch
   // when layers are open; claims the touch once horizontal; pops the
-  // top layer on a long drag or a fast fling.
+  // top layer on a long drag or a fast fling. Every interesting state
+  // transition leaves a breadcrumb (POST /api/log) so the server
+  // journal can replay what the phone believed happened.
   let edgePan: { x: number; y: number; t: number; active: boolean } | null = null;
+  let lastEdgePop = 0; // performance.now() of the last gesture pop
 
   function edgeBackStart(e: TouchEvent) {
     edgePan = null;
@@ -480,7 +492,10 @@ export default function App() {
     // them — an edge start there must not arm the gesture. Single-page
     // cards (no horizontal overflow) fall through and arm normally.
     const pages = target?.closest?.(".card-pages");
-    if (pages && pages.scrollWidth > pages.clientWidth + 1) return;
+    if (pages && pages.scrollWidth > pages.clientWidth + 1) {
+      logEvent("gesture", "ignored-slider-owns-edge", { x: Math.round(t.clientX) });
+      return;
+    }
     if (
       target?.closest?.(
         "button, a, input, textarea, .drawer, .modal-dialog, .modal-backdrop, .tag-popup, .toast, .gate-screen"
@@ -488,6 +503,10 @@ export default function App() {
     )
       return;
     edgePan = { x: t.clientX, y: t.clientY, t: performance.now(), active: false };
+    logEvent("gesture", "armed", {
+      x: Math.round(t.clientX),
+      layers: layerSeq().length,
+    });
   }
 
   function edgeBackMove(e: TouchEvent) {
@@ -497,9 +516,15 @@ export default function App() {
     const dy = t.clientY - edgePan.y;
     if (!edgePan.active && dx > EDGE_BACK_ARM_DX && Math.abs(dx) > Math.abs(dy) * 1.2) {
       edgePan.active = true;
+      logEvent("gesture", "claimed", { dx: Math.round(dx), dy: Math.round(dy) });
     }
     // Once claimed, keep the layer's vertical feed from scrolling.
     if (edgePan.active) e.preventDefault();
+  }
+
+  function edgeBackCancel() {
+    if (edgePan) logEvent("gesture", "canceled", { active: edgePan.active });
+    edgePan = null;
   }
 
   function edgeBackEnd(e: TouchEvent) {
@@ -510,14 +535,33 @@ export default function App() {
     const popped = edgePan.active;
     edgePan = null;
     if (!popped) return;
+    const now = performance.now();
+    const inCooldown = now - lastEdgePop < EDGE_BACK_POP_COOLDOWN;
     if (dx >= EDGE_BACK_POP_DX || (dx >= EDGE_BACK_FLING_DX && dx / dt > EDGE_BACK_FLING_V)) {
+      if (inCooldown) {
+        logEvent("gesture", "pop-suppressed", {
+          dx: Math.round(dx),
+          dt: Math.round(dt),
+          reason: "cooldown",
+        });
+        return;
+      }
+      lastEdgePop = now;
+      logEvent("gesture", "pop", {
+        dx: Math.round(dx),
+        dt: Math.round(dt),
+        top: layerSeq().at(-1),
+      });
       popTopLayer();
+    } else {
+      logEvent("gesture", "end-no-pop", { dx: Math.round(dx), dt: Math.round(dt) });
     }
   }
 
   /** Pop whichever layer is topmost in the open order. */
   function popTopLayer() {
     const top = layerSeq().at(-1);
+    logEvent("layers", "popTopLayer", { top, layers: layerSeq().length });
     if (top === "artist") closeArtist();
     else if (top === "search") closeSearch();
     else if (top?.startsWith("s")) popRelated();
@@ -702,6 +746,11 @@ export default function App() {
 
     }
     // Fresh first page always — layers restored above, feed from scratch.
+    logEvent("boot", "booted", {
+      snap: !!snap,
+      layers: layerSeq().length,
+      feedType: feedType(),
+    });
     void loadMore(true);
   }
 
@@ -711,7 +760,10 @@ export default function App() {
     // only runs once at mount). Without this the app silently degrades
     // — hidden follow buttons, dead feeds — with no path back to
     // unlocking except a manual reload.
-    setOnGateLocked(() => setGateLocked(true));
+    setOnGateLocked(() => {
+      logEvent("gate", "relock-mid-session");
+      setGateLocked(true);
+    });
     setOnRequestError(raiseErrorToast);
     // Edge-back gesture: document-level so it works over every layer;
     // touchmove is non-passive because the gesture preventDefaults
@@ -719,15 +771,18 @@ export default function App() {
     document.addEventListener("touchstart", edgeBackStart, { passive: true });
     document.addEventListener("touchmove", edgeBackMove, { passive: false });
     document.addEventListener("touchend", edgeBackEnd);
+    document.addEventListener("touchcancel", edgeBackCancel);
     void api
       .gateStatus()
       .then((s) => {
+        logEvent("gate", s.locked ? "locked" : "open");
         if (s.locked) return; // gate screen stays up; boot on unlock
         setGateLocked(false);
         boot();
       })
       .catch(() => {
         // Backend unreachable — show the gate; a reload re-checks.
+        logEvent("gate", "unreachable");
         setGateLocked(true);
       });
   });
@@ -802,6 +857,7 @@ export default function App() {
     document.removeEventListener("touchstart", edgeBackStart);
     document.removeEventListener("touchmove", edgeBackMove);
     document.removeEventListener("touchend", edgeBackEnd);
+    document.removeEventListener("touchcancel", edgeBackCancel);
   });
   useFeedSentinel(
     () => sentinelRef,

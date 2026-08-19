@@ -147,6 +147,50 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		writeJSON(w, map[string]bool{"app_api": appOK, "web_session": webOK})
 	})
 
+	// POST /api/log — client breadcrumbs. The frontend fires small
+	// structured events (gesture state, layer pops, follow-button
+	// outcomes, gate transitions) so the server journal carries the
+	// client's story: the phone has no DevTools, so "the app did X then
+	// Y" must be reconstructable from this journal after the fact.
+	// Scope is allowlisted, bodies are capped, and the route sits behind
+	// the same gate as everything else.
+	mux.HandleFunc("POST /api/log", func(w http.ResponseWriter, r *http.Request) {
+		var entry struct {
+			Session string `json:"session"`
+			Scope   string `json:"scope"`
+			Msg     string `json:"msg"`
+			Data    any    `json:"data"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&entry); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		switch entry.Scope {
+		case "gesture", "layers", "follow", "gate", "boot", "app":
+		default:
+			http.Error(w, "invalid scope", http.StatusBadRequest)
+			return
+		}
+		if len(entry.Session) > 32 {
+			entry.Session = entry.Session[:32]
+		}
+		msg := entry.Msg
+		if len(msg) > 256 {
+			msg = msg[:256]
+		}
+		var dataStr string
+		if entry.Data != nil {
+			if b, err := json.Marshal(entry.Data); err == nil {
+				dataStr = string(b)
+				if len(dataStr) > 512 {
+					dataStr = dataStr[:512]
+				}
+			}
+		}
+		log.Printf("CLIENT [%s] %s: %s %s", entry.Session, entry.Scope, msg, dataStr)
+		writeJSON(w, map[string]bool{"ok": true})
+	})
+
 	// POST /api/auth/launch was here — removed. The login shim
 	// (tools/login-shim) was deleted in favour of the in-app proxied
 	// login flow (pixiv's own form served through this backend).

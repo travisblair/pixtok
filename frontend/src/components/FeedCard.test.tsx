@@ -11,6 +11,7 @@ vi.mock("../api", () => ({
     unfollow: vi.fn(async () => {}),
     getFollowed: vi.fn(),
   },
+  logEvent: vi.fn(),
 }));
 
 import { api } from "../api";

@@ -110,6 +110,30 @@ export function setOnRequestError(handler: ((message: string) => void) | null) {
   onRequestError = handler;
 }
 
+// Client session id: tags breadcrumb events so one page load's story
+// can be reconstructed from the server journal (the phone has no
+// DevTools — the journal IS the console).
+const CLIENT_SESSION = Math.random().toString(36).slice(2, 8);
+
+/**
+ * Fire-and-forget breadcrumb to the backend journal (POST /api/log).
+ * Deliberately NOT request(): a logging failure must never surface in
+ * the error toast or the gate-lock flow, and never throw.
+ */
+export function logEvent(scope: string, msg: string, data?: unknown) {
+  try {
+    void fetch(`${BASE}/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: CLIENT_SESSION, scope, msg, data }),
+    }).catch(() => {
+      // breadcrumb delivery is best-effort; silence is fine
+    });
+  } catch {
+    // logging must never break the app
+  }
+}
+
 // Preference writes serialize through this queue (reviewer finding:
 // rapid PUTs can complete out of order — ["a"], ["a","b","c"], ["a","b"]
 // — leaving the DB at a stale state). Chaining guarantees the last

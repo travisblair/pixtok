@@ -146,6 +146,7 @@ test.describe("Edge-back gesture", () => {
     await expect(page.locator(".related-view")).toHaveCount(1, {
       timeout: 5000,
     });
+    await page.waitForTimeout(450); // > 350ms pop cooldown
 
     // Second swipe pops the last level back to the feed.
     await edgeSwipe(page);
@@ -153,6 +154,70 @@ test.describe("Edge-back gesture", () => {
       timeout: 5000,
     });
     await expectMainFeedCount(page, 30);
+  });
+
+  test("three levels pop one at a time back to the feed", async ({ page }) => {
+    await setupApiMocks(page, { relatedBatch: makeFeedOf(8, 3001) });
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    // Depth 1 → 2 → 3 (tap a related card in the top view each time).
+    await page.locator(".feed-card").first().locator(".card-image").click();
+    await expect(page.locator(".related-view")).toHaveCount(1);
+    for (let depth = 2; depth <= 3; depth++) {
+      await page
+        .locator(".related-view")
+        .last()
+        .locator(".feed-card")
+        .nth(1)
+        .locator(".card-image")
+        .click();
+      await expect(page.locator(".related-view")).toHaveCount(depth);
+    }
+
+    // Each swipe pops exactly ONE level (cooldown cleared between).
+    for (const want of [2, 1, 0]) {
+      await edgeSwipe(page);
+      await expect(page.locator(".related-view")).toHaveCount(want, {
+        timeout: 5000,
+      });
+      await page.waitForTimeout(450); // > 350ms pop cooldown
+    }
+    await expectMainFeedCount(page, 30);
+  });
+
+  test("two rapid swipes within the cooldown pop only one layer", async ({
+    page,
+  }) => {
+    const mocks = await setupApiMocks(page, { relatedBatch: makeFeedOf(8, 3001) });
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    await page.locator(".feed-card").first().locator(".card-image").click();
+    await expect(page.locator(".related-view")).toHaveCount(1);
+    await page
+      .locator(".related-view")
+      .first()
+      .locator(".feed-card")
+      .nth(1)
+      .locator(".card-image")
+      .click();
+    await expect(page.locator(".related-view")).toHaveCount(2);
+
+    // Two swipes back-to-back (both inside the 350ms cooldown): the
+    // second must be suppressed — one layer popped, not two.
+    await edgeSwipe(page);
+    await edgeSwipe(page);
+    await page.waitForTimeout(500); // give any errant second pop time
+    await expect(page.locator(".related-view")).toHaveCount(1, {
+      timeout: 5000,
+    });
+
+    // The breadcrumbs tell the same story: one pop, one suppression.
+    const suppressed = mocks.logEvents.filter(
+      (e) => e.scope === "gesture" && e.msg === "pop-suppressed"
+    );
+    expect(suppressed.length).toBeGreaterThanOrEqual(1);
   });
 
   test("an edge swipe with no layers open does nothing", async ({ page }) => {

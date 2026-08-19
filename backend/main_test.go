@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -2296,4 +2297,42 @@ func (f *fakeAPI) IsFollowed(userID string) (bool, error) {
 		return f.isFollowedFn(userID)
 	}
 	return false, nil
+}
+
+func TestClientLogEndpoint(t *testing.T) {
+	h := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	// Valid breadcrumb → 200 + journal line tagged with the session.
+	req := httptest.NewRequest(http.MethodPost, "/api/log",
+		strings.NewReader(`{"session":"abc123","scope":"gesture","msg":"pop","data":{"dx":90,"top":"s1"}}`))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("log = %d, want 200", rr.Code)
+	}
+	if !strings.Contains(buf.String(), "CLIENT [abc123] gesture: pop") {
+		t.Fatalf("journal line missing: %q", buf.String())
+	}
+
+	// Unknown scope → 400.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/log",
+		strings.NewReader(`{"session":"abc123","scope":"evil","msg":"x"}`))
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusBadRequest {
+		t.Fatalf("bad scope = %d, want 400", rr2.Code)
+	}
+
+	// Malformed JSON → 400.
+	req3 := httptest.NewRequest(http.MethodPost, "/api/log", strings.NewReader("{nope"))
+	rr3 := httptest.NewRecorder()
+	h.ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusBadRequest {
+		t.Fatalf("bad json = %d, want 400", rr3.Code)
+	}
 }
