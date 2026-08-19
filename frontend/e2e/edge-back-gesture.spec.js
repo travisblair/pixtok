@@ -122,6 +122,39 @@ test.describe("Edge-back gesture", () => {
     });
   });
 
+  test("an edge swipe pops ONE layer at a time — never the whole stack", async ({
+    page,
+  }) => {
+    await setupApiMocks(page, { relatedBatch: makeFeedOf(8, 3001) });
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    // Depth 1, then depth 2 (tap the second card inside the first view).
+    await page.locator(".feed-card").first().locator(".card-image").click();
+    await expect(page.locator(".related-view")).toHaveCount(1);
+    await page
+      .locator(".related-view")
+      .first()
+      .locator(".feed-card")
+      .nth(1)
+      .locator(".card-image")
+      .click();
+    await expect(page.locator(".related-view")).toHaveCount(2);
+
+    // First swipe pops exactly the top level.
+    await edgeSwipe(page);
+    await expect(page.locator(".related-view")).toHaveCount(1, {
+      timeout: 5000,
+    });
+
+    // Second swipe pops the last level back to the feed.
+    await edgeSwipe(page);
+    await expect(page.locator(".related-view")).toHaveCount(0, {
+      timeout: 5000,
+    });
+    await expectMainFeedCount(page, 30);
+  });
+
   test("an edge swipe with no layers open does nothing", async ({ page }) => {
     await setupApiMocks(page);
     await gotoApp(page);
