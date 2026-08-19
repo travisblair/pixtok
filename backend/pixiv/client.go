@@ -114,6 +114,11 @@ type Client struct {
 	csrfMu         sync.Mutex
 	csrfTokenCache string
 	http           *http.Client
+	// followState caches IsFollowed results (TTL + single-flight) so a
+	// strip feed's ~30 concurrent per-card calls collapse to one
+	// upstream request per artist per window — see followstate.go.
+	// nil disables caching (test clients built as literals).
+	followState *followStateCache
 }
 
 func NewClient() (*Client, error) {
@@ -139,6 +144,10 @@ func NewClient() (*Client, error) {
 	c := &Client{
 		refreshToken: rt,
 		http:         &http.Client{Timeout: 30 * time.Second},
+		// Follow state changes rarely and the frontend asks constantly —
+		// 5 minutes is short enough to feel live, long enough to keep
+		// the per-card fetch bursts off pixiv's rate limiter.
+		followState: newFollowStateCache(5 * time.Minute),
 	}
 
 	// Also try loading PHPSESSID and the csrf token for web AJAX — env
@@ -1235,11 +1244,32 @@ func (c *Client) SetFollow(userID string, restrict string, follow bool) error {
 	return nil
 }
 
-// IsFollowed returns the current follow state from /v1/user/detail.
+// IsFollowed returns the current follow state from /v1/user/detail,
+// served through the follow-state cache (TTL + single-flight). A nil
+// cache (test clients) degrades to a direct fetch.
 func (c *Client) IsFollowed(userID string) (bool, error) {
 	if !ValidID(userID) {
 		return false, fmt.Errorf("invalid user id %q", userID)
 	}
+	if c.followState == nil {
+		return c.fetchFollowState(userID)
+	}
+	value, fresh, call, lead := c.followState.getOrStart(userID)
+	if fresh {
+		return value, nil
+	}
+	if lead {
+		v, err := c.fetchFollowState(userID)
+		c.followState.finish(userID, call, v, err)
+		return v, err
+	}
+	// Follower: the leader's finish() closes done after storing the
+	// result — the close is the happens-before edge for these reads.
+	<-call.done
+	return call.value, call.err
+}
+
+func (c *Client) fetchFollowState(userID string) (bool, error) {
 	req, err := http.NewRequest("GET", baseURL+"/v1/user/detail?user_id="+url.QueryEscape(userID), nil)
 	if err != nil {
 		return false, err

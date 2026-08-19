@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -344,6 +345,7 @@ func newFollowClient(rt http.RoundTripper) *Client {
 		accessToken: "tok",
 		expiresAt:   time.Now().Add(time.Hour),
 		http:        &http.Client{Transport: rt},
+		followState: newFollowStateCache(5 * time.Minute),
 	}
 }
 
@@ -401,5 +403,109 @@ func TestIsFollowedParsesDetail(t *testing.T) {
 	got, err = c.IsFollowed("12345")
 	if err != nil || got {
 		t.Fatalf("IsFollowed = %v, %v; want false", got, err)
+	}
+}
+
+// countTransport counts upstream calls, optionally delaying each one —
+// the follow-state cache tests pin "exactly N upstream requests" with it.
+type countTransport struct {
+	mu       sync.Mutex
+	calls    int
+	status   int
+	respBody string
+	delay    time.Duration
+}
+
+func (r *countTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	if r.delay > 0 {
+		time.Sleep(r.delay)
+	}
+	return &http.Response{
+		StatusCode: r.status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(r.respBody)),
+		Request:    req,
+	}, nil
+}
+
+func (r *countTransport) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func TestIsFollowedCachedWithinTTL(t *testing.T) {
+	rt := &countTransport{status: 200, respBody: `{"user":{"is_followed":true}}`}
+	c := newFollowClient(rt)
+	for i := 0; i < 5; i++ {
+		got, err := c.IsFollowed("12345")
+		if err != nil || !got {
+			t.Fatalf("call %d = %v, %v", i, got, err)
+		}
+	}
+	if rt.count() != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (TTL cache)", rt.count())
+	}
+}
+
+func TestIsFollowedSingleFlightCollapsesConcurrentCalls(t *testing.T) {
+	rt := &countTransport{
+		status:   200,
+		respBody: `{"user":{"is_followed":true}}`,
+		delay:    30 * time.Millisecond,
+	}
+	c := newFollowClient(rt)
+	var wg sync.WaitGroup
+	const n = 12
+	vals := make([]bool, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			vals[i], errs[i] = c.IsFollowed("12345")
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if errs[i] != nil || !vals[i] {
+			t.Fatalf("caller %d = %v, %v", i, vals[i], errs[i])
+		}
+	}
+	if rt.count() != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (single-flight)", rt.count())
+	}
+}
+
+func TestIsFollowedErrorsAreNotCached(t *testing.T) {
+	rt := &countTransport{status: 429, respBody: `{"error":{}}`}
+	c := newFollowClient(rt)
+	if _, err := c.IsFollowed("12345"); err == nil {
+		t.Fatal("429 upstream accepted")
+	}
+	if _, err := c.IsFollowed("12345"); err == nil {
+		t.Fatal("429 upstream accepted on second call")
+	}
+	if rt.count() != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (errors never cached)", rt.count())
+	}
+}
+
+func TestIsFollowedTTLExpiryRefetches(t *testing.T) {
+	rt := &countTransport{status: 200, respBody: `{"user":{"is_followed":true}}`}
+	c := newFollowClient(rt)
+	c.followState.ttl = 30 * time.Millisecond
+	if _, err := c.IsFollowed("12345"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := c.IsFollowed("12345"); err != nil {
+		t.Fatal(err)
+	}
+	if rt.count() != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (TTL expired)", rt.count())
 	}
 }
