@@ -10,15 +10,15 @@ test.describe("Follow button", () => {
 
     // Every strip card carries a follow toggle next to the artist name.
     const card = page.locator(".feed-card").first();
-    await expect(card.locator(".card-artist .follow-btn.small")).toBeVisible();
+    await expect(card.locator(".card-artist .artist-follow.small")).toBeVisible();
 
     // Tap → POST follow → flips to Following; tap again → unfollow.
-    await card.locator(".card-artist .follow-btn.small").click();
-    await expect(card.locator(".card-artist .follow-btn.small")).toHaveText("Following", { timeout: 5000 });
+    await card.locator(".card-artist .artist-follow.small").click();
+    await expect(card.locator(".card-artist .artist-follow.small")).toHaveText("Following", { timeout: 5000 });
     expect(mocks.followCalls.length).toBe(1);
 
-    await card.locator(".card-artist .follow-btn.small").click();
-    await expect(card.locator(".card-artist .follow-btn.small")).toHaveText("Follow", { timeout: 5000 });
+    await card.locator(".card-artist .artist-follow.small").click();
+    await expect(card.locator(".card-artist .artist-follow.small")).toHaveText("Follow", { timeout: 5000 });
     expect(mocks.unfollowCalls.length).toBe(1);
   });
 
@@ -31,7 +31,7 @@ test.describe("Follow button", () => {
     await page.locator(".feed-card").first().locator(".card-artist a").click();
     await expect(page.locator(".artist-view")).toBeVisible();
 
-    const btn = page.locator(".artist-view .follow-btn:not(.small)");
+    const btn = page.locator(".artist-view .artist-follow:not(.small)");
     await expect(btn).toHaveText("Follow", { timeout: 5000 });
     // Let the layer's 250ms slide-in finish — mid-animation the button
     // is off-viewport and unstable.

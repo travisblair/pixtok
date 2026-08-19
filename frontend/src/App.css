@@ -568,7 +568,7 @@
 
 /* Follow toggle in the artist header — top-right, mirroring the layer
    convention (back top-left, badges top-center, counters top-right). */
-.artist-view > .follow-btn {
+.artist-view > .artist-follow {
   position: absolute;
   top: 14px;
   right: 16px;
@@ -1520,7 +1520,7 @@
 }
 
 /* Follow button (artist header + card artist rows) */
-.follow-btn {
+.artist-follow {
   border: 1px solid var(--pill-border, rgba(255,255,255,0.35));
   background: rgba(0,0,0,0.45);
   color: #fff;
@@ -1530,11 +1530,11 @@
   font-weight: 600;
   cursor: pointer;
 }
-.follow-btn.following {
+.artist-follow.following {
   background: rgba(255,255,255,0.92);
   color: #111;
 }
-.follow-btn.small {
+.artist-follow.small {
   padding: 2px 8px;
   font-size: 12px;
   margin-left: 6px;
