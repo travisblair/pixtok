@@ -36,9 +36,10 @@ vi.mock("./api", () => ({
     unfollow: vi.fn(async () => {}),
     getFollowed: vi.fn(),
   },
+  setOnGateLocked: vi.fn(),
 }));
 
-import { api } from "./api";
+import { api, setOnGateLocked } from "./api";
 const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 beforeEach(() => {
@@ -46,6 +47,9 @@ beforeEach(() => {
   // pixtok_state_v2 would make later renders rehydrate instead of
   // loading the street feed).
   localStorage.clear();
+  // The gate-lock listener is registered per-mount; a stale handler
+  // bound to an unmounted component's signal would silently no-op.
+  vi.mocked(setOnGateLocked).mockReset();
   // Distinct id ranges per feed so cross-feed bleed is visible in
   // assertions (street 1.., top 1000.., recommended/workRecs 500..,
   // related 900..).
@@ -286,6 +290,21 @@ describe("App", () => {
         container.querySelector(".artist-view img.card-image")?.getAttribute("src")
       ).toContain("/api/img")
     );
+  });
+
+  it("re-shows the gate screen when a mid-session request hits a locked gate", async () => {
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+    const reg = vi.mocked(setOnGateLocked);
+    expect(reg).toHaveBeenCalledTimes(1);
+    // The live trigger is a 403 "gate locked" inside request() — this
+    // simulates that firing mid-session (unit-testable wiring; the 403
+    // detection itself is pinned in api.test.ts and the e2e spec).
+    (reg.mock.calls[0][0] as () => void)();
+    expect(container.querySelector(".gate-screen")).not.toBeNull();
+    expect(container.querySelectorAll(".feed-card").length).toBe(0);
   });
 
   it("Search item opens the search layer and searches", async () => {

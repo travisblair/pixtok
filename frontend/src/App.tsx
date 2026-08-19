@@ -1,5 +1,5 @@
 import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
-import { api } from "./api";
+import { api, setOnGateLocked } from "./api";
 import type { PixivIllust } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
 import {
@@ -649,6 +649,12 @@ export default function App() {
   }
 
   onMount(() => {
+    // Mid-session gate re-lock: any later request() that hits a 403
+    // "gate locked" re-shows the GateScreen (the status check below
+    // only runs once at mount). Without this the app silently degrades
+    // — hidden follow buttons, dead feeds — with no path back to
+    // unlocking except a manual reload.
+    setOnGateLocked(() => setGateLocked(true));
     void api
       .gateStatus()
       .then((s) => {
@@ -730,6 +736,7 @@ export default function App() {
   // IntersectionObserver on sentinel for infinite scroll
   onCleanup(() => {
     clearTimeout(persistTimer);
+    setOnGateLocked(null);
   });
   useFeedSentinel(
     () => sentinelRef,

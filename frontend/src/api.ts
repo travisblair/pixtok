@@ -51,10 +51,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    // Mid-session gate re-lock: the app boots unlocked, then the gate
+    // cookie leaves the client (iOS Safari eviction, private-mode
+    // teardown, profile switch). Gate status is only checked at boot,
+    // so without this every subsequent view degrades into a silent
+    // empty/error state — hidden follow buttons, dead feeds. Surface
+    // the GateScreen instead (App registers the listener on mount).
+    if (res.status === 403 && text.includes("gate locked")) {
+      onGateLocked?.();
+    }
     throw new Error(`${res.status}: ${text || res.statusText}`);
   }
   const data = await res.json();
   return normalizeIds(data) as T;
+}
+
+// Listener for mid-session gate re-locks (see request()). App registers
+// it on mount and clears it on cleanup; kept out of the api object so
+// request() can call it without a circular reference.
+let onGateLocked: (() => void) | null = null;
+
+export function setOnGateLocked(handler: (() => void) | null) {
+  onGateLocked = handler;
 }
 
 // Preference writes serialize through this queue (reviewer finding:
@@ -264,9 +282,12 @@ export const api = {
   // The Bookmarks tab feed — the bookmarks PAGE (web AJAX, crawl-
   // verified): tag filter + blind offset pagination. next_url arrives as
   // a self-referential /api/bookmarks?tag=...&offset=... URL.
+  // The backend REQUIRES an offset (400 without one — the first load
+  // once omitted it and every page-open 400'd), so page-0 loads pin
+  // offset=0 here; continuations ride next_url.
   getBookmarks(tag = "") {
     return request<import("./types").FeedResponse>(
-      `/bookmarks?tag=${encodeURIComponent(tag)}`,
+      `/bookmarks?tag=${encodeURIComponent(tag)}&offset=0`,
       { signal: AbortSignal.timeout(15_000) }
     );
   },

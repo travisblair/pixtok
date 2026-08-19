@@ -218,7 +218,17 @@ export async function setupApiMocks(page, options = {}) {
   await page.route(/(?<!\/api)\/api\/bookmarks(\?|$)/, (route) => {
     const url = new URL(route.request().url());
     const tag = url.searchParams.get("tag") ?? "";
-    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const offsetRaw = url.searchParams.get("offset");
+    // Mirror the real backend: /api/bookmarks without an explicit
+    // offset is a 400. The frontend once omitted it on the first load
+    // and this mock's `?? 0` default answered anyway — the real 400
+    // shipped to production while the spec stayed green. No default:
+    // a missing offset now fails the test loudly.
+    if (offsetRaw === null) {
+      route.fulfill({ status: 400, body: "invalid offset" });
+      return;
+    }
+    const offset = Number(offsetRaw);
     mocks.bookmarkCalls.push({ tag, offset });
     route.fulfill(
       json(
