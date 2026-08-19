@@ -303,7 +303,7 @@ describe("App", () => {
     expect(reg).toHaveBeenCalledTimes(1);
     // Simulate a request() failure firing mid-session (the detection
     // itself is pinned in api.test.ts and the e2e spec).
-    reg.mock.calls[0][0]("Request failed (502)");
+    (reg.mock.calls[0][0] as (message: string) => void)("Request failed (502)");
     const toastEl = container.querySelector(".error-toast");
     expect(toastEl).not.toBeNull();
     expect(toastEl!.textContent).toContain("Request failed (502)");
