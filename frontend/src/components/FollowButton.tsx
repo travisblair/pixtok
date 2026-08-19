@@ -17,6 +17,34 @@ export default function FollowButton(props: {
 }) {
   const [followed, setFollowed] = createSignal<boolean | null>(null);
   const [busy, setBusy] = createSignal(false);
+  let btnRef: HTMLButtonElement | undefined;
+
+  // After the state lands, report how the button actually PAINTED on
+  // this device — the phone's follow buttons were fetching fine (mount
+  // + ok breadcrumbs) yet stayed invisible, which is a paint problem
+  // only the device can describe: rect, display, visibility, colors.
+  function logRenderedState() {
+    requestAnimationFrame(() => {
+      const el = btnRef;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      logEvent("follow", "rendered", {
+        id: props.userId,
+        rect: {
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+        },
+        display: cs.display,
+        visibility: cs.visibility,
+        opacity: cs.opacity,
+        color: cs.color,
+        bg: cs.backgroundColor,
+      });
+    });
+  }
 
   onMount(() => {
     logEvent("follow", "mount", { id: props.userId });
@@ -25,6 +53,7 @@ export default function FollowButton(props: {
       .then((d) => {
         logEvent("follow", "ok", { id: props.userId, followed: d.followed });
         setFollowed(d.followed);
+        logRenderedState();
       })
       .catch((err) => {
         logEvent("follow", "fail", {
@@ -55,6 +84,7 @@ export default function FollowButton(props: {
   return (
     <Show when={followed() !== null}>
       <button
+        ref={btnRef}
         type="button"
         class="follow-btn"
         classList={{ small: !!props.small, following: followed() === true }}
