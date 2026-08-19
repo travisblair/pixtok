@@ -49,6 +49,19 @@ const CLOSE_TIMEOUT_MS = SLIDE_OUT_MS + 10;
 // climb past them.
 const LAYER_Z_BASE = 40;
 
+// Edge-back gesture (iOS push-navigation convention): touch down within
+// the left edge zone and drag right to pop the top layer — the same
+// action as the Back pill. The gesture claims the touch only after
+// clearly horizontal travel, so vertical layer scrolls and the native
+// multi-page sliders are never stolen; multi-page sliders win the edge
+// zone outright (an edge start on a card with horizontal overflow arms
+// nothing).
+const EDGE_BACK_ZONE = 24; // px from the left edge where the gesture arms
+const EDGE_BACK_ARM_DX = 8; // horizontal travel before it claims the touch
+const EDGE_BACK_POP_DX = 72; // release displacement that pops
+const EDGE_BACK_FLING_DX = 36; // min displacement for the velocity path
+const EDGE_BACK_FLING_V = 0.55; // px/ms
+
 export default function App() {
   const [feedType, setFeedType] = createSignal<FeedType>("home");
   // Ranking tab: content row (all | r18) + mode row (day/week/...).
@@ -451,6 +464,65 @@ export default function App() {
     }, CLOSE_TIMEOUT_MS);
   }
 
+  // ── Edge-back gesture ───────────────────────────────────────────────
+  // See the constants above for thresholds. Armed on a left-edge touch
+  // when layers are open; claims the touch once horizontal; pops the
+  // top layer on a long drag or a fast fling.
+  let edgePan: { x: number; y: number; t: number; active: boolean } | null = null;
+
+  function edgeBackStart(e: TouchEvent) {
+    edgePan = null;
+    if (gateLocked() || e.touches.length !== 1 || layerSeq().length === 0) return;
+    const t = e.touches[0];
+    if (t.clientX > EDGE_BACK_ZONE) return;
+    const target = e.target as Element | null;
+    // Native multi-page sliders own horizontal drags that start on
+    // them — an edge start there must not arm the gesture. Single-page
+    // cards (no horizontal overflow) fall through and arm normally.
+    const pages = target?.closest?.(".card-pages");
+    if (pages && pages.scrollWidth > pages.clientWidth + 1) return;
+    if (
+      target?.closest?.(
+        "button, a, input, textarea, .drawer, .modal-dialog, .modal-backdrop, .tag-popup, .toast, .gate-screen"
+      )
+    )
+      return;
+    edgePan = { x: t.clientX, y: t.clientY, t: performance.now(), active: false };
+  }
+
+  function edgeBackMove(e: TouchEvent) {
+    if (!edgePan || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    const dx = t.clientX - edgePan.x;
+    const dy = t.clientY - edgePan.y;
+    if (!edgePan.active && dx > EDGE_BACK_ARM_DX && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      edgePan.active = true;
+    }
+    // Once claimed, keep the layer's vertical feed from scrolling.
+    if (edgePan.active) e.preventDefault();
+  }
+
+  function edgeBackEnd(e: TouchEvent) {
+    if (!edgePan) return;
+    const t = e.changedTouches[0];
+    const dx = t ? t.clientX - edgePan.x : 0;
+    const dt = performance.now() - edgePan.t;
+    const popped = edgePan.active;
+    edgePan = null;
+    if (!popped) return;
+    if (dx >= EDGE_BACK_POP_DX || (dx >= EDGE_BACK_FLING_DX && dx / dt > EDGE_BACK_FLING_V)) {
+      popTopLayer();
+    }
+  }
+
+  /** Pop whichever layer is topmost in the open order. */
+  function popTopLayer() {
+    const top = layerSeq().at(-1);
+    if (top === "artist") closeArtist();
+    else if (top === "search") closeSearch();
+    else if (top?.startsWith("s")) popRelated();
+  }
+
   // Aborts the previous like's recs fetch so a fast tap-tap-tap can't
   // resolve out of order (last-arriving must not win over last-tapped).
   let recsAbort: AbortController | undefined;
@@ -630,6 +702,12 @@ export default function App() {
     // — hidden follow buttons, dead feeds — with no path back to
     // unlocking except a manual reload.
     setOnGateLocked(() => setGateLocked(true));
+    // Edge-back gesture: document-level so it works over every layer;
+    // touchmove is non-passive because the gesture preventDefaults
+    // once it claims a horizontal drag.
+    document.addEventListener("touchstart", edgeBackStart, { passive: true });
+    document.addEventListener("touchmove", edgeBackMove, { passive: false });
+    document.addEventListener("touchend", edgeBackEnd);
     void api
       .gateStatus()
       .then((s) => {
@@ -708,6 +786,9 @@ export default function App() {
   onCleanup(() => {
     clearTimeout(persistTimer);
     setOnGateLocked(null);
+    document.removeEventListener("touchstart", edgeBackStart);
+    document.removeEventListener("touchmove", edgeBackMove);
+    document.removeEventListener("touchend", edgeBackEnd);
   });
   useFeedSentinel(
     () => sentinelRef,
