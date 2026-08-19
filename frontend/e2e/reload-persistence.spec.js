@@ -49,6 +49,30 @@ test.describe("Reload persistence", () => {
     await expect.poll(() => mocks.userCalls.length).toBe(2);
   });
 
+  test("a bfcache restore forces a clean reload (no frozen-heap resurrection)", async ({
+    page,
+  }) => {
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+    await page.waitForTimeout(800); // snapshot debounce
+
+    const bootsBefore = mocks.logEvents.filter((e) => e.msg === "booted").length;
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new PageTransitionEvent("pageshow", { persisted: true })
+      );
+    });
+
+    // The guard reloads instead of resuming the frozen heap: a fresh
+    // boot follows (feeds always load fresh; the snapshot restores
+    // layers).
+    await expect
+      .poll(() => mocks.logEvents.filter((e) => e.msg === "booted").length)
+      .toBeGreaterThan(bootsBefore);
+    await expectMainFeedCount(page, 30);
+  });
+
   test("the recs modal reopens after a reload", async ({ page }) => {
     const mocks = await setupApiMocks(page, {
       workRecsBatch: makeFeedOf(5, 2001),

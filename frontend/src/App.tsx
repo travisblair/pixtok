@@ -511,6 +511,15 @@ export default function App() {
 
   function edgeBackMove(e: TouchEvent) {
     if (!edgePan || e.touches.length !== 1) return;
+    // A touch that starts in the edge zone with layers open belongs to
+    // US from the very first move: preventDefault immediately, before
+    // iOS Safari's native edge-back history gesture can win the race.
+    // (When Safari's wins, the page navigates back via bfcache and
+    // restores an older frozen state with fewer layers — the reported
+    // "one swipe closed two layers", with zero gesture breadcrumbs.)
+    // Tradeoff: an edge-zone-start vertical scroll inside a layer is
+    // blocked too — the zone is 24px, layers only, acceptable.
+    e.preventDefault();
     const t = e.touches[0];
     const dx = t.clientX - edgePan.x;
     const dy = t.clientY - edgePan.y;
@@ -518,8 +527,6 @@ export default function App() {
       edgePan.active = true;
       logEvent("gesture", "claimed", { dx: Math.round(dx), dy: Math.round(dy) });
     }
-    // Once claimed, keep the layer's vertical feed from scrolling.
-    if (edgePan.active) e.preventDefault();
   }
 
   function edgeBackCancel() {
@@ -565,6 +572,17 @@ export default function App() {
     if (top === "artist") closeArtist();
     else if (top === "search") closeSearch();
     else if (top?.startsWith("s")) popRelated();
+  }
+
+  // A bfcache-restored page resumes a FROZEN heap — an older app state
+  // (fewer layers, stale signals) with no boot and no breadcrumbs.
+  // Treat the restore as stale: reload clean; the snapshot puts the
+  // CURRENT layers back. persisted=true only on bfcache restores.
+  function handlePageShow(e: Event) {
+    if ((e as PageTransitionEvent).persisted) {
+      logEvent("app", "bfcache-restored");
+      location.reload();
+    }
   }
 
   // Aborts the previous like's recs fetch so a fast tap-tap-tap can't
@@ -772,6 +790,12 @@ export default function App() {
     document.addEventListener("touchmove", edgeBackMove, { passive: false });
     document.addEventListener("touchend", edgeBackEnd);
     document.addEventListener("touchcancel", edgeBackCancel);
+    // bfcache resurrection guard: iOS Safari restores back/forward
+    // navigations from a frozen heap — an older page state (fewer
+    // layers, stale signals) can reappear with no boot, no breadcrumbs.
+    // A restored page is treated as stale: reload clean; the snapshot
+    // puts the CURRENT layers back.
+    window.addEventListener("pageshow", handlePageShow);
     void api
       .gateStatus()
       .then((s) => {
@@ -858,6 +882,7 @@ export default function App() {
     document.removeEventListener("touchmove", edgeBackMove);
     document.removeEventListener("touchend", edgeBackEnd);
     document.removeEventListener("touchcancel", edgeBackCancel);
+    window.removeEventListener("pageshow", handlePageShow);
   });
   useFeedSentinel(
     () => sentinelRef,
