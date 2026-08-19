@@ -4,7 +4,7 @@ import { makeFeedOf } from "./fixtures/mock-data.js";
 import { gotoApp, expectMainFeedCount, switchFeedViaDrawer } from "./fixtures/ui-helpers.js";
 
 test.describe("Reload persistence", () => {
-  test("feed tab, cards, and pills survive a page reload without refetching", async ({
+  test("tab and pills survive a reload; the feed refetches fresh", async ({
     page,
   }) => {
     const mocks = await setupApiMocks(page); // newestBatch: 20, next_url set
@@ -20,13 +20,14 @@ test.describe("Reload persistence", () => {
     await page.waitForTimeout(800);
     await page.reload();
 
-    // Restored from the snapshot: Newest tab, R18 active, 20 rehydrated
-    // cards, and NO third /api/newest request.
+    // Newest tab + R18 pill restored from the snapshot, but the FEED
+    // refetches a fresh first page (a third /api/newest call) — feeds
+    // are always new; only navigation + layers persist (user decision).
     await expectMainFeedCount(page, 20);
     await expect(page.locator(".content-pills .mode-pill.active")).toHaveText("R18");
     await expect(page.locator(".drawer-item.active")).toHaveText("Newest");
     await expect(page.locator(".drawer.open")).toHaveCount(0); // drawer closed
-    expect(mocks.newestCalls.length).toBe(2);
+    expect(mocks.newestCalls.length).toBe(3);
   });
 
   test("an open artist page is restored after a reload", async ({ page }) => {
@@ -73,7 +74,7 @@ test.describe("Reload persistence", () => {
     await expect(page.locator(".recs-source")).toBeVisible();
     // No refetch — the modal's list came from the snapshot.
     expect(mocks.workRecsCalls.length).toBe(1);
-    // Main feed underneath is also restored.
+    // Main feed underneath refetched fresh (feeds are never restored).
     await expectMainFeedCount(page, 30);
   });
 });

@@ -2,19 +2,24 @@ import type { PixivIllust } from "./types";
 import type { SearchState } from "./components/SearchScreen";
 
 /**
- * Reload-safe app state: survives iOS jetsam kills (localStorage, not
+ * Reload-safe LAYER state: survives iOS jetsam kills (localStorage, not
  * sessionStorage). Snapshot shape is versioned — old or corrupt payloads
  * load as null and the app starts fresh.
  *
- * Contents:
- *  - active feed + pill selections
- *  - the loaded feed (illusts + pagination cursor) — truncated to the
- *    last MAX_ITEMS works so the payload stays small
- *  - the main feed's scroll position (cards are 100dvh, so restoring
- *    scrollTop lands exactly)
+ * Contents (user decision Aug 2026):
+ *  - active feed TAB + pill selections (navigation state, not content)
  *  - the related-view stack (anchor works only — each level refetches
  *    its related list on mount)
+ *  - the open artist page
  *  - the recs modal (its work list + source title + open flag)
+ *  - the search layer
+ *
+ * Deliberately NOT persisted: the feed itself (illusts, pagination
+ * cursor, scroll position). Feeds always load fresh on boot — a
+ * restored feed meant days-old content at the top with fresh works only
+ * trickling in via scroll pagination, and browsers diverged (STP vs
+ * Safari on the same phone showed different feeds). Layers persist,
+ * feeds are always new.
  */
 
 const KEY = "pixtok_state_v2";
@@ -31,9 +36,6 @@ export interface AppSnapshot {
   rankMode: string;
   newestR18: boolean;
   topMode: string;
-  illusts: PixivIllust[];
-  nextUrl: string | null;
-  scrollTop: number;
   stack: PixivIllust[];
   artist: { id: number; name: string } | null;
   recs: PixivIllust[];
@@ -53,22 +55,6 @@ export type SnapshotInput = Omit<AppSnapshot, "v">;
 
 export function saveSnapshot(snap: SnapshotInput): void {
   try {
-    // The saved list is the LAST MAX_SNAPSHOT_ITEMS works, so the
-    // scroll position must be made RELATIVE to that window — an
-    // absolute scrollTop from a long feed would exceed the truncated
-    // DOM height on restore and clamp to the bottom of the window
-    // (reviewer finding: users always landed at the deepest card).
-    let scrollTop = snap.scrollTop;
-    const total = snap.illusts.length;
-    if (total > MAX_SNAPSHOT_ITEMS) {
-      const cardH = typeof window !== "undefined" ? window.innerHeight : 0;
-      if (cardH > 0) {
-        scrollTop = Math.max(
-          0,
-          scrollTop - (total - MAX_SNAPSHOT_ITEMS) * cardH
-        );
-      }
-    }
     const out: AppSnapshot = {
       v: 1,
       feedType: snap.feedType,
@@ -76,9 +62,6 @@ export function saveSnapshot(snap: SnapshotInput): void {
       rankMode: snap.rankMode,
       newestR18: snap.newestR18,
       topMode: snap.topMode,
-      illusts: snap.illusts.slice(-MAX_SNAPSHOT_ITEMS),
-      nextUrl: snap.nextUrl,
-      scrollTop: Math.max(0, Math.round(scrollTop)),
       stack: snap.stack.slice(0, MAX_STACK_DEPTH),
       artist: snap.artist,
       recs: snap.recs.slice(0, MAX_SNAPSHOT_ITEMS),
@@ -108,7 +91,6 @@ export function loadSnapshot(): AppSnapshot | null {
     if (!parsed || parsed.v !== 1) return null;
     if (
       typeof parsed.feedType !== "string" ||
-      !Array.isArray(parsed.illusts) ||
       !Array.isArray(parsed.stack) ||
       !Array.isArray(parsed.recs)
     ) {
@@ -121,9 +103,6 @@ export function loadSnapshot(): AppSnapshot | null {
       rankMode: parsed.rankMode ?? "day",
       newestR18: !!parsed.newestR18,
       topMode: parsed.topMode ?? "all",
-      illusts: parsed.illusts,
-      nextUrl: typeof parsed.nextUrl === "string" ? parsed.nextUrl : null,
-      scrollTop: typeof parsed.scrollTop === "number" ? parsed.scrollTop : 0,
       stack: parsed.stack,
       artist:
         parsed.artist &&

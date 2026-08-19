@@ -125,7 +125,7 @@ describe("App", () => {
     expect(mockedApi.getStreet).toHaveBeenCalledWith("");
   });
 
-  it("restores a saved session instead of loading any feed", async () => {
+  it("restores the saved tab and layers but always loads the feed fresh", async () => {
     localStorage.setItem(
       "pixtok_state_v2",
       JSON.stringify({
@@ -135,9 +135,6 @@ describe("App", () => {
         rankMode: "day",
         newestR18: false,
         topMode: "all",
-        illusts: makeFeedOf(9, 700).illusts,
-        nextUrl: null,
-        scrollTop: 0,
         stack: [],
         artist: null,
         recs: [],
@@ -147,11 +144,12 @@ describe("App", () => {
     );
     const { container } = render(() => <App />);
     await waitFor(() =>
-      expect(container.querySelectorAll(".feed-card").length).toBe(9)
+      expect(container.querySelectorAll(".feed-card").length).toBe(5)
     );
-    // No network on rehydrate — the saved cards ARE the feed.
+    // Feeds always load fresh on boot (user decision): the saved TAB
+    // survives, saved feed content does not exist to restore.
     expect(mockedApi.getStreet).not.toHaveBeenCalled();
-    expect(mockedApi.getRecommended).not.toHaveBeenCalled();
+    expect(mockedApi.getRecommended).toHaveBeenCalled();
   });
 
   it("self-heals an empty snapshot saved while the gate was locked", async () => {
@@ -217,7 +215,9 @@ describe("App", () => {
       )
     );
     expect(mockedApi.getUserIllusts).toHaveBeenCalledWith(777);
-    expect(mockedApi.getStreet).not.toHaveBeenCalled();
+    // The feed still loads fresh underneath the restored artist layer —
+    // layers persist, feeds are always new.
+    expect(mockedApi.getStreet).toHaveBeenCalledWith("");
   });
 
   it("restores an open recs modal with images loading (not suppressed)", async () => {
@@ -425,7 +425,8 @@ describe("App", () => {
 
     const saved = JSON.parse(localStorage.getItem("pixtok_state_v2")!);
     expect(saved.feedType).toBe("recommended");
-    expect(saved.illusts.length).toBe(5);
+    // Feed content is deliberately not persisted — feeds are always new.
+    expect(saved.illusts).toBeUndefined();
   });
 
   it("home shows no mode pills; Ranking tab does", async () => {

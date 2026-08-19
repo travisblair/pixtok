@@ -14,11 +14,11 @@ test.describe("Follow button", () => {
 
     // Tap → POST follow → flips to Following; tap again → unfollow.
     await card.locator(".card-artist .follow-btn.small").click();
-    await expect(card.locator(".card-artist .follow-btn.small")).toHaveText("✓", { timeout: 5000 });
+    await expect(card.locator(".card-artist .follow-btn.small")).toHaveText("Following", { timeout: 5000 });
     expect(mocks.followCalls.length).toBe(1);
 
     await card.locator(".card-artist .follow-btn.small").click();
-    await expect(card.locator(".card-artist .follow-btn.small")).toHaveText("+", { timeout: 5000 });
+    await expect(card.locator(".card-artist .follow-btn.small")).toHaveText("Follow", { timeout: 5000 });
     expect(mocks.unfollowCalls.length).toBe(1);
   });
 

@@ -88,7 +88,6 @@ export default function App() {
   const [closingDepth, setClosingDepth] = createSignal<number | null>(null);
   const [stack, setStack] = createSignal<{ illust: PixivIllust; z: number }[]>([]);
   let sentinelRef: HTMLDivElement | undefined;
-  let feedContainerRef: HTMLDivElement | undefined;
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
   let reqSeq = 0; // request epoch — invalidated on feed/mode switch
   // Monotonic layer counter: every overlay (stack level OR artist page)
@@ -486,8 +485,6 @@ export default function App() {
   // Feed/mode switches trigger their own loads directly inside
   // changeFeedType/changeRanking* (sequenced after the state resets) —
   // never via an effect, whose timing can read stale signal values.
-  const [feedScrollTop, setFeedScrollTop] = createSignal(0);
-  // Password gate: locked until the backend confirms otherwise.
   const [gateLocked, setGateLocked] = createSignal(true);
   let booted = false;
 
@@ -533,29 +530,15 @@ export default function App() {
     const snap = loadSnapshot();
     if (snap) {
       reqSeq++; // anything an effect triggers during rehydrate gets discarded
-      // Self-heal: a snapshot saved while the gate was locked (or mid-
-      // churn) can carry an empty feed with no cursor — restoring it
-      // verbatim strands the app on "Nothing here yet". Treat an empty,
-      // cursorless snapshot as no snapshot: load fresh instead.
-      const healable =
-        snap.illusts.length === 0 &&
-        !snap.nextUrl &&
-        !snap.searchOpen &&
-        snap.stack.length === 0 &&
-        !snap.artist &&
-        !snap.modalOpen;
-      if (healable) {
-        void loadMore(true);
-        return;
-      }
+      // Navigation + layer state restore only. The FEED is never
+      // restored (user decision): content always loads fresh on boot —
+      // a restored feed stranded the top of the app on old works and
+      // let browsers diverge (STP vs Safari showed different feeds).
       setFeedType(snap.feedType as FeedType);
       setRankContent(snap.rankContent === "r18" ? "r18" : "all");
       setRankMode(snap.rankMode);
       setNewestR18(!!snap.newestR18);
       setTopMode(snap.topMode === "r18" ? "r18" : "all");
-      setIllusts(snap.illusts);
-      setNextUrl(snap.nextUrl);
-      for (const ill of snap.illusts) seenIds.add(ill.id);
 
       // Restore overlay z-values in the SAVED open order — the stacking
       // must match the live session exactly. The old restore always put
@@ -635,16 +618,8 @@ export default function App() {
         // cards, unfixable by reloading).
       }
 
-      // Cards are exactly 100dvh tall, so restoring scrollTop lands on
-      // the same card index regardless of image load state.
-      const target = snap.scrollTop;
-      if (target > 0) {
-        requestAnimationFrame(() => {
-          if (feedContainerRef) feedContainerRef.scrollTop = target;
-        });
-      }
-      return;
     }
+    // Fresh first page always — layers restored above, feed from scratch.
     void loadMore(true);
   }
 
@@ -669,17 +644,16 @@ export default function App() {
   });
 
   // Debounced snapshot: any tracked state change re-writes the saved
-  // session (500ms settle). Reads all signals so every change is seen;
-  // the setTimeout body runs untracked, so no persistence loop.
+  // session (500ms settle). Reads all PERSISTED signals so every change
+  // is seen; the setTimeout body runs untracked, so no persistence loop.
+  // Feed content (illusts/nextUrl/scroll) is intentionally NOT tracked —
+  // feeds always load fresh on boot.
   createEffect(() => {
     void feedType();
     void rankContent();
     void rankMode();
     void newestR18();
     void topMode();
-    void illusts();
-    void nextUrl();
-    void feedScrollTop();
     void stack();
     void artist();
     void recs();
@@ -706,9 +680,6 @@ export default function App() {
       rankMode: rankMode(),
       newestR18: newestR18(),
       topMode: topMode(),
-      illusts: illusts(),
-      nextUrl: nextUrl(),
-      scrollTop: feedScrollTop(),
       stack: stack().map((s) => s.illust),
       artist: artist() ? { id: artist()!.id, name: artist()!.name } : null,
       recs: recs(),
@@ -777,10 +748,6 @@ export default function App() {
           feedViewMode() === "grid"
             ? "feed-container grid-container"
             : "feed-container"
-        }
-        ref={feedContainerRef}
-        onScroll={(e) =>
-          setFeedScrollTop((e.currentTarget as HTMLElement).scrollTop)
         }
       >
         {/* Header area: row 1 = burger + content pills, row 2 = the

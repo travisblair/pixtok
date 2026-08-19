@@ -53,13 +53,7 @@ export default function FollowButton(props: {
             : `Follow ${props.label ?? ""}`.trim()
         }
       >
-        {followed()
-          ? props.small
-            ? "✓"
-            : "Following"
-          : props.small
-            ? "+"
-            : "Follow"}
+        {followed() ? "Following" : "Follow"}
       </button>
     </Show>
   );
