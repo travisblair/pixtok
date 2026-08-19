@@ -1491,6 +1491,14 @@
   min-width: 90px;
 }
 
+/* Build stamp in Settings — identifies which bundle a device runs. */
+.build-stamp {
+  margin-top: 18px;
+  font-size: 0.72rem;
+  color: #777;
+  text-align: right;
+}
+
 /* Follow button (artist header + card artist rows) */
 .follow-btn {
   border: 1px solid var(--pill-border, rgba(255,255,255,0.35));

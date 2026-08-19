@@ -138,6 +138,10 @@ test.describe("UX round", () => {
     await page.locator(".burger-pill").click();
     await page.locator(".drawer-item", { hasText: "Settings" }).click();
     await expect(page.locator(".modal-dialog")).toBeVisible();
+    // The build stamp identifies the running bundle (stale-cache checks).
+    await expect(page.locator(".build-stamp")).toHaveText(
+      /^Build ([0-9a-f]{7,}|unknown)$/
+    );
     await page.locator(".blocked-tag-form input").fill("swimsuit");
     await page.locator(".blocked-tag-form button[type=submit]").click();
     await expect(page.locator(".blocked-tag-pill")).toHaveText("#swimsuit");

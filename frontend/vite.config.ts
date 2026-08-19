@@ -3,7 +3,20 @@ import type { Connect, Plugin, ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import type { ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
+
+// Short git hash at build time — shown in Settings so a device's bundle
+// version is checkable at a glance. iOS Safari's aggressive caching
+// served stale bundles for weeks of confusing bugs; the stamp makes
+// "which build is this device running?" a one-look question.
+function buildStamp(): string {
+  try {
+    return execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+  } catch {
+    return "unknown";
+  }
+}
 
 // The backend gates /api behind X-Api-Key when PIXTOK_API_KEY is set in
 // .env. The dev proxy injects the header server-side so it never appears
@@ -70,6 +83,9 @@ function cspForAppPages(): Plugin {
 
 export default defineConfig({
   plugins: [solid(), cspForAppPages()],
+  define: {
+    __BUILD_STAMP__: JSON.stringify(buildStamp()),
+  },
   build: {
     // The Go backend embeds the built frontend (backend/static) so the
     // production server is a single binary. Must live inside the Go

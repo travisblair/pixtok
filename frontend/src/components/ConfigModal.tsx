@@ -143,6 +143,9 @@ export default function ConfigModal(props: { onClose: () => void }) {
         {blockedTags().length === 0 && (
           <p class="hint">No blocked tags yet.</p>
         )}
+
+        {/* Build stamp: which bundle is this device running? */}
+        <p class="build-stamp">Build {__BUILD_STAMP__}</p>
       </section>
     </BaseModal>
   );
