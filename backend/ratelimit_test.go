@@ -121,3 +121,25 @@ func do(h http.Handler, method, path string) *httptest.ResponseRecorder {
 	h.ServeHTTP(rr, req)
 	return rr
 }
+
+// Breadcrumbs get their own bucket: a render burst of log POSTs must
+// never drain the mutation tier and 429 real traffic (likes).
+func TestRateLimitLogTierIsIsolated(t *testing.T) {
+	lim := newRateLimiter(nil)
+	h := lim.middleware(noContentHandler())
+
+	for i := 0; i < logsPerMinute; i++ {
+		rr := hitPost(h, "/api/log")
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("log request %d = %d, want 204", i+1, rr.Code)
+		}
+	}
+	// The log tier is exhausted — the log endpoint itself now 429s...
+	if rr := hitPost(h, "/api/log"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("log over budget = %d, want 429", rr.Code)
+	}
+	// ...but mutations are untouched.
+	if rr := hitPost(h, "/api/illust/1/like"); rr.Code != http.StatusNoContent {
+		t.Fatalf("like after log flood = %d, want 204", rr.Code)
+	}
+}

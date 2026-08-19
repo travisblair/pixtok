@@ -13,9 +13,13 @@ import (
 // or compromised client, not to police a single user's browsing. Tune
 // down only if server.log shows upstream pressure.
 const (
-	imagesPerMinute    = 300 // /api/img — phone scrolls are bursty
-	readsPerMinute     = 120 // /api/next, /api/search*, GETs
+	imagesPerMinute = 300 // /api/img — phone scrolls are bursty
+	readsPerMinute  = 300 // /api/next, /api/search*, GETs — a fast strip browse
+	// with the follow-state cache warm can pass 120/min in bursts
 	mutationsPerMinute = 60  // POST/PUT/DELETE (likes, prefs, gate unlock)
+	logsPerMinute      = 600 // /api/log breadcrumbs — instrumentation must never
+	// starve real traffic (it once drained the mutations bucket and
+	// 429'd LIKES: 88 breadcrumb POSTs in a render burst)
 )
 
 // bucket is a simple token bucket with a refill rate derived from the
@@ -57,6 +61,7 @@ type rateLimiter struct {
 	images    bucket
 	reads     bucket
 	mutations bucket
+	logs      bucket
 	now       func() time.Time
 }
 
@@ -68,6 +73,7 @@ func newRateLimiter(now func() time.Time) *rateLimiter {
 	rl.images = bucket{tokens: imagesPerMinute, perSec: imagesPerMinute / 60.0, burst: imagesPerMinute, limiter: rl}
 	rl.reads = bucket{tokens: readsPerMinute, perSec: readsPerMinute / 60.0, burst: readsPerMinute, limiter: rl}
 	rl.mutations = bucket{tokens: mutationsPerMinute, perSec: mutationsPerMinute / 60.0, burst: mutationsPerMinute, limiter: rl}
+	rl.logs = bucket{tokens: logsPerMinute, perSec: logsPerMinute / 60.0, burst: logsPerMinute, limiter: rl}
 	return rl
 }
 
@@ -80,6 +86,11 @@ func (rl *rateLimiter) tierFor(r *http.Request) *bucket {
 	// prefix case for any future sub-routes.
 	if r.URL.Path == "/api/img" || strings.HasPrefix(r.URL.Path, "/api/img/") {
 		return &rl.images
+	}
+	// Breadcrumbs get their own bucket: diagnostics must never starve
+	// the mutation tier they share a method with (likes 429'd).
+	if r.URL.Path == "/api/log" {
+		return &rl.logs
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return &rl.mutations
