@@ -1319,7 +1319,20 @@ func (c *Client) fetchFollowState(userID string) (bool, error) {
 	return out.User.IsFollowed, nil
 }
 
-func (c *Client) ProxyImage(imgURL string) ([]byte, string, error) {
+// maxCacheableBody mirrors main.imageCache's maxEntryBytes: bodies at or
+// under this size are buffered and handed back for caching; anything
+// larger streams straight through. If the two constants drift, the worst
+// case is a cache miss (memory stays bounded either way).
+const maxCacheableBody = 5 << 20
+
+// ProxyImageStream fetches one CDN image/zip and delivers it to w. Small
+// responses (<= maxCacheableBody) are fully buffered and RETURNED so the
+// caller can cache them — the caller writes the body and sets headers.
+// Oversized responses stream directly to w (headers set here, since the
+// first body byte must not precede them) and return a nil body — they
+// are never cached. Every error path fires before any header or byte is
+// written, so callers can still answer with a clean error status.
+func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte, string, error) {
 	// img URLs come from the CLIENT — enforce the CDN allowlist so
 	// /api/img can't be used as an open proxy into the LAN.
 	if !validImageURL(imgURL) {
@@ -1346,11 +1359,6 @@ func (c *Client) ProxyImage(imgURL string) ([]byte, string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBody))
-	if err != nil {
-		return nil, "", err
-	}
-
 	if resp.StatusCode != 200 {
 		return nil, "", fmt.Errorf("image proxy returned %d", resp.StatusCode)
 	}
@@ -1373,7 +1381,33 @@ func (c *Client) ProxyImage(imgURL string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("image proxy returned disallowed content type %q", contentType)
 	}
 
-	return body, contentType, nil
+	// Buffer only up to the cache ceiling (reviewer finding): a burst of
+	// cache misses used to allocate up to 25 MB each — on the Pi's
+	// memory budget that's an OOM vector. Bodies over the ceiling stream
+	// straight through under the same 25 MB cap and are never cached.
+	head := make([]byte, maxCacheableBody+1)
+	n, err := io.ReadFull(resp.Body, head)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		return head[:n], contentType, nil
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("read image body: %w", err)
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("X-Cache", "MISS")
+	if _, err := w.Write(head); err != nil {
+		return nil, "", fmt.Errorf("write image body: %w", err)
+	}
+	remaining := int64(maxImageBody - maxCacheableBody - 1)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if _, err := io.Copy(w, io.LimitReader(resp.Body, remaining)); err != nil {
+		return nil, "", fmt.Errorf("stream image body: %w", err)
+	}
+	return nil, contentType, nil
 }
 
 type tokenResponse struct {

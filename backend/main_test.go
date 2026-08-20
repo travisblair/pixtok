@@ -37,27 +37,27 @@ func percentEncode(s string) string {
 
 // fakeAPI is a scriptable pixivAPI for handler tests.
 type fakeAPI struct {
-	recommendedFn     func() ([]byte, error)
-	rankingFn         func(mode string) ([]byte, error)
-	newestFn          func(r18 bool, lastID string) ([]byte, error)
-	topFn             func(mode string) ([]byte, error)
-	streetFn          func(nextParams string) ([]byte, error)
-	relatedFn         func(id string) ([]byte, error)
-	workRecsFn        func(id string) ([]byte, error)
-	userIllustsFn     func(id string) ([]byte, error)
-	ugoiraMetaFn      func(id string) ([]byte, error)
-	bookmarkAddFn     func(id string, private bool) error
-	bookmarkDelFn     func(id string) error
-	bookmarkIDsFn     func(restrict string, maxPages int) ([]string, error)
-	bookmarkIllustsFn func(restrict string) ([]byte, error)
-	bookmarkPageFn    func(tag string, offset, limit int, order string) ([]byte, error)
-	bookmarkTagsFn    func() ([]byte, error)
-	setFollowFn       func(userID, restrict string, follow bool) error
-	isFollowedFn      func(userID string) (bool, error)
-	searchArtFn       func(word string, opts pixiv.SearchOpts, page int) ([]byte, error)
-	searchUsrFn       func(nick, sMode string, page int) ([]byte, error)
-	proxyNextFn       func(url string) ([]byte, error)
-	proxyImageFn      func(url string) ([]byte, string, error)
+	recommendedFn      func() ([]byte, error)
+	rankingFn          func(mode string) ([]byte, error)
+	newestFn           func(r18 bool, lastID string) ([]byte, error)
+	topFn              func(mode string) ([]byte, error)
+	streetFn           func(nextParams string) ([]byte, error)
+	relatedFn          func(id string) ([]byte, error)
+	workRecsFn         func(id string) ([]byte, error)
+	userIllustsFn      func(id string) ([]byte, error)
+	ugoiraMetaFn       func(id string) ([]byte, error)
+	bookmarkAddFn      func(id string, private bool) error
+	bookmarkDelFn      func(id string) error
+	bookmarkIDsFn      func(restrict string, maxPages int) ([]string, error)
+	bookmarkIllustsFn  func(restrict string) ([]byte, error)
+	bookmarkPageFn     func(tag string, offset, limit int, order string) ([]byte, error)
+	bookmarkTagsFn     func() ([]byte, error)
+	setFollowFn        func(userID, restrict string, follow bool) error
+	isFollowedFn       func(userID string) (bool, error)
+	searchArtFn        func(word string, opts pixiv.SearchOpts, page int) ([]byte, error)
+	searchUsrFn        func(nick, sMode string, page int) ([]byte, error)
+	proxyNextFn        func(url string) ([]byte, error)
+	proxyImageStreamFn func(url string, w http.ResponseWriter) ([]byte, string, error)
 	// login-capture fns
 	pkceExchangeFn  func(code, verifier string) (string, string, int, error)
 	setTokensFn     func(refresh, access string, expiresIn int) error
@@ -199,9 +199,9 @@ func (f *fakeAPI) ProxyNext(url string) ([]byte, error) {
 	}
 	return []byte(`{"illusts":[],"next_url":null}`), nil
 }
-func (f *fakeAPI) ProxyImage(url string) ([]byte, string, error) {
-	if f.proxyImageFn != nil {
-		return f.proxyImageFn(url)
+func (f *fakeAPI) ProxyImageStream(url string, w http.ResponseWriter) ([]byte, string, error) {
+	if f.proxyImageStreamFn != nil {
+		return f.proxyImageStreamFn(url, w)
 	}
 	return []byte("fakeimg"), "image/jpeg", nil
 }
@@ -317,7 +317,7 @@ func TestUpstreamErrorsMapTo502(t *testing.T) {
 func TestImgProxyCache(t *testing.T) {
 	calls := 0
 	f := &fakeAPI{
-		proxyImageFn: func(url string) ([]byte, string, error) {
+		proxyImageStreamFn: func(url string, w http.ResponseWriter) ([]byte, string, error) {
 			calls++
 			return []byte("imgbytes"), "image/jpeg", nil
 		},
@@ -334,6 +334,54 @@ func TestImgProxyCache(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("upstream called %d times, want 1", calls)
+	}
+}
+
+// The image semaphore bounds CONCURRENT fetches: the 5th simultaneous
+// miss must 429, not queue up another outbound request + buffer.
+func TestImgProxySaturation429(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, maxConcurrentImageFetches+1)
+	f := &fakeAPI{
+		proxyImageStreamFn: func(url string, w http.ResponseWriter) ([]byte, string, error) {
+			entered <- struct{}{}
+			<-release
+			return []byte("img"), "image/jpeg", nil
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+
+	done := make(chan *httptest.ResponseRecorder, maxConcurrentImageFetches)
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		go func(n int) {
+			req := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/api/img?url=https://i.pximg.net/%d.jpg", n), nil)
+			req.Header.Set("X-Api-Key", "secret")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			done <- rec
+		}(i)
+	}
+	// Wait until all four fetches are in flight.
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("fetches did not all enter within 5s")
+		}
+	}
+
+	rr := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/extra.jpg", "secret")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("5th concurrent miss = %d, want 429", rr.Code)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("429 without Retry-After")
+	}
+
+	close(release)
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		<-done
 	}
 }
 

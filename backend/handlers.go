@@ -42,7 +42,7 @@ type pixivAPI interface {
 	SearchArtworks(word string, opts pixiv.SearchOpts, page int) ([]byte, error)
 	SearchUsers(nick, sMode string, page int) ([]byte, error)
 	ProxyNext(nextURL string) ([]byte, error)
-	ProxyImage(imgURL string) ([]byte, string, error)
+	ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte, string, error)
 	// ── login capture (the /api/auth/* protocol) ──
 	ExchangePkce(code, verifier string) (refresh, access string, expiresIn int, err error)
 	SetTokens(refresh, access string, expiresIn int) error
@@ -50,6 +50,16 @@ type pixivAPI interface {
 	ScrapeCsrfFor(phpsessid string) (string, error)
 	AuthHealth() (appOK bool, webOK bool)
 }
+
+// imgFetchSlots bounds CONCURRENT upstream image fetches (reviewer
+// finding): the rate limiter caps request COUNT, not in-flight fetches —
+// every concurrent cache miss holds an outbound connection and buffers
+// bytes, and on the Pi's 96MiB memory budget unbounded misses are an OOM
+// vector. Saturated → 429 + Retry-After. Misses only: cache hits never
+// consume a slot.
+const maxConcurrentImageFetches = 4
+
+var imgFetchSlots = make(chan struct{}, maxConcurrentImageFetches)
 
 // pkceStore holds in-flight PKCE challenges: single-use, short-TTL,
 // capped. The proxied login (pkce/start → px/* → server-side callback)
@@ -761,19 +771,33 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			return
 		}
 
-		body, contentType, err := api.ProxyImage(imgURL)
+		// Concurrency bound: only misses consume a slot (see
+		// imgFetchSlots above); saturation answers 429 and the caller
+		// retries a beat later.
+		select {
+		case imgFetchSlots <- struct{}{}:
+			defer func() { <-imgFetchSlots }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "image fetch saturated", http.StatusTooManyRequests)
+			return
+		}
+
+		body, contentType, err := api.ProxyImageStream(imgURL, w)
 		if err != nil {
 			log.Printf("ERROR img proxy: %v", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-
-		cache.set(imgURL, body, contentType)
-
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-		w.Header().Set("X-Cache", "MISS")
-		w.Write(body)
+		if body != nil {
+			// Small body — cacheable. Oversized responses were already
+			// streamed to w (with their headers) by the client.
+			cache.set(imgURL, body, contentType)
+			w.Header().Set("Content-Type", contentType)
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Header().Set("X-Cache", "MISS")
+			w.Write(body)
+		}
 	})
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {

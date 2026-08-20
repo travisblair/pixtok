@@ -1,9 +1,11 @@
 package pixiv
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,7 +195,7 @@ func TestProxyImageContentTypeAllowlist(t *testing.T) {
 				phpSessID: "test",
 				http:      &http.Client{Transport: &contentTypeTransport{ct: tc.ct}},
 			}
-			_, got, err := c.ProxyImage("https://i.pximg.net/img-master/img/2024/01/01/00/00/00/1.jpg")
+			_, got, err := c.ProxyImageStream("https://i.pximg.net/img-master/img/2024/01/01/00/00/00/1.jpg", httptest.NewRecorder())
 			if tc.want == "" {
 				if err == nil {
 					t.Fatalf("content type %q accepted, want rejection", tc.ct)
@@ -590,5 +592,72 @@ func TestRefreshPersistenceFailureDoesNotCommitRotation(t *testing.T) {
 	c.mu.Unlock()
 	if backoff < 25*time.Second || backoff > 31*time.Second {
 		t.Fatalf("circuit breaker not armed: next refresh in %v, want ~30s", backoff)
+	}
+}
+
+// staticBodyTransport serves a fixed body with a fixed content type.
+type staticBodyTransport struct {
+	body []byte
+	ct   string
+}
+
+func (r *staticBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{r.ct}},
+		Body:       io.NopCloser(bytes.NewReader(r.body)),
+		Request:    req,
+	}, nil
+}
+
+// Oversized bodies must stream through without ever being fully
+// buffered (reviewer finding: cache misses allocated up to 25 MB each).
+func TestProxyImageStreamStreamsOversizedBody(t *testing.T) {
+	payload := bytes.Repeat([]byte("a"), maxCacheableBody+64<<10)
+	tr := &staticBodyTransport{body: payload, ct: "application/zip"}
+	c := &Client{http: &http.Client{Transport: tr}}
+
+	rec := httptest.NewRecorder()
+	body, ct, err := c.ProxyImageStream("https://i.pximg.net/img-zip-ugoira/1.zip", rec)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if body != nil {
+		t.Fatalf("oversized body returned for caching (%d bytes)", len(body))
+	}
+	if ct != "application/zip" {
+		t.Fatalf("content type = %q, want application/zip", ct)
+	}
+	if got := rec.Body.Bytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("streamed body = %d bytes, want %d intact", len(got), len(payload))
+	}
+	if h := rec.Header().Get("Content-Type"); h != "application/zip" {
+		t.Fatalf("streamed Content-Type header = %q", h)
+	}
+	if h := rec.Header().Get("X-Cache"); h != "MISS" {
+		t.Fatalf("streamed X-Cache header = %q, want MISS", h)
+	}
+}
+
+// Small bodies buffer fully and come back for the cache — the caller
+// (handler), not the client, writes them.
+func TestProxyImageStreamBuffersSmallBody(t *testing.T) {
+	payload := []byte("small-image-bytes")
+	tr := &staticBodyTransport{body: payload, ct: "image/png"}
+	c := &Client{http: &http.Client{Transport: tr}}
+
+	rec := httptest.NewRecorder()
+	body, ct, err := c.ProxyImageStream("https://i.pximg.net/img-master/1.png", rec)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("buffered body = %q, want %q", body, payload)
+	}
+	if ct != "image/png" {
+		t.Fatalf("content type = %q, want image/png", ct)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("small body was written by the client (%d bytes) — the handler writes it", rec.Body.Len())
 	}
 }
