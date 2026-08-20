@@ -165,6 +165,14 @@ can reach the URL. Set `PIXTOK_PUBLIC_HTTPS=true` when the app is
 served over HTTPS (Tailscale Funnel) so the gate cookie and the login
 proxy's rewritten pixiv cookies keep `Secure`.
 
+Credentials live in `.env`. `PIXTOK_ENV_FILE=/path/to/.env` pins one
+file explicitly (no candidate search) — useful when the binary and
+`.env` live in different trees. Environment variables are bootstrap
+config and win over `.env` at boot: a deployment that supplies
+credentials via env vars owns their lifecycle (the app's in-app login
+and token-rotation persistence write to `.env` and will be shadowed).
+Pick one model per deployment.
+
 ### 3. Run
 
 Development (Vite + HMR; the dev proxy injects the API key):
