@@ -221,6 +221,14 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap lets http.ResponseController reach the underlying writer so
+// per-response deadlines (the 120s image write deadline) actually apply
+// (found live: without it SetWriteDeadline fails with "feature not
+// supported" and oversized zips die at the global WriteTimeout).
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // logRequests logs method + path + status for every request (path only —
 // never query strings or bodies, so tokens/credentials never hit the log).
 func logRequests(next http.Handler) http.Handler {
@@ -332,13 +340,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("gate config: %v", err)
 	}
-	if g.enabled {
-		registerGateRoutes(mux, g)
-	} else {
+	if !g.enabled {
 		// The gate is the app's only defense on the public Funnel —
 		// running without it deserves a loud boot warning.
 		log.Printf("WARNING: PIXTOK_GATE_PASSWORD_HASH not set — password gate DISABLED")
 	}
+	// Registered even when the gate is disabled: the frontend's boot
+	// pre-flight asks /api/gate/status, and a 404 there pins the app on
+	// the GateScreen forever (observed live). The handlers answer
+	// {"locked":false} when the gate is off.
+	registerGateRoutes(mux, g)
 	// A plaintext dev password was hashed at boot with a fresh salt —
 	// without persistence every restart mints a different hash and
 	// re-locks every device. Persist the generated bcrypt hash into

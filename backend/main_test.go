@@ -337,8 +337,9 @@ func TestImgProxyCache(t *testing.T) {
 	}
 }
 
-// The image semaphore bounds CONCURRENT fetches: the 5th simultaneous
-// miss must 429, not queue up another outbound request + buffer.
+// The image semaphore bounds CONCURRENT fetches: the (cap+1)th
+// simultaneous miss must 429, not queue up another outbound request +
+// buffer.
 func TestImgProxySaturation429(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{}, maxConcurrentImageFetches+1)
@@ -362,7 +363,7 @@ func TestImgProxySaturation429(t *testing.T) {
 			done <- rec
 		}(i)
 	}
-	// Wait until all four fetches are in flight.
+	// Wait until all the fetches are in flight.
 	for i := 0; i < maxConcurrentImageFetches; i++ {
 		select {
 		case <-entered:
@@ -373,7 +374,7 @@ func TestImgProxySaturation429(t *testing.T) {
 
 	rr := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/extra.jpg", "secret")
 	if rr.Code != http.StatusTooManyRequests {
-		t.Fatalf("5th concurrent miss = %d, want 429", rr.Code)
+		t.Fatalf("(cap+1)th concurrent miss = %d, want 429", rr.Code)
 	}
 	if rr.Header().Get("Retry-After") == "" {
 		t.Error("429 without Retry-After")
@@ -2153,9 +2154,20 @@ func TestGateDisabledWithoutPassword(t *testing.T) {
 	registerGateRoutes(mux, g)
 	h := apiKeyGate("secret", g.middleware(mux))
 
-	req := httptest.NewRequest(http.MethodPost, "/api/street", strings.NewReader("{}"))
+	// The status route must exist and answer unlocked even with the
+	// gate off: the frontend's boot pre-flight reads it, and a 404
+	// would pin the app on the GateScreen forever (observed live).
+	req := httptest.NewRequest(http.MethodGet, "/api/gate/status", nil)
 	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"locked":false`) {
+		t.Fatalf("disabled gate status = %d %q, want 200 locked:false", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/street", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", "secret")
+	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("disabled gate blocks = %d, want 200", rr.Code)

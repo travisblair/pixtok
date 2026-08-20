@@ -40,6 +40,36 @@ func TestOriginCheckAllowsSameOriginMutation(t *testing.T) {
 	}
 }
 
+// Ports are not part of the origin-security property here: the Vite dev
+// proxy rewrites Host to :8080 while the browser's Origin says :5173,
+// and serve/Funnel terminate on their own ports. Same hostname must
+// pass, different hostname must fail (regression from the live 403).
+func TestOriginCheckIgnoresPort(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := originCheck(inner)
+
+	// Host: localhost:8080 (rewritten by the dev proxy), Origin:
+	// http://localhost:5173 (the browser's view) — same hostname.
+	req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/street", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("same-hostname different-port POST = %d, want 204", rr.Code)
+	}
+
+	// Same port, different hostname — still rejected.
+	req = httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/street", nil)
+	req.Header.Set("Origin", "http://evil.example:8080")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("different-hostname same-port POST = %d, want 403", rr.Code)
+	}
+}
+
 func TestOriginCheckAllowsNoOrigin(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

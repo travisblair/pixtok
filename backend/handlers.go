@@ -56,8 +56,10 @@ type pixivAPI interface {
 // every concurrent cache miss holds an outbound connection and buffers
 // bytes, and on the Pi's 96MiB memory budget unbounded misses are an OOM
 // vector. Saturated → 429 + Retry-After. Misses only: cache hits never
-// consume a slot.
-const maxConcurrentImageFetches = 4
+// consume a slot. Sized from a live boot: a grid render fires ~9
+// concurrent misses at once, and the 429'd cards self-heal via the
+// frontend's retry button.
+const maxConcurrentImageFetches = 8
 
 var imgFetchSlots = make(chan struct{}, maxConcurrentImageFetches)
 
