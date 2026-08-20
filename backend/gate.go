@@ -115,8 +115,16 @@ func (g *gate) failureDelay() time.Duration {
 	}
 }
 
+// gateFailureDecay: failures older than this stop counting against the
+// owner (reviewer finding): the counter never decayed, so a single old
+// attack left the sole user facing 60s tarpits indefinitely.
+const gateFailureDecay = 10 * time.Minute
+
 func (g *gate) recordFailure() {
 	g.mu.Lock()
+	if g.failures > 0 && time.Since(g.lastFailTime) > gateFailureDecay {
+		g.failures = 0 // stale attack — start a fresh streak
+	}
 	g.failures++
 	g.lastFailTime = time.Now()
 	g.mu.Unlock()

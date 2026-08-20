@@ -2162,6 +2162,36 @@ func TestGateDisabledWithoutPassword(t *testing.T) {
 	}
 }
 
+// A stale attack must not punish the owner: failures older than the
+// decay window reset the streak (reviewer finding: the counter never
+// decayed, so one old attack meant 60s tarpits forever).
+func TestGateFailureDecay(t *testing.T) {
+	g, err := newGate("test-password", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	// Simulate a burst that maxed the tarpit... long ago.
+	g.mu.Lock()
+	g.failures = 20
+	g.lastFailTime = time.Now().Add(-gateFailureDecay - time.Minute)
+	if d := g.failureDelay(); d == 0 {
+		g.mu.Unlock()
+		t.Fatal("setup: expected a nonzero delay for 20 failures")
+	}
+	g.mu.Unlock()
+
+	// A failure after the decay window starts a fresh streak: delay 0.
+	g.recordFailure()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.failures != 1 {
+		t.Fatalf("failures after decay = %d, want 1 (fresh streak)", g.failures)
+	}
+	if d := g.failureDelay(); d != 0 {
+		t.Fatalf("delay after decay = %v, want 0", d)
+	}
+}
+
 func TestPrefsViewModesDefaultAndRoundtrip(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "prefs.db")
 	store, err := openPrefs(dbPath)

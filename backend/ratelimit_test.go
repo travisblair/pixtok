@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -141,5 +142,93 @@ func TestRateLimitLogTierIsIsolated(t *testing.T) {
 	// ...but mutations are untouched.
 	if rr := hitPost(h, "/api/illust/1/like"); rr.Code != http.StatusNoContent {
 		t.Fatalf("like after log flood = %d, want 204", rr.Code)
+	}
+}
+
+// hitGetXFF sends a GET as-if through the trusted local proxy: loopback
+// RemoteAddr + the proxy's X-Forwarded-For client hop.
+func hitGetXFF(h http.Handler, path, xff string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "http://pixtok.test"+path, nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("X-Forwarded-For", xff)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// Per-source buckets: one hostile client exhausts ITS budget, never the
+// owner's (reviewer finding: global-only buckets let a single source
+// deny the sole user).
+func TestRateLimitPerSourceIsolation(t *testing.T) {
+	lim := newRateLimiter(nil)
+	h := lim.middleware(noContentHandler())
+
+	img := "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg%2F1.jpg"
+	for i := 0; i < imagesPerMinute; i++ {
+		if rr := hitGetXFF(h, img, "10.0.0.1"); rr.Code != http.StatusNoContent {
+			t.Fatalf("source A request %d = %d, want 204", i+1, rr.Code)
+		}
+	}
+	if rr := hitGetXFF(h, img, "10.0.0.1"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("source A over budget = %d, want 429", rr.Code)
+	}
+	// Source B's budget is untouched by A's flood.
+	if rr := hitGetXFF(h, img, "10.0.0.2"); rr.Code != http.StatusNoContent {
+		t.Fatalf("source B after A's flood = %d, want 204", rr.Code)
+	}
+}
+
+// X-Forwarded-For is trusted ONLY from a loopback peer (the local
+// reverse proxy). A direct client can forge the header — its RemoteAddr
+// is the key instead.
+func TestRateLimitXFFTrustedOnlyFromLoopback(t *testing.T) {
+	lim := newRateLimiter(nil)
+	h := lim.middleware(noContentHandler())
+
+	img := "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg%2F1.jpg"
+	// Same non-loopback RemoteAddr, different forged XFF values — they
+	// must land in the SAME bucket.
+	spoofA := httptest.NewRequest(http.MethodGet, "http://pixtok.test"+img, nil)
+	spoofA.RemoteAddr = "203.0.113.9:1234"
+	spoofA.Header.Set("X-Forwarded-For", "10.9.9.1")
+	spoofB := httptest.NewRequest(http.MethodGet, "http://pixtok.test"+img, nil)
+	spoofB.RemoteAddr = "203.0.113.9:1234"
+	spoofB.Header.Set("X-Forwarded-For", "10.9.9.2")
+
+	for i := 0; i < imagesPerMinute; i++ {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, spoofA)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("spoofA request %d = %d, want 204", i+1, rr.Code)
+		}
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, spoofB)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("forged XFF got its own bucket: %d, want 429 (RemoteAddr is the key)", rr.Code)
+	}
+}
+
+// The global ceiling bounds the AGGREGATE of many distinct sources:
+// each individual source stays under its own budget, but the fleet
+// exhausts the process-wide bucket.
+func TestRateLimitGlobalCeiling(t *testing.T) {
+	lim := newRateLimiter(nil)
+	h := lim.middleware(noContentHandler())
+
+	img := "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg%2F1.jpg"
+	// globalMultiplier distinct sources, each at its full per-source
+	// budget — the aggregate fills the global ceiling exactly.
+	for s := 0; s < globalMultiplier; s++ {
+		xff := fmt.Sprintf("10.1.0.%d", s+1)
+		for i := 0; i < imagesPerMinute; i++ {
+			if rr := hitGetXFF(h, img, xff); rr.Code != http.StatusNoContent {
+				t.Fatalf("source %d request %d = %d, want 204 (per-source should hold)", s+1, i+1, rr.Code)
+			}
+		}
+	}
+	// A fresh source passes ITS bucket but trips the global ceiling.
+	if rr := hitGetXFF(h, img, fmt.Sprintf("10.1.0.%d", globalMultiplier+1)); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-global request = %d, want 429", rr.Code)
 	}
 }
