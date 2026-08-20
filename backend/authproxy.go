@@ -434,8 +434,13 @@ func handlePkceCallback(w http.ResponseWriter, r *http.Request, api pixivAPI, pk
 		http.Error(w, "pkce exchange failed", http.StatusBadGateway)
 		return
 	}
+	// Persistence is part of authentication (reviewer finding): a
+	// "success" that only lives in memory dies on the next restart.
+	// Fail the callback instead of pretending the login is durable.
 	if err := api.SetTokens(refreshTok, accessTok, expiresIn); err != nil {
 		log.Printf("ERROR persisting tokens: %v", err)
+		http.Error(w, "login succeeded but could not be persisted — retry", http.StatusInternalServerError)
+		return
 	}
 
 	// Web-session capture from the cookie jar the login just populated.
@@ -465,6 +470,10 @@ func handlePkceCallback(w http.ResponseWriter, r *http.Request, api pixivAPI, pk
 			Value:  "",
 			Path:   "/",
 			MaxAge: -1,
+			// Match the transport's Secure posture like every other
+			// cookie this proxy sets (reviewer finding: the deletion
+			// cookies were always plain).
+			Secure: secureForRequest(r),
 		})
 	}
 

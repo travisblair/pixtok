@@ -239,6 +239,25 @@ func (c *Client) refresh() error {
 		expiresIn = 3600 // defensive: never land in the past on a bad response
 	}
 
+	// Persist a rotated refresh token BEFORE committing it to memory
+	// (reviewer finding): the refresh token is the durable credential —
+	// if pixiv rotates it and the disk write fails, committing to memory
+	// anyway leaves memory ahead of disk, and the next restart
+	// resurrects the OLD token pixiv may have just invalidated. On
+	// persistence failure, fail the refresh with the circuit-breaker
+	// backoff so a broken disk doesn't hammer pixiv's token endpoint;
+	// memory keeps the old pair (memory never gets ahead of disk).
+	if tr.RefreshToken != "" {
+		if err := UpdateEnvFile(map[string]string{
+			"PIXIV_REFRESH_TOKEN": tr.RefreshToken,
+		}); err != nil {
+			c.mu.Lock()
+			c.expiresAt = time.Now().Add(30 * time.Second)
+			c.mu.Unlock()
+			return fmt.Errorf("persist rotated refresh token: %w", err)
+		}
+	}
+
 	c.mu.Lock()
 	c.accessToken = tr.AccessToken
 	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-5 * time.Minute)
@@ -605,8 +624,9 @@ func (c *Client) ScrapeCsrfFor(phpsessid string) (string, error) {
 // ── In-app login capture (the /api/auth/* protocol) ─────────────────────
 
 // ExchangePkce swaps a one-time OAuth code + PKCE verifier for the
-// app-API token pair. The refresh token this returns is PERMANENT
-// (pixiv never rotates it) — store it.
+// app-API token pair. The refresh token this returns is the durable
+// credential — pixiv can rotate it on later refreshes, and refresh()
+// persists the rotated value back to .env.
 func (c *Client) ExchangePkce(code, codeVerifier string) (string, string, int, error) {
 	data := url.Values{
 		"client_id":      {clientID},
@@ -702,6 +722,12 @@ var envFileMu sync.Mutex
 // started from any CWD still finds the same file (reviewer finding:
 // the old hardcoded "../.env" silently failed from other directories).
 func envFilePath() string {
+	// PIXTOK_ENV_FILE pins ONE file — no candidate search (reviewer
+	// finding: the search resolves to "some .env", which surprises
+	// operators). When set, it is the only candidate, read AND write.
+	if v := os.Getenv("PIXTOK_ENV_FILE"); v != "" {
+		return v
+	}
 	candidates := []string{}
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)

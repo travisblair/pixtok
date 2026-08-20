@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -507,5 +508,87 @@ func TestIsFollowedTTLExpiryRefetches(t *testing.T) {
 	}
 	if rt.count() != 2 {
 		t.Fatalf("upstream calls = %d, want 2 (TTL expired)", rt.count())
+	}
+}
+
+// tokenTransport answers the token endpoint with a scripted token pair —
+// lets refresh() rotation tests run without a network.
+type tokenTransport struct {
+	body string
+}
+
+func (r *tokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(r.body)),
+		Request:    req,
+	}, nil
+}
+
+// Rotation persistence (reviewer finding): a rotated refresh token must
+// land in .env BEFORE it replaces the in-memory value — the durable
+// credential is the file, not the running process.
+func TestRefreshPersistsRotatedToken(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	t.Setenv("PIXTOK_ENV_FILE", envPath)
+	old := "old-token-value"
+	if err := os.WriteFile(envPath, []byte(envKey()+"="+old+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rotated := "new-token-value"
+	c := &Client{
+		refreshToken: old,
+		http: &http.Client{Transport: &tokenTransport{
+			body: `{"access_token":"acc","refresh_token":"` + rotated + `","expires_in":3600}`,
+		}},
+	}
+	if err := c.refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if c.refreshToken != rotated {
+		t.Fatalf("in-memory refresh token = %q, want %q", c.refreshToken, rotated)
+	}
+	got, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), envKey()+"="+rotated) {
+		t.Fatalf(".env not updated with rotated token:\n%s", got)
+	}
+	if strings.Contains(string(got), envKey()+"="+old) {
+		t.Fatalf("old token survived the rotation write:\n%s", got)
+	}
+}
+
+// Persistence failure must fail the refresh and leave memory on the OLD
+// token — memory never gets ahead of disk (the split-brain state that
+// made restarts resurrect stale credentials).
+func TestRefreshPersistenceFailureDoesNotCommitRotation(t *testing.T) {
+	// Point at a .env that cannot be read: UpdateEnvFile fails before
+	// any write, simulating a broken credential store.
+	t.Setenv("PIXTOK_ENV_FILE", filepath.Join(t.TempDir(), "missing", ".env"))
+
+	old := "old-token-value"
+	c := &Client{
+		refreshToken: old,
+		http: &http.Client{Transport: &tokenTransport{
+			body: `{"access_token":"acc","refresh_token":"new-token-value","expires_in":3600}`,
+		}},
+	}
+	if err := c.refresh(); err == nil {
+		t.Fatal("refresh succeeded despite failed persistence")
+	}
+	if c.refreshToken != old {
+		t.Fatalf("memory ahead of disk: refresh token = %q, want old %q", c.refreshToken, old)
+	}
+	// The circuit breaker must be armed so a broken disk doesn't turn
+	// every request into a fresh upstream refresh call.
+	c.mu.Lock()
+	backoff := time.Until(c.expiresAt)
+	c.mu.Unlock()
+	if backoff < 25*time.Second || backoff > 31*time.Second {
+		t.Fatalf("circuit breaker not armed: next refresh in %v, want ~30s", backoff)
 	}
 }

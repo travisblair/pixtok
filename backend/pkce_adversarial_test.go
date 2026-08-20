@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -159,4 +161,70 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// ── PKCE callback persistence semantics ────────────────────────────────
+
+// A "successful" login that wasn't persisted dies on the next restart —
+// the callback must 500 instead of pretending the login is durable.
+func TestPkceCallbackSetTokensFailureIsFatal(t *testing.T) {
+	pkce := newPkceStore()
+	flow := "flow-set-fail"
+	pkce.put(flow, "verifier1")
+
+	f := &fakeAPI{
+		pkceExchangeFn: func(code, verifier string) (string, string, int, error) {
+			return "rt", "at", 3600, nil
+		},
+		setTokensFn: func(refresh, access string, expiresIn int) error {
+			return fmt.Errorf("disk full")
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/px/app/web/v1/users/auth/pixiv/callback?code=abc", nil)
+	req.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: flow})
+	rr := httptest.NewRecorder()
+	handlePkceCallback(rr, req, f, pkce)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("callback with failed persistence = %d, want 500 (must not report login success)", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "" {
+		t.Fatalf("callback redirected despite failed persistence: %q", loc)
+	}
+}
+
+// The callback's cookie-deletion sweep must match the transport's Secure
+// posture like every other cookie the proxy sets.
+func TestPkceCallbackDeletionCookiesCarrySecure(t *testing.T) {
+	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
+
+	pkce := newPkceStore()
+	flow := "flow-secure"
+	pkce.put(flow, "verifier2")
+
+	f := &fakeAPI{} // defaults: exchange + persistence succeed
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/px/app/web/v1/users/auth/pixiv/callback?code=abc", nil)
+	req.TLS = &tls.ConnectionState{}
+	req.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: flow})
+	req.AddCookie(&http.Cookie{Name: "PHPSESSID", Value: "123_abcdef"})
+	rr := httptest.NewRecorder()
+	handlePkceCallback(rr, req, f, pkce)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("callback = %d, want 302", rr.Code)
+	}
+	deletions := 0
+	for _, sc := range rr.Result().Cookies() {
+		if sc.MaxAge == -1 {
+			deletions++
+			if !sc.Secure {
+				t.Errorf("deletion cookie %q lacks Secure on an HTTPS transport", sc.Name)
+			}
+		}
+	}
+	if deletions == 0 {
+		t.Fatal("no deletion cookies set — the sweep did not run")
+	}
 }

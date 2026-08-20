@@ -129,6 +129,12 @@ func (c *imageCache) reapLoop() {
 // CWD-relative only — starting the binary from another directory made
 // token writes land nowhere.
 func envFileCandidates() []string {
+	// PIXTOK_ENV_FILE pins ONE file — no candidate search (reviewer
+	// finding: the search resolves to "some .env", which surprises
+	// operators). When set, it is the only candidate, read AND write.
+	if v := os.Getenv("PIXTOK_ENV_FILE"); v != "" {
+		return []string{v}
+	}
 	var out []string
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
