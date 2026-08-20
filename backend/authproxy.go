@@ -117,7 +117,26 @@ func rewriteLocation(loc string) string {
 		}
 		return "/api/auth/px/" + kind + rest
 	}
+	// NOT a pixiv host: pass through unchanged (reviewer note). The
+	// login flow can emit foreign absolute URLs (analytics, CDN
+	// scripts) — they must never be rewritten onto OUR origin, and the
+	// proxied page may legitimately reference them. Deliberate
+	// allow-through: the browser follows them off-origin; nothing is
+	// proxied.
 	return loc
+}
+
+// isCORSHeader reports whether a response header belongs to CORS
+// (Access-Control-Allow-Origin etc.) — upstream CORS posture must never
+// leak onto our origin (reviewer finding).
+func isCORSHeader(k string) bool {
+	switch k {
+	case "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials",
+		"Access-Control-Allow-Headers", "Access-Control-Allow-Methods",
+		"Access-Control-Expose-Headers", "Access-Control-Max-Age":
+		return true
+	}
+	return false
 }
 
 // rewriteBodyURLs maps absolute pixiv URLs inside JSON response bodies
@@ -306,7 +325,11 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 			// verbatim: bodies are truncated (2-8 MB) and rewritten below,
 			// so an upstream Content-Length would desync the response. The
 			// rewrite branch sets its own; the passthrough streams chunked.
-			if k == "Content-Length" || k == "Content-Encoding" {
+			// Access-Control-* is the UPSTREAM's CORS posture — copying it
+			// onto our origin is needless and could confuse browsers
+			// (reviewer finding). The login SPA is same-origin through
+			// this proxy and needs no CORS grants.
+			if k == "Content-Length" || k == "Content-Encoding" || isCORSHeader(k) {
 				continue
 			}
 			for _, v := range vs {

@@ -169,3 +169,20 @@ describe("view modes (backend-backed)", () => {
     }
   });
 });
+
+// The per-id like-signal map is capped: a long session scrolling
+// hundreds of works must not grow memory unbounded (reviewer finding).
+// Oldest entries evict first.
+describe("likeStates cap", () => {
+  afterEach(clearLikeStates);
+
+  it("evicts the oldest entries past the cap", () => {
+    for (let i = 0; i < 1100; i++) {
+      getLikeState(i, false);
+    }
+    // 1100 inserts, cap 1024 — the first 76 ids must be gone, and a
+    // re-fetch of id 0 must create a FRESH entry (not resurrect state).
+    const fresh = getLikeState(0, true);
+    expect(fresh.liked()).toBe(true);
+  });
+});

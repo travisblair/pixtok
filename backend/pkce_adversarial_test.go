@@ -163,6 +163,23 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
+// Foreign absolute URLs pass through rewriteLocation unchanged
+// (reviewer note): the login flow can reference off-origin URLs
+// legitimately, but they must never be mapped onto OUR origin.
+func TestRewriteLocationPassesForeignURLsUnchanged(t *testing.T) {
+	cases := []string{
+		"https://evil.example.com/login",
+		"https://accounts.pixiv.net.evil.example/login", // suffix-domain confusion
+		"https://accounts.pixiv.net:8443/login",         // non-default port
+		"http://accounts.pixiv.net/login",               // wrong scheme (targets are https)
+	}
+	for _, loc := range cases {
+		if got := rewriteLocation(loc); got != loc {
+			t.Fatalf("rewriteLocation(%q) = %q, want unchanged", loc, got)
+		}
+	}
+}
+
 // ── PKCE callback persistence semantics ────────────────────────────────
 
 // A "successful" login that wasn't persisted dies on the next restart —

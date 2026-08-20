@@ -21,6 +21,12 @@ const likeStates = new Map<
   { liked: Accessor<boolean>; setLiked: Setter<boolean> }
 >();
 
+// Cap: one signal + closure per illust id, never evicted outside tests.
+// A long mobile session scrolls through hundreds of works; on iOS's
+// memory budget the map must not grow unbounded (reviewer finding).
+// Oldest-evict past the cap — Map iterates in insertion order.
+const maxLikeStateEntries = 1024;
+
 const [likedIds, setLikedIds] = createSignal<ReadonlySet<number>>(
   new Set<number>()
 );
@@ -45,6 +51,11 @@ export function getLikeState(id: number, initial: boolean) {
     };
     entry = { liked, setLiked };
     likeStates.set(id, entry);
+    while (likeStates.size > maxLikeStateEntries) {
+      const oldest = likeStates.keys().next().value;
+      if (oldest === undefined) break;
+      likeStates.delete(oldest);
+    }
   }
   return entry;
 }

@@ -35,7 +35,9 @@ function loadEnvValue(key: string): string {
     const line = env
       .split("\n")
       .find((l) => l.startsWith(key + "="));
-    return line ? line.split("=")[1].trim() : "";
+    // Split on the FIRST "=" only — values can legitimately contain "="
+    // (reviewer finding: split("=")[1] truncated them).
+    return line ? line.slice(line.indexOf("=") + 1).trim() : "";
   } catch {
     return "";
   }

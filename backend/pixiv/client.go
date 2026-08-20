@@ -226,7 +226,10 @@ func (c *Client) refresh() error {
 		c.mu.Lock()
 		c.expiresAt = time.Now().Add(30 * time.Second)
 		c.mu.Unlock()
-		return fmt.Errorf("auth returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		// Auth-endpoint errors log STATUS ONLY (reviewer finding):
+		// token-endpoint bodies can echo identifiers and must never
+		// reach the journal. Feeds keep their truncated bodies.
+		return fmt.Errorf("auth returned %d", resp.StatusCode)
 	}
 
 	var tr tokenResponse
@@ -655,7 +658,9 @@ func (c *Client) ExchangePkce(code, codeVerifier string) (string, string, int, e
 		return "", "", 0, fmt.Errorf("read pkce exchange response: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		return "", "", 0, fmt.Errorf("pkce exchange returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		// Auth-endpoint errors log STATUS ONLY (reviewer finding) — see
+		// the refresh() error path for the rationale.
+		return "", "", 0, fmt.Errorf("pkce exchange returned %d", resp.StatusCode)
 	}
 
 	var tr tokenResponse

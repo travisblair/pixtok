@@ -61,6 +61,20 @@ const maxConcurrentImageFetches = 4
 
 var imgFetchSlots = make(chan struct{}, maxConcurrentImageFetches)
 
+// sanitizeLogText strips control characters from client-supplied
+// journal text so /api/log payloads can't inject or forge log lines.
+func sanitizeLogText(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 // pkceStore holds in-flight PKCE challenges: single-use, short-TTL,
 // capped. The proxied login (pkce/start → px/* → server-side callback)
 // creates the verifier/challenge at start and consumes it at the
@@ -184,6 +198,11 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		if len(entry.Session) > 32 {
 			entry.Session = entry.Session[:32]
 		}
+		// Sanitize journal text (reviewer finding): /api/log is
+		// attacker-controllable text landing in server.log — control chars
+		// and newlines must not forge or split journal lines.
+		entry.Session = sanitizeLogText(entry.Session)
+		entry.Msg = sanitizeLogText(entry.Msg)
 		msg := entry.Msg
 		if len(msg) > 256 {
 			msg = msg[:256]

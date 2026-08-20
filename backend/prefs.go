@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -53,6 +55,14 @@ func openPrefs(path string) (*prefsStore, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open prefs db: %w", err)
+	}
+	if path != ":memory:" {
+		// Single-user state (reviewer finding): the db file sits next to
+		// .env and should be as private as it — 0600, best-effort, a
+		// read-only FS shouldn't kill prefs.
+		if err := os.Chmod(path, 0o600); err != nil {
+			log.Printf("WARNING: could not chmod 0600 %s: %v", path, err)
+		}
 	}
 	if err := db.AutoMigrate(&Pref{}); err != nil {
 		return nil, fmt.Errorf("migrate prefs db: %w", err)
