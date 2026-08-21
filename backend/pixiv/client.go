@@ -114,12 +114,26 @@ type Client struct {
 	csrfMu         sync.Mutex
 	csrfTokenCache string
 	http           *http.Client
+	// upstreamSlots bounds CONCURRENT non-image upstream calls (app API
+	// + web AJAX). A search-page render mounts ~50 follow-state calls at
+	// once; firing them all at pixiv is ~60 simultaneous TLS handshakes
+	// on the Pi Zero W's single core — the handshakes starve each other's
+	// CPU budget and time out in a storm (journal: TLS handshake timeout
+	// bursts after every big render). Queued requests just land a beat
+	// later; the browser side already carries its own aborts. nil
+	// disables the gate (test clients built as literals).
+	upstreamSlots chan struct{}
 	// followState caches IsFollowed results (TTL + single-flight) so a
 	// strip feed's ~30 concurrent per-card calls collapse to one
 	// upstream request per artist per window — see followstate.go.
 	// nil disables caching (test clients built as literals).
 	followState *followStateCache
 }
+
+// maxUpstreamConcurrency sizes the doWith gate: high enough that a feed
+// page loads promptly, low enough that the Pi Zero W never melts on
+// concurrent ECDHE handshakes (the 502-storm root cause, 2026-08-21).
+const maxUpstreamConcurrency = 6
 
 func NewClient() (*Client, error) {
 	rt := os.Getenv("PIXIV_REFRESH_TOKEN")
@@ -143,7 +157,11 @@ func NewClient() (*Client, error) {
 
 	c := &Client{
 		refreshToken: rt,
-		http:         &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: newPixivTransport(),
+		},
+		upstreamSlots: make(chan struct{}, maxUpstreamConcurrency),
 		// Follow state changes rarely and the frontend asks constantly —
 		// 5 minutes is short enough to feel live, long enough to keep
 		// the per-card fetch bursts off pixiv's rate limiter.
@@ -281,6 +299,19 @@ func (c *Client) ensureToken() error {
 	return c.refresh()
 }
 
+// newPixivTransport returns the shared transport for pixiv upstream
+// calls. Go's default 10s TLS handshake timeout was killing handshakes
+// during the Pi Zero W's render-storm bursts (a handshake queued behind
+// five others has to survive CPU contention): 20s gives that headroom
+// without stretching the client's overall 30s ceiling much. The image
+// proxy inherits this transport through newValidatedClient (it copies
+// the client), so its 120s-ceiling streams get the same cushion.
+func newPixivTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.TLSHandshakeTimeout = 20 * time.Second
+	return t
+}
+
 // newValidatedClient returns a copy of the shared client whose redirect
 // policy re-validates EVERY hop against the allowlist. Without this, a
 // 3xx from a pixiv host to an attacker target would re-open the SSRF.
@@ -319,6 +350,16 @@ func (c *Client) doWith(cl *http.Client, req *http.Request) (*http.Response, err
 		req.Header.Set("app-os-version", "14.6")
 	}
 	req.Header.Set("User-Agent", userAgent)
+
+	// Bounded upstream concurrency (see upstreamSlots on Client). The
+	// slot is held only until the response HEADERS arrive — the heavy,
+	// CPU-bound part is the TLS handshake, and this bounds the number of
+	// them in flight. JSON bodies drain in microseconds after the gate
+	// releases; the authproxy's streamed login flow is a single request.
+	if c.upstreamSlots != nil {
+		c.upstreamSlots <- struct{}{}
+		defer func() { <-c.upstreamSlots }()
+	}
 	return cl.Do(req)
 }
 

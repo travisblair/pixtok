@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -659,5 +660,119 @@ func TestProxyImageStreamBuffersSmallBody(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("small body was written by the client (%d bytes) — the handler writes it", rec.Body.Len())
+	}
+}
+
+// ── Upstream concurrency gate (upstreamSlots) ──────────────────────────
+// 2026-08-21: a search-page render mounted ~50 follow-state calls at
+// once — ~60 simultaneous TLS handshakes on the Pi Zero W's single core,
+// starving each other's CPU budget and time-storming (the journal's 502
+// bursts). The gate bounds in-flight handshakes; these tests pin the
+// bound, the release paths, and the nil-literal escape hatch.
+
+// countingTransport tracks concurrent RoundTrips and blocks each for a
+// moment so the gate has something to observe.
+type countingTransport struct {
+	cur, max atomic.Int32
+}
+
+// errTransport fails every request — for pinning the gate's release on
+// the error path (a leaked slot there deadlocks the next acquire).
+type errTransport struct{}
+
+func (errTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return nil, errors.New("boom")
+}
+
+func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	n := t.cur.Add(1)
+	for {
+		m := t.max.Load()
+		if n <= m || t.max.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	t.cur.Add(-1)
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader("{}")),
+		Request:    req,
+	}, nil
+}
+
+// gatedTestClient returns a literal Client whose auth is pre-satisfied
+// (expiresAt in the future) and whose upstream gate has the given size.
+func gatedTestClient(slots int, rt http.RoundTripper) *Client {
+	return &Client{
+		phpSessID:     "test",
+		http:          &http.Client{Transport: rt},
+		upstreamSlots: make(chan struct{}, slots),
+		expiresAt:     time.Now().Add(time.Hour),
+	}
+}
+
+func TestUpstreamSlotsBoundConcurrency(t *testing.T) {
+	rt := &countingTransport{}
+	c := gatedTestClient(2, rt)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := c.doGet("https://app-api.pixiv.net/v1/test")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("doGet = %v, want nil", err)
+		}
+	}
+	if got := rt.max.Load(); got > 2 {
+		t.Fatalf("max concurrent upstream calls = %d, want <= 2 (gate leaked)", got)
+	}
+	if got := rt.max.Load(); got == 0 {
+		t.Fatalf("no calls observed — transport never ran")
+	}
+}
+
+func TestUpstreamSlotsReleasedOnTransportError(t *testing.T) {
+	fail := errTransport{}
+	c := gatedTestClient(1, fail)
+
+	// Sequential calls: if the slot leaked after the first error, the
+	// second call would deadlock on the acquire (caught by the test
+	// timeout).
+	for i := 0; i < 3; i++ {
+		if _, err := c.doGet("https://app-api.pixiv.net/v1/test"); err == nil {
+			t.Fatalf("call %d = nil error, want boom", i)
+		}
+	}
+}
+
+func TestUpstreamSlotsNilGateSkipsAcquire(t *testing.T) {
+	// Literal clients (the test pattern everywhere else) have no gate —
+	// doWith must skip the acquire entirely, not panic or block.
+	rt := &countingTransport{}
+	c := &Client{
+		phpSessID: "test",
+		http:      &http.Client{Transport: rt},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	if _, err := c.doGet("https://app-api.pixiv.net/v1/test"); err != nil {
+		t.Fatalf("doGet = %v, want nil", err)
+	}
+}
+
+func TestNewPixivTransportHandshakeHeadroom(t *testing.T) {
+	tr := newPixivTransport()
+	if tr.TLSHandshakeTimeout != 20*time.Second {
+		t.Fatalf("TLSHandshakeTimeout = %v, want 20s", tr.TLSHandshakeTimeout)
 	}
 }
