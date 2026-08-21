@@ -1,6 +1,6 @@
 import { createSignal, createEffect, on, onMount, onCleanup, Show } from "solid-js";
 import { unzip, type Unzipped } from "fflate";
-import { api } from "../api";
+import { api, logEvent } from "../api";
 
 /**
  * Canvas-based ugoira player, mirroring how pixiv.net does it: fetch
@@ -101,7 +101,22 @@ export default function UgoiraPlayer(props: {
   }
 
   function teardown() {
+    // Diagnose the "tapped play, scrolled, it never loaded" class: a
+    // scroll-away while the zip (or poster) is still in flight aborts it
+    // silently — log it so the journal can tell silence from failure.
+    const inFlight = zipAbort !== undefined
+      ? "zip"
+      : staticAbort !== undefined
+        ? "poster"
+        : null;
     loadSeq++;
+    if (inFlight) {
+      logEvent("ugoira", "aborted", {
+        id: props.illustId,
+        stage: inFlight,
+        reason: "teardown",
+      });
+    }
     zipAbort?.abort(); // stop a multi-MB zip download that's no longer needed
     zipAbort = undefined;
     staticAbort?.abort();
@@ -121,7 +136,11 @@ export default function UgoiraPlayer(props: {
     setError(false);
     const controller = new AbortController();
     staticAbort = controller;
-    const timeout = setTimeout(() => controller.abort(), 15_000);
+    // 60s, not 15: the poster rides the same Pi relay as the zip, and
+    // iOS-tailscale stalls were a real failure mode (server journal:
+    // an /api/img request died at exactly 15.002s — a client abort at
+    // its old 15s deadline).
+    const timeout = setTimeout(() => controller.abort(), 60_000);
     try {
       const res = await fetch(
         `/api/img?url=${encodeURIComponent(props.staticUrl)}`,
@@ -135,9 +154,21 @@ export default function UgoiraPlayer(props: {
       drawStatic();
       setPosterReady(true);
     } catch (e) {
-      // Aborts are teardown, not failures — never log or badge them.
-      if (e instanceof DOMException && e.name === "AbortError") return;
+      if (e instanceof Error && e.name === "AbortError") {
+        // Deadline abort (seq still current) = the poster genuinely
+        // stalled — badge it like any other failure. Teardown aborts
+        // (seq bumped) stay silent; teardown() already logged them.
+        if (seq === loadSeq) {
+          logEvent("ugoira", "poster-timeout", { id: props.illustId });
+          setError(true);
+        }
+        return;
+      }
       console.error("ugoira static load failed:", e);
+      logEvent("ugoira", "poster-fail", {
+        id: props.illustId,
+        err: String(e),
+      });
       if (seq === loadSeq) setError(true);
     } finally {
       clearTimeout(timeout);
@@ -150,6 +181,7 @@ export default function UgoiraPlayer(props: {
     const seq = ++loadSeq;
     setStatus("loading");
     setError(false);
+    logEvent("ugoira", "start", { id: props.illustId });
     const controller = new AbortController();
     zipAbort = controller;
     // The zip can be several MB — a stalled connection must not keep
@@ -193,13 +225,32 @@ export default function UgoiraPlayer(props: {
       frames = loaded;
       delays = body.frames.map((f) => Math.max(20, f.delay || 60));
       idx = 0;
+      logEvent("ugoira", "ok", {
+        id: props.illustId,
+        frames: loaded.length,
+      });
       // step() draws frame 0 in the same tick — identical pixels to the
       // poster already on the canvas, so there's no visible jump.
       setStatus("playing");
       step();
     } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") return;
+      if (e instanceof Error && e.name === "AbortError") {
+        // Deadline abort (seq still current) = the zip genuinely stalled
+        // past 120s. Before this check the catch returned silently and
+        // the spinner spun forever — badge it like any other failure.
+        // Teardown aborts (seq bumped) stay silent; teardown() logged them.
+        if (seq === loadSeq) {
+          logEvent("ugoira", "zip-timeout", { id: props.illustId });
+          setStatus("idle");
+          setError(true);
+        }
+        return;
+      }
       console.error("ugoira load failed:", e);
+      logEvent("ugoira", "fail", {
+        id: props.illustId,
+        err: String(e),
+      });
       if (seq === loadSeq) {
         setStatus("idle");
         setError(true);

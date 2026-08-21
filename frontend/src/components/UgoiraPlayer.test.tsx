@@ -27,10 +27,12 @@ vi.mock("../api", () => ({
   api: {
     getUgoiraMeta: vi.fn(),
   },
+  logEvent: vi.fn(),
 }));
 
-import { api } from "../api";
+import { api, logEvent } from "../api";
 const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const mockedLog = logEvent as unknown as ReturnType<typeof vi.fn>;
 
 const META = {
   error: false,
@@ -207,6 +209,7 @@ beforeEach(() => {
   installFetchMock(); // happy path by default
   mockedApi.getUgoiraMeta.mockReset();
   mockedApi.getUgoiraMeta.mockResolvedValue(META);
+  mockedLog.mockReset();
 });
 
 afterEach(() => {
@@ -471,8 +474,66 @@ describe("UgoiraPlayer", () => {
     vi.advanceTimersByTime(120_001);
     await flushMicrotasks();
     expect(container.querySelector(".ugoira-badge")).toBeTruthy();
-    // fetchCalls[0] = static poster (15s abort), [1] = frame zip (120s).
+    // fetchCalls[0] = static poster (60s abort), [1] = frame zip (120s).
     expect(fetchCalls[1].signal!.aborted).toBe(true);
+    // The zip deadline is logged as a real failure (the pre-fix code
+    // spun forever here). The poster's 60s abort is silent BY DESIGN:
+    // the tap superseded it (loadSeq bump), so its late timeout must
+    // not badge a card whose zip load owns the UI.
+    expect(mockedLog).toHaveBeenCalledWith("ugoira", "zip-timeout", {
+      id: 7701,
+    });
+  });
+
+  it("a stalled poster alone is badged at its 60s deadline", async () => {
+    installFetchMock({ stall: true });
+    const { container } = renderPlayer();
+    expect(container.querySelector(".ugoira-badge")).toBeNull();
+    vi.advanceTimersByTime(60_001);
+    await flushMicrotasks();
+    expect(container.querySelector(".ugoira-badge")).toBeTruthy();
+    expect(mockedLog).toHaveBeenCalledWith("ugoira", "poster-timeout", {
+      id: 7701,
+    });
+  });
+
+  it("a successful playback posts start and ok breadcrumbs", async () => {
+    const { container } = renderPlayer();
+    await playThrough(container);
+    expect(mockedLog).toHaveBeenCalledWith("ugoira", "start", {
+      id: 7701,
+    });
+    expect(mockedLog).toHaveBeenCalledWith("ugoira", "ok", {
+      id: 7701,
+      frames: 2,
+    });
+  });
+
+  it("a zip fetch failure posts a fail breadcrumb naming the error", async () => {
+    installFetchMock({ ok: false, status: 502 });
+    const { container } = renderPlayer();
+    await playThroughExpectError(container);
+    expect(mockedLog).toHaveBeenCalledWith(
+      "ugoira",
+      "fail",
+      expect.objectContaining({
+        id: 7701,
+        err: expect.stringContaining("502"),
+      })
+    );
+  });
+
+  it("scroll-away during an in-flight load posts an aborted breadcrumb", async () => {
+    mockedApi.getUgoiraMeta.mockImplementationOnce(() => new Promise(() => {}));
+    const { container } = renderPlayer();
+    tapControl(container);
+    scrollAway();
+    await flushMicrotasks();
+    expect(mockedLog).toHaveBeenCalledWith(
+      "ugoira",
+      "aborted",
+      expect.objectContaining({ id: 7701, stage: "zip" })
+    );
   });
 
   it("scroll-away tears the player down: idle again, frames freed", async () => {

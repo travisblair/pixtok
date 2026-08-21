@@ -459,7 +459,12 @@ export const api = {
         frames: { file: string; delay: number }[];
       };
     }>(`/illust/${illustId}/ugoira_meta`, {
-      signal: AbortSignal.timeout(15_000),
+      // 60s, not 15: the meta hop rides the Pi relay and iOS-tailscale
+      // stalls are a real failure mode on the phone (the server journal
+      // showed an /api/img request dying at exactly 15.002s — a client
+      // abort at its old 15s deadline). The zip already allows 120s;
+      // meta and poster should not give up 8x sooner.
+      signal: AbortSignal.timeout(60_000),
     });
   },
 };

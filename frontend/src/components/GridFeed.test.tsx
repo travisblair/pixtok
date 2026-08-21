@@ -10,6 +10,7 @@ vi.mock("../api", () => ({
     unlike: vi.fn(async () => {}),
     getUgoiraMeta: vi.fn(),
   },
+  logEvent: vi.fn(),
 }));
 
 import { api } from "../api";

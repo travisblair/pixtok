@@ -2418,6 +2418,18 @@ func TestClientLogEndpoint(t *testing.T) {
 		t.Fatalf("bad scope = %d, want 400", rr2.Code)
 	}
 
+	// Ugoira player breadcrumbs are a real scope → 200.
+	reqU := httptest.NewRequest(http.MethodPost, "/api/log",
+		strings.NewReader(`{"session":"abc123","scope":"ugoira","msg":"fail","data":{"id":42,"err":"502"}}`))
+	rrU := httptest.NewRecorder()
+	h.ServeHTTP(rrU, reqU)
+	if rrU.Code != http.StatusOK {
+		t.Fatalf("ugoira scope = %d, want 200", rrU.Code)
+	}
+	if !strings.Contains(buf.String(), "CLIENT [abc123] ugoira: fail") {
+		t.Fatalf("ugoira journal line missing: %q", buf.String())
+	}
+
 	// Malformed JSON → 400.
 	req3 := httptest.NewRequest(http.MethodPost, "/api/log", strings.NewReader("{nope"))
 	rr3 := httptest.NewRecorder()
