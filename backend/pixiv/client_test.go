@@ -485,13 +485,17 @@ func TestIsFollowedSingleFlightCollapsesConcurrentCalls(t *testing.T) {
 }
 
 func TestIsFollowedErrorsAreNotCached(t *testing.T) {
-	rt := &countTransport{status: 429, respBody: `{"error":{}}`}
+	// Non-429 failures keep the old contract: errors are never cached,
+	// so the next natural call retries upstream. (429 is different BY
+	// DESIGN — it trips the follow-state circuit breaker, pinned in
+	// TestFollowStateCooldownAfter429.)
+	rt := &countTransport{status: 500, respBody: `{}`}
 	c := newFollowClient(rt)
 	if _, err := c.IsFollowed("12345"); err == nil {
-		t.Fatal("429 upstream accepted")
+		t.Fatal("500 upstream accepted")
 	}
 	if _, err := c.IsFollowed("12345"); err == nil {
-		t.Fatal("429 upstream accepted on second call")
+		t.Fatal("500 upstream accepted on second call")
 	}
 	if rt.count() != 2 {
 		t.Fatalf("upstream calls = %d, want 2 (errors never cached)", rt.count())
@@ -774,5 +778,66 @@ func TestNewPixivTransportHandshakeHeadroom(t *testing.T) {
 	tr := newPixivTransport()
 	if tr.TLSHandshakeTimeout != 20*time.Second {
 		t.Fatalf("TLSHandshakeTimeout = %v, want 20s", tr.TLSHandshakeTimeout)
+	}
+}
+
+// ── Follow-state 429 circuit breaker ───────────────────────────────────
+
+// statusTransport answers every request with a fixed status code.
+type statusTransport struct {
+	code  int
+	calls atomic.Int32
+}
+
+func (t *statusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.calls.Add(1)
+	return &http.Response{
+		StatusCode: t.code,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       http.NoBody,
+		Request:    req,
+	}, nil
+}
+
+func TestFollowStateCooldownAfter429(t *testing.T) {
+	rt := &statusTransport{code: 429}
+	c := &Client{
+		phpSessID: "test",
+		http:      &http.Client{Transport: rt},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+
+	// First call goes upstream, hits 429, trips the breaker.
+	if _, err := c.fetchFollowState("123"); err == nil {
+		t.Fatal("want error for 429")
+	}
+	if rt.calls.Load() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", rt.calls.Load())
+	}
+
+	// While the breaker is hot, further calls MUST NOT touch upstream —
+	// a hot limiter is never retried, it is left to cool.
+	for i := 0; i < 3; i++ {
+		if _, err := c.fetchFollowState("456"); err == nil {
+			t.Fatal("want cooldown error")
+		}
+	}
+	if rt.calls.Load() != 1 {
+		t.Fatalf("upstream calls after 429 = %d, want still 1 (breaker leaked)", rt.calls.Load())
+	}
+}
+
+func TestFollowStateCooldownExpiry(t *testing.T) {
+	rt := &statusTransport{code: 200}
+	c := &Client{
+		phpSessID: "test",
+		http:      &http.Client{Transport: rt},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	// Pre-seed an EXPIRED cooldown — the call must go upstream again.
+	c.followCooldown.Store(time.Now().Add(-time.Second).UnixNano())
+	_, _ = c.fetchFollowState("789")
+	if rt.calls.Load() != 1 {
+		t.Fatalf("upstream calls after cooldown expiry = %d, want 1", rt.calls.Load())
 	}
 }

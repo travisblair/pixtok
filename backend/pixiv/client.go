@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -123,6 +124,14 @@ type Client struct {
 	// later; the browser side already carries its own aborts. nil
 	// disables the gate (test clients built as literals).
 	upstreamSlots chan struct{}
+	// followCooldown is a circuit breaker for the follow-state firehose:
+	// once pixiv's app-API answers a /v1/user/detail call with 429 (Rate
+	// Limit), NO follow-state call goes upstream until the cooldown
+	// passes. Retrying a hot limiter only adds pressure and draws
+	// attention; the buttons stay "unknown" while it cools. Unix nanos,
+	// 0 = not cooling. (Bookmarks/related/etc. stay unbroken — they are
+	// single deliberate calls, not a per-render firehose.)
+	followCooldown atomic.Int64
 	// followState caches IsFollowed results (TTL + single-flight) so a
 	// strip feed's ~30 concurrent per-card calls collapse to one
 	// upstream request per artist per window — see followstate.go.
@@ -134,6 +143,12 @@ type Client struct {
 // page loads promptly, low enough that the Pi Zero W never melts on
 // concurrent ECDHE handshakes (the 502-storm root cause, 2026-08-21).
 const maxUpstreamConcurrency = 6
+
+// followCooldownDuration is how long the follow-state circuit breaker
+// stays open after an upstream 429. Long enough for pixiv's per-window
+// limiter to cool, short enough that a later render repopulates the
+// buttons once it has.
+const followCooldownDuration = 5 * time.Minute
 
 func NewClient() (*Client, error) {
 	rt := os.Getenv("PIXIV_REFRESH_TOKEN")
@@ -163,9 +178,12 @@ func NewClient() (*Client, error) {
 		},
 		upstreamSlots: make(chan struct{}, maxUpstreamConcurrency),
 		// Follow state changes rarely and the frontend asks constantly —
-		// 5 minutes is short enough to feel live, long enough to keep
-		// the per-card fetch bursts off pixiv's rate limiter.
-		followState: newFollowStateCache(5 * time.Minute),
+		// 30 minutes keeps the per-card fetch bursts off pixiv's rate
+		// limiter while still feeling live enough for a browse-only user.
+		// (Was 5 minutes; the app-API 429 storms of 2026-08-21 showed
+		// even a throttled 6-at-a-time stream out-runs the limiter when
+		// every render re-asks for ~50 artists.)
+		followState: newFollowStateCache(30 * time.Minute),
 	}
 
 	// Also try loading PHPSESSID and the csrf token for web AJAX — env
@@ -1342,6 +1360,11 @@ func (c *Client) IsFollowed(userID string) (bool, error) {
 }
 
 func (c *Client) fetchFollowState(userID string) (bool, error) {
+	// Circuit breaker: see followCooldown on Client. While cooling, the
+	// answer is "unknown" without touching pixiv.
+	if until := c.followCooldown.Load(); until != 0 && time.Now().UnixNano() < until {
+		return false, fmt.Errorf("follow state cooling down after upstream 429")
+	}
 	req, err := http.NewRequest("GET", baseURL+"/v1/user/detail?user_id="+url.QueryEscape(userID), nil)
 	if err != nil {
 		return false, err
@@ -1352,6 +1375,10 @@ func (c *Client) fetchFollowState(userID string) (bool, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		if resp.StatusCode == 429 {
+			// Trip the breaker — stop asking until the limiter cools.
+			c.followCooldown.Store(time.Now().Add(followCooldownDuration).UnixNano())
+		}
 		return false, fmt.Errorf("user detail returned %d", resp.StatusCode)
 	}
 	var out struct {
