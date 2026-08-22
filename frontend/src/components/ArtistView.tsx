@@ -147,10 +147,12 @@ export default function ArtistView(props: {
           ← Back
         </button>
       </div>
-      <div class="artist-name-badge overlay-pill" aria-live="polite">
-        {props.userName}
+      <div class="artist-header-center">
+        <div class="artist-name-badge overlay-pill" aria-live="polite">
+          {props.userName}
+        </div>
+        <FollowButton userId={props.userId} label={props.userName} lazy={false} />
       </div>
-      <FollowButton userId={props.userId} label={props.userName} lazy={false} />
     </div>
   );
 }

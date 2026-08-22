@@ -551,13 +551,9 @@
   cursor: pointer;
 }
 
-/* Artist name on the ArtistView overlay */
+/* Artist name on the ArtistView overlay — a flex child of the
+   centered header row (no absolute positioning of its own). */
 .artist-name-badge {
-  position: absolute;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 2;
   padding: 6px 14px;
   font-size: 0.85rem;
   max-width: 60%;
@@ -566,13 +562,18 @@
   text-overflow: ellipsis;
 }
 
-/* Follow toggle in the artist header — top-right, mirroring the layer
-   convention (back top-left, badges top-center, counters top-right). */
-.artist-view > .artist-follow {
+/* Artist name + follow toggle share one centered row in the header
+   (the pill and the button sit side by side, centered together). */
+.artist-header-center {
   position: absolute;
   top: 14px;
-  right: 16px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 80%;
 }
 
 /* Related-view push navigation: slide in from the RIGHT (iOS push).
