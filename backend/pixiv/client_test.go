@@ -841,3 +841,74 @@ func TestFollowStateCooldownExpiry(t *testing.T) {
 		t.Fatalf("upstream calls after cooldown expiry = %d, want 1", rt.calls.Load())
 	}
 }
+
+// ── Web AJAX rides the upstream gate (GPT review finding 2026-08-21) ──
+
+func TestWebGetRidesUpstreamGate(t *testing.T) {
+	rt := &countingTransport{}
+	c := gatedTestClient(1, rt)
+	c.phpSessID = "12345_abc"
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := c.webGet("https://www.pixiv.net/ajax/test")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("webGet = %v, want nil", err)
+		}
+	}
+	if got := rt.max.Load(); got > 1 {
+		t.Fatalf("max concurrent webGet = %d, want <= 1 (gate bypassed)", got)
+	}
+}
+
+// uaRecordingTransport captures the User-Agent the caller actually sent.
+type uaRecordingTransport struct {
+	ua string
+}
+
+func (t *uaRecordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.ua = req.Header.Get("User-Agent")
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader("{}")),
+		Request:    req,
+	}, nil
+}
+
+func TestDoWithPreservesCallerUserAgent(t *testing.T) {
+	rt := &uaRecordingTransport{}
+	c := &Client{
+		phpSessID: "12345_abc",
+		http:      &http.Client{Transport: rt},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+
+	// Web AJAX calls pick their own browser fingerprint — doWith must
+	// NOT clobber it with the app UA (pixiv's web surface walls off
+	// app-looking clients).
+	if _, err := c.webGet("https://www.pixiv.net/ajax/test"); err != nil {
+		t.Fatal(err)
+	}
+	if rt.ua != webUA {
+		t.Fatalf("webGet UA = %q, want webUA %q (clobbered by doWith)", rt.ua, webUA)
+	}
+
+	// Callers that set no UA still get the default app UA.
+	if _, err := c.doGet("https://app-api.pixiv.net/v1/test"); err != nil {
+		t.Fatal(err)
+	}
+	if rt.ua != userAgent {
+		t.Fatalf("doGet UA = %q, want default userAgent %q", rt.ua, userAgent)
+	}
+}

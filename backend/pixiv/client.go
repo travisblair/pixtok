@@ -353,13 +353,14 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 
 // doWith attaches Pixiv auth (only to the Pixiv app API — never leak the
 // bearer token to arbitrary hosts) and sends via the given client. Proxy
-// endpoints pass a redirect-validating client here.
+// endpoints pass a redirect-validating client here. ensureToken runs
+// ONLY on the app-API path: web-AJAX calls ride the web session, not the
+// app token, and must never trigger a refresh (login capture included).
 func (c *Client) doWith(cl *http.Client, req *http.Request) (*http.Response, error) {
-	if err := c.ensureToken(); err != nil {
-		return nil, err
-	}
-
 	if req.URL.Scheme == "https" && req.URL.Hostname() == "app-api.pixiv.net" {
+		if err := c.ensureToken(); err != nil {
+			return nil, err
+		}
 		c.mu.Lock()
 		token := c.accessToken
 		c.mu.Unlock()
@@ -367,7 +368,13 @@ func (c *Client) doWith(cl *http.Client, req *http.Request) (*http.Response, err
 		req.Header.Set("app-os", "ios")
 		req.Header.Set("app-os-version", "14.6")
 	}
-	req.Header.Set("User-Agent", userAgent)
+	// Default UA only when the caller hasn't chosen one: the web AJAX
+	// surface (webGet, street, ugoira_meta, bookmarks, recommend) sends
+	// webUA — a browser fingerprint pixiv's web endpoints check — and
+	// clobbering it with the app UA would wall those calls off.
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
 
 	// Bounded upstream concurrency (see upstreamSlots on Client). The
 	// slot is held only until the response HEADERS arrive — the heavy,
@@ -549,7 +556,7 @@ func (c *Client) webGet(u string) ([]byte, error) {
 	req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
 	req.Header.Set("Referer", "https://www.pixiv.net/")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.doWith(c.http, req)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +662,7 @@ func (c *Client) fetchCsrfToken(phpsessid string) (string, error) {
 	req.Header.Set("User-Agent", webUA)
 	req.Header.Set("Referer", "https://www.pixiv.net/")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.doWith(c.http, req)
 	if err != nil {
 		return "", fmt.Errorf("fetch profile page for csrf token: %w", err)
 	}
@@ -900,7 +907,7 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 		req.Header.Set("Origin", "https://www.pixiv.net")
 		req.Header.Set("Accept", "application/json")
 
-		resp, err := c.http.Do(req)
+		resp, err := c.doWith(c.http, req)
 		if err != nil {
 			return nil, err
 		}
@@ -972,7 +979,7 @@ func (c *Client) GetUgoiraMeta(illustID string) ([]byte, error) {
 	req.Header.Set("User-Agent", webUA)
 	req.Header.Set("Referer", fmt.Sprintf("https://www.pixiv.net/en/artworks/%s", illustID))
 
-	resp, err := c.http.Do(req)
+	resp, err := c.doWith(c.http, req)
 	if err != nil {
 		return nil, err
 	}
@@ -1134,7 +1141,7 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
 		req.Header.Set("Accept", "application/json")
 
-		resp, err := c.http.Do(req)
+		resp, err := c.doWith(c.http, req)
 		if err != nil {
 			return nil, err
 		}
@@ -1183,7 +1190,7 @@ func (c *Client) GetBookmarkTags() ([]byte, error) {
 		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
 		req.Header.Set("Accept", "application/json")
 
-		resp, err := c.http.Do(req)
+		resp, err := c.doWith(c.http, req)
 		if err != nil {
 			return nil, err
 		}
@@ -1286,7 +1293,7 @@ func (c *Client) GetWorkRecommend(illustID string) ([]byte, error) {
 	req.Header.Set("User-Agent", webUA)
 	req.Header.Set("Referer", "https://www.pixiv.net/")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.doWith(c.http, req)
 	if err != nil {
 		return nil, err
 	}

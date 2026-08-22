@@ -268,13 +268,13 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// cacheConfigFromEnv reads the image-cache sizing knobs with Mac-sized
-// defaults. The Pi Zero deploy runs 64MB/300 entries/6h (its whole RAM is
-// 512MB — the default budget alone would starve it). Malformed values
-// log and fall back: cache sizing is performance, not security — never
-// block boot on it.
+// cacheConfigFromEnv reads the image-cache sizing knobs with Pi-safe
+// defaults (the Pi Zero W's whole RAM is 512MB — Mac-sized defaults
+// would starve it if a deploy forgot its .env overrides). Bigger
+// machines opt UP via env. Malformed values log and fall back: cache
+// sizing is performance, not security — never block boot on it.
 func cacheConfigFromEnv() (time.Duration, int, int64) {
-	ttl := 24 * time.Hour
+	ttl := 6 * time.Hour
 	if v := loadEnvKey("PIXTOK_CACHE_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			ttl = d
@@ -282,7 +282,7 @@ func cacheConfigFromEnv() (time.Duration, int, int64) {
 			log.Printf("WARNING: bad PIXTOK_CACHE_TTL %q — using default", v)
 		}
 	}
-	entries := 2000
+	entries := 300
 	if v := loadEnvKey("PIXTOK_CACHE_ENTRIES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			entries = n
@@ -290,7 +290,7 @@ func cacheConfigFromEnv() (time.Duration, int, int64) {
 			log.Printf("WARNING: bad PIXTOK_CACHE_ENTRIES %q — using default", v)
 		}
 	}
-	maxBytes := int64(512 << 20)
+	maxBytes := int64(64 << 20)
 	if v := loadEnvKey("PIXTOK_CACHE_BYTES"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			maxBytes = n
