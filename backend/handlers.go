@@ -508,6 +508,14 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		}
 		followed, err := api.IsFollowed(id)
 		if err != nil {
+			if errors.Is(err, pixiv.ErrFollowCooldown) {
+				// Circuit breaker open after an upstream 429: "unknown"
+				// is the honest answer, not an error. A null followed
+				// hides the button client-side with no toast and no
+				// journal ERROR flood.
+				writeJSON(w, map[string]any{"followed": nil})
+				return
+			}
 			log.Printf("ERROR follow state: %v", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
@@ -806,6 +814,13 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 
 		body, contentType, err := api.ProxyImageStream(imgURL, w)
 		if err != nil {
+			if errors.Is(err, pixiv.ErrStreamCommitted) {
+				// The response already started (headers + bytes out):
+				// http.Error would only append garbage to a committed
+				// body. Log and let the client see the truncated stream.
+				log.Printf("WARNING img stream interrupted: %v", err)
+				return
+			}
 			log.Printf("ERROR img proxy: %v", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return

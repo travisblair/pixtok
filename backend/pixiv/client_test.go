@@ -912,3 +912,71 @@ func TestDoWithPreservesCallerUserAgent(t *testing.T) {
 		t.Fatalf("doGet UA = %q, want default userAgent %q", rt.ua, userAgent)
 	}
 }
+
+// ── SetFollow invalidates the follow-state cache (GLM finding 2026-08-21) ──
+
+func TestSetFollowInvalidatesFollowStateCache(t *testing.T) {
+	rt := &countTransport{status: 200, respBody: `{"user":{"is_followed":true}}`}
+	c := newFollowClient(rt)
+
+	if v, err := c.IsFollowed("12345"); err != nil || !v {
+		t.Fatalf("first IsFollowed = %v, %v", v, err)
+	}
+	if err := c.SetFollow("12345", "public", false); err != nil {
+		t.Fatalf("SetFollow: %v", err)
+	}
+	// The toggle invalidated the cache — the next read must go upstream
+	// again instead of serving the stale cached value.
+	if v, err := c.IsFollowed("12345"); err != nil || !v {
+		t.Fatalf("second IsFollowed = %v, %v", v, err)
+	}
+	// 1 detail + 1 follow/delete + 1 detail after invalidation.
+	if rt.count() != 3 {
+		t.Fatalf("upstream calls = %d, want 3 (cache not invalidated)", rt.count())
+	}
+}
+
+// blockingTransport holds the first request open until released — lets a
+// test invalidate while a fetch is mid-flight.
+type blockingTransport struct {
+	started  chan struct{}
+	release  chan struct{}
+	respBody string
+}
+
+func (t *blockingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	close(t.started)
+	<-t.release
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(t.respBody)),
+		Request:    req,
+	}, nil
+}
+
+func TestFollowStateInvalidateDropsStaleInflight(t *testing.T) {
+	bt := &blockingTransport{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		respBody: `{"user":{"is_followed":true}}`,
+	}
+	c := newFollowClient(bt)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.IsFollowed("12345")
+		close(done)
+	}()
+	<-bt.started
+	// User toggles while the detail fetch is in flight.
+	c.followState.invalidate("12345")
+	close(bt.release)
+	<-done
+
+	// The in-flight result predates the toggle — it must NOT have been
+	// stored (its epoch was bumped).
+	if _, ok := c.followState.items["12345"]; ok {
+		t.Fatal("stale in-flight value resurrected after invalidate")
+	}
+}

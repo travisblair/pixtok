@@ -2438,3 +2438,45 @@ func TestClientLogEndpoint(t *testing.T) {
 		t.Fatalf("bad json = %d, want 400", rr3.Code)
 	}
 }
+
+func TestFollowStateCooldownAnswersNull(t *testing.T) {
+	// The 429 circuit breaker is "unknown", not an error: the handler
+	// must answer 200 + null (button hides, no toast, no journal flood)
+	// instead of manufacturing a 502.
+	f := &fakeAPI{isFollowedFn: func(string) (bool, error) {
+		return false, pixiv.ErrFollowCooldown
+	}}
+	h := newServerBase(f, newImageCache(time.Hour, 10, 512<<20))
+	req := httptest.NewRequest(http.MethodGet, "/api/user/123/followed", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("cooldown status = %d, want 200", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"followed":null`) {
+		t.Fatalf("cooldown body = %q, want null followed", rr.Body.String())
+	}
+}
+
+func TestImgStreamCommittedErrorLogsWithoutErroring(t *testing.T) {
+	// A mid-stream failure (response already started) must be logged,
+	// not http.Error'd — a status write to a committed response only
+	// appends garbage to a truncated body.
+	f := &fakeAPI{proxyImageStreamFn: func(url string, w http.ResponseWriter) ([]byte, string, error) {
+		// Simulate: headers + bytes already flushed, then the stream
+		// dies.
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("partial"))
+		return nil, "", fmt.Errorf("%w: stream image body: broken pipe", pixiv.ErrStreamCommitted)
+	}}
+	h := newServerBase(f, newImageCache(time.Hour, 10, 512<<20))
+	req := httptest.NewRequest(http.MethodGet, "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg-master%2Fx.jpg", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("stream-committed status = %d, want 200 (not 502)", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), "upstream error") {
+		t.Fatalf("body = %q, must not contain http.Error text", rr.Body.String())
+	}
+}

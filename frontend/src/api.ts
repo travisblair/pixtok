@@ -383,7 +383,9 @@ export const api = {
   },
 
   getFollowed(userId: number) {
-    return request<{ followed: boolean }>(`/user/${userId}/followed`, {
+    // followed is null while the backend's 429 circuit breaker is
+    // cooling: "unknown" is not an error — the button just stays hidden.
+    return request<{ followed: boolean | null }>(`/user/${userId}/followed`, {
       signal: AbortSignal.timeout(15_000),
     });
   },

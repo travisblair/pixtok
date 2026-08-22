@@ -46,7 +46,7 @@ These rules are load-bearing. Do not weaken them.
 | Attacker | Surface | Mitigation |
 | --- | --- | --- |
 | Internet attacker at the public URL | Gate password, login proxy | bcrypt + HMAC gate cookie (HttpOnly, SameSite=Lax, Secure on HTTPS), bounded concurrent attempts, progressive failure delay with 10-min decay |
-| Internet attacker, sustained | Availability (RAM/CPU) | Two-tier rate limiter (per-source buckets + global ceiling; X-Forwarded-For trusted only from loopback proxies), image-fetch semaphore (4 concurrent, 429 beyond), bounded image cache |
+| Internet attacker, sustained | Availability (RAM/CPU) | Two-tier rate limiter (per-source buckets + global ceiling; X-Forwarded-For trusted only from loopback proxies), image-fetch semaphore (8 concurrent, 429 beyond), bounded image cache |
 | LAN attacker | Backend port, Vite dev server | API-key gate, loopback-only backend, Host allowlist in Vite |
 | Malicious webpage in the user's browser | CSRF against mutations | POST-only mutations, SameSite=Lax, JSON content-type enforcement on the gate |
 | Malicious Pixiv content (titles, tags, URLs) | XSS, open proxy abuse | No raw-HTML rendering in the frontend; server-side host allowlists |
@@ -82,7 +82,7 @@ These rules are load-bearing. Do not weaken them.
   client source comes from `X-Forwarded-For` ONLY when the request
   arrives from a loopback peer (Vite/serve/Funnel) — direct clients are
   keyed by their remote address, and their forged XFF is ignored.
-- **Image fetches are concurrency-bounded** (4 in flight; saturated
+- **Image fetches are concurrency-bounded** (8 in flight; saturated
   requests get 429 + Retry-After) and bodies over the 5 MB cache
   ceiling stream without being fully buffered.
 - **CI: deliberately omitted.** The suite (`go test -race`, vitest,

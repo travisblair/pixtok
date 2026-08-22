@@ -150,6 +150,18 @@ const maxUpstreamConcurrency = 6
 // buttons once it has.
 const followCooldownDuration = 5 * time.Minute
 
+// ErrFollowCooldown marks a follow-state answer of "unknown" during the
+// 429 circuit-breaker window. It is NOT an upstream failure: the
+// handler answers 200 with a null followed field so the button hides
+// without an error toast or journal noise.
+var ErrFollowCooldown = errors.New("follow state cooling down after upstream 429")
+
+// ErrStreamCommitted marks an image-proxy failure that happened AFTER
+// the response had already started (headers + bytes flushed to the
+// client). The caller must log, not http.Error — a status write to a
+// committed response only appends garbage to a truncated body.
+var ErrStreamCommitted = errors.New("image response already started")
+
 func NewClient() (*Client, error) {
 	rt := os.Getenv("PIXIV_REFRESH_TOKEN")
 	if rt == "" {
@@ -1338,6 +1350,12 @@ func (c *Client) SetFollow(userID string, restrict string, follow bool) error {
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("follow %s returned %d", action, resp.StatusCode)
 	}
+	// The user's own toggle is authoritative: drop the cached state so
+	// every other FollowButton for this artist re-fetches immediately
+	// instead of showing the pre-toggle value for the rest of the TTL.
+	if c.followState != nil {
+		c.followState.invalidate(userID)
+	}
 	return nil
 }
 
@@ -1368,9 +1386,11 @@ func (c *Client) IsFollowed(userID string) (bool, error) {
 
 func (c *Client) fetchFollowState(userID string) (bool, error) {
 	// Circuit breaker: see followCooldown on Client. While cooling, the
-	// answer is "unknown" without touching pixiv.
+	// answer is "unknown" without touching pixiv — surfaced as
+	// ErrFollowCooldown so the handler can answer 200-null instead of
+	// manufacturing a 502.
 	if until := c.followCooldown.Load(); until != 0 && time.Now().UnixNano() < until {
-		return false, fmt.Errorf("follow state cooling down after upstream 429")
+		return false, ErrFollowCooldown
 	}
 	req, err := http.NewRequest("GET", baseURL+"/v1/user/detail?user_id="+url.QueryEscape(userID), nil)
 	if err != nil {
@@ -1410,8 +1430,12 @@ const maxCacheableBody = 5 << 20
 // caller can cache them — the caller writes the body and sets headers.
 // Oversized responses stream directly to w (headers set here, since the
 // first body byte must not precede them) and return a nil body — they
-// are never cached. Every error path fires before any header or byte is
-// written, so callers can still answer with a clean error status.
+// are never cached. Error contract: on the SMALL-body path every error
+// fires before any header or byte is written, so callers can still
+// answer with a clean error status. On the STREAMING path a failure
+// (client disconnect, slow Pi) can occur after the response already
+// started — those errors wrap ErrStreamCommitted so the caller logs
+// instead of http.Error-ing a committed response.
 func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte, string, error) {
 	// img URLs come from the CLIENT — enforce the CDN allowlist so
 	// /api/img can't be used as an open proxy into the LAN.
@@ -1478,14 +1502,14 @@ func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte,
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Header().Set("X-Cache", "MISS")
 	if _, err := w.Write(head); err != nil {
-		return nil, "", fmt.Errorf("write image body: %w", err)
+		return nil, "", fmt.Errorf("%w: write image body: %v", ErrStreamCommitted, err)
 	}
 	remaining := int64(maxImageBody - maxCacheableBody - 1)
 	if remaining < 0 {
 		remaining = 0
 	}
 	if _, err := io.Copy(w, io.LimitReader(resp.Body, remaining)); err != nil {
-		return nil, "", fmt.Errorf("stream image body: %w", err)
+		return nil, "", fmt.Errorf("%w: stream image body: %v", ErrStreamCommitted, err)
 	}
 	return nil, contentType, nil
 }
