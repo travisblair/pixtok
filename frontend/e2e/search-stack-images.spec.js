@@ -54,3 +54,43 @@ test("closing a stack over search restores the search images", async ({
     .poll(() => firstCardImg.getAttribute("src"))
     .toMatch(/\/api\/img/);
 });
+
+test("closing a stack over search with the ✕ restores the search images", async ({
+  page,
+}) => {
+  // The ✕ is closeAllStacks — a different code path than the back
+  // pill. Regression: its layer-key filter used !startsWith("s"),
+  // which also matched "search", removing the open search layer from
+  // the open order while it stayed rendered — topZ fell to 0 and every
+  // search image stayed suppressed until a page reload.
+  await setupApiMocks(page, { relatedBatch: makeFeedOf(8, 3001) });
+  await gotoApp(page);
+  await openSearch(page);
+  await runQuery(page, "summer swimsuit");
+
+  const firstCardImg = page
+    .locator(".search-screen .feed-card")
+    .first()
+    .locator("img");
+
+  await expect
+    .poll(() => firstCardImg.getAttribute("src"))
+    .toMatch(/\/api\/img/);
+
+  await page
+    .locator(".search-screen .feed-card")
+    .first()
+    .locator(".card-overlay")
+    .click();
+  await expect(page.locator(".related-view")).toHaveCount(1);
+
+  // Close via the ✕ (close-all).
+  await page.locator(".related-view .close-all-btn").click();
+  await expect(page.locator(".related-view")).toHaveCount(0);
+
+  // The search feed must still own the top of the stack — images
+  // re-load instead of staying suppressed.
+  await expect
+    .poll(() => firstCardImg.getAttribute("src"))
+    .toMatch(/\/api\/img/);
+});

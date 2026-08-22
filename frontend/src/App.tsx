@@ -375,7 +375,12 @@ export default function App() {
     // old code silently persisted artist:null here — a reload dropped
     // the layer you had just landed back on.
     logEvent("layers", "closeAll", { depth: stack().length });
-    setLayerSeq(layerSeq().filter((k) => !k.startsWith("s")));
+    // WHITELIST the persistent layers. The previous prefix filter
+    // (!k.startsWith("s")) also matched "search" — the ✕ removed the
+    // open search layer from the open order while it stayed rendered,
+    // topZ fell to 0 and every search image stayed suppressed (the
+    // black-search-page-after-✕ bug; only a reload restored it).
+    setLayerSeq(layerSeq().filter((k) => k === "search" || k === "artist"));
     persistNow({ stack: [], modalOpen: false });
     setStack([]);
     setModalOpen(false);
