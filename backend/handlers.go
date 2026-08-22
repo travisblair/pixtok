@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/travisblair/pixtok/pixiv"
@@ -55,13 +56,23 @@ type pixivAPI interface {
 // finding): the rate limiter caps request COUNT, not in-flight fetches —
 // every concurrent cache miss holds an outbound connection and buffers
 // bytes, and on the Pi's 96MiB memory budget unbounded misses are an OOM
-// vector. Saturated → 429 + Retry-After. Misses only: cache hits never
-// consume a slot. Sized from a live boot: a grid render fires ~9
-// concurrent misses at once, and the 429'd cards self-heal via the
-// frontend's retry button.
+// vector. Saturation QUEUES instead of failing fast: a grid/search
+// render fires ~35 image fetches at once, and the old 429-on-saturation
+// failed ~27 of them permanently (broken images until a manual retry
+// tap). Waiters block for a free slot and complete late — slow images,
+// not broken ones. Misses only: cache hits never consume a slot.
 const maxConcurrentImageFetches = 8
 
-var imgFetchSlots = make(chan struct{}, maxConcurrentImageFetches)
+// maxImgQueueWaiters caps how many requests may BLOCK waiting for an
+// image slot. Beyond it requests still fail fast (429 + Retry-After) so
+// a pathological burst can't accumulate unbounded waiting goroutines on
+// the Pi.
+const maxImgQueueWaiters = 24
+
+var (
+	imgFetchSlots   = make(chan struct{}, maxConcurrentImageFetches)
+	imgQueueWaiters atomic.Int64
+)
 
 // sanitizeLogText strips control characters from client-supplied
 // journal text so /api/log payloads can't inject or forge log lines.
@@ -787,6 +798,9 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		// (observed live: failures pinned at exactly 15.0s). The image
 		// path gets its own bounded deadline — the tarpit pattern:
 		// ResponseController overrides the global for this response only.
+		// Set here for the CACHE-HIT path, and again after the slot
+		// acquire for misses: time spent QUEUED must not eat the 120s
+		// transfer budget.
 		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second)); err != nil {
 			log.Printf("WARNING img write deadline: %v", err)
 		}
@@ -800,16 +814,35 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			return
 		}
 
-		// Concurrency bound: only misses consume a slot (see
-		// imgFetchSlots above); saturation answers 429 and the caller
-		// retries a beat later.
+		// Concurrency bound with a QUEUE (see imgFetchSlots above): waiters
+		// block for a free slot instead of failing fast. The client's own
+		// disconnect cancels the wait. Overflow past the waiter cap still
+		// answers 429 + Retry-After.
+		acquired := false
 		select {
 		case imgFetchSlots <- struct{}{}:
-			defer func() { <-imgFetchSlots }()
+			acquired = true
 		default:
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "image fetch saturated", http.StatusTooManyRequests)
-			return
+		}
+		if !acquired {
+			if imgQueueWaiters.Add(1) > maxImgQueueWaiters {
+				imgQueueWaiters.Add(-1)
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "image fetch saturated", http.StatusTooManyRequests)
+				return
+			}
+			select {
+			case imgFetchSlots <- struct{}{}:
+			case <-r.Context().Done():
+				imgQueueWaiters.Add(-1)
+				return
+			}
+			imgQueueWaiters.Add(-1)
+		}
+		defer func() { <-imgFetchSlots }()
+
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second)); err != nil {
+			log.Printf("WARNING img write deadline: %v", err)
 		}
 
 		body, contentType, err := api.ProxyImageStream(imgURL, w)

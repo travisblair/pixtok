@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -337,12 +338,17 @@ func TestImgProxyCache(t *testing.T) {
 	}
 }
 
-// The image semaphore bounds CONCURRENT fetches: the (cap+1)th
-// simultaneous miss must 429, not queue up another outbound request +
-// buffer.
-func TestImgProxySaturation429(t *testing.T) {
+// The image semaphore bounds CONCURRENT fetches; saturation QUEUES
+// (bounded) instead of failing fast so big renders complete late rather
+// than breaking images.
+func TestImgProxyQueuesOnSaturation(t *testing.T) {
+	// Saturation must QUEUE, not fail fast: a grid/search render fires
+	// ~35 image fetches at once; the old 429-on-saturation broke ~27 of
+	// them permanently. Waiters block for a free slot and complete.
 	release := make(chan struct{})
-	entered := make(chan struct{}, maxConcurrentImageFetches+1)
+	extra := 3
+	total := maxConcurrentImageFetches + extra
+	entered := make(chan struct{}, total)
 	f := &fakeAPI{
 		proxyImageStreamFn: func(url string, w http.ResponseWriter) ([]byte, string, error) {
 			entered <- struct{}{}
@@ -352,8 +358,8 @@ func TestImgProxySaturation429(t *testing.T) {
 	}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	done := make(chan *httptest.ResponseRecorder, maxConcurrentImageFetches)
-	for i := 0; i < maxConcurrentImageFetches; i++ {
+	done := make(chan *httptest.ResponseRecorder, total)
+	for i := 0; i < total; i++ {
 		go func(n int) {
 			req := httptest.NewRequest(http.MethodGet,
 				fmt.Sprintf("/api/img?url=https://i.pximg.net/%d.jpg", n), nil)
@@ -363,7 +369,7 @@ func TestImgProxySaturation429(t *testing.T) {
 			done <- rec
 		}(i)
 	}
-	// Wait until all the fetches are in flight.
+	// Wait until the first 8 fetches are in flight (the rest are queued).
 	for i := 0; i < maxConcurrentImageFetches; i++ {
 		select {
 		case <-entered:
@@ -372,17 +378,155 @@ func TestImgProxySaturation429(t *testing.T) {
 		}
 	}
 
-	rr := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/extra.jpg", "secret")
+	close(release)
+	for i := 0; i < total; i++ {
+		rec := <-done
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d = %d, want 200 (queued requests must complete, not 429)", i, rec.Code)
+		}
+	}
+}
+
+func TestImgProxyOverflowBeyondWaiterCap(t *testing.T) {
+	// The waiter queue is BOUNDED: past maxImgQueueWaiters, requests
+	// still fail fast so a pathological burst can't pile up goroutines.
+	release := make(chan struct{})
+	// Sized for every request that will ever enter the fake (8 slots +
+	// the 24 queued) — after release, sends must never block on a
+	// channel with no reader left.
+	entered := make(chan struct{}, maxConcurrentImageFetches+maxImgQueueWaiters)
+	f := &fakeAPI{
+		proxyImageStreamFn: func(url string, w http.ResponseWriter) ([]byte, string, error) {
+			entered <- struct{}{}
+			<-release
+			return []byte("img"), "image/jpeg", nil
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+
+	// Fill all 8 slots.
+	first := make(chan *httptest.ResponseRecorder, maxConcurrentImageFetches)
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		go func(n int) {
+			req := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/api/img?url=https://i.pximg.net/first%d.jpg", n), nil)
+			req.Header.Set("X-Api-Key", "secret")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			first <- rec
+		}(i)
+	}
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("fetches did not all enter within 5s")
+		}
+	}
+
+	// Fill the waiter queue to the cap.
+	queued := make(chan *httptest.ResponseRecorder, maxImgQueueWaiters)
+	for i := 0; i < maxImgQueueWaiters; i++ {
+		go func(n int) {
+			req := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/api/img?url=https://i.pximg.net/queued%d.jpg", n), nil)
+			req.Header.Set("X-Api-Key", "secret")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			queued <- rec
+		}(i)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for imgQueueWaiters.Load() < maxImgQueueWaiters {
+		if time.Now().After(deadline) {
+			t.Fatalf("waiters = %d, want %d queued", imgQueueWaiters.Load(), maxImgQueueWaiters)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// One more: past the cap → fail fast with 429 + Retry-After.
+	rr := doReq(t, h, http.MethodGet, "/api/img?url=https://i.pximg.net/overflow.jpg", "secret")
 	if rr.Code != http.StatusTooManyRequests {
-		t.Fatalf("(cap+1)th concurrent miss = %d, want 429", rr.Code)
+		t.Fatalf("overflow request = %d, want 429", rr.Code)
 	}
 	if rr.Header().Get("Retry-After") == "" {
 		t.Error("429 without Retry-After")
 	}
 
+	// Drain everything so no goroutine leaks past the test.
 	close(release)
 	for i := 0; i < maxConcurrentImageFetches; i++ {
-		<-done
+		<-first
+	}
+	for i := 0; i < maxImgQueueWaiters; i++ {
+		<-queued
+	}
+}
+
+func TestImgProxyQueuedRequestCanceledOnDisconnect(t *testing.T) {
+	// A client that disconnects while queued must release its waiter
+	// slot without leaking (and without holding an image slot).
+	release := make(chan struct{})
+	entered := make(chan struct{}, maxConcurrentImageFetches)
+	f := &fakeAPI{
+		proxyImageStreamFn: func(url string, w http.ResponseWriter) ([]byte, string, error) {
+			entered <- struct{}{}
+			<-release
+			return []byte("img"), "image/jpeg", nil
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+
+	first := make(chan struct{}, maxConcurrentImageFetches)
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		go func(n int) {
+			req := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/api/img?url=https://i.pximg.net/first%d.jpg", n), nil)
+			req.Header.Set("X-Api-Key", "secret")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			first <- struct{}{}
+		}(i)
+	}
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("fetches did not all enter within 5s")
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	canceled := make(chan struct{})
+	go func() {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/img?url=https://i.pximg.net/cancel-me.jpg", nil).WithContext(ctx)
+		req.Header.Set("X-Api-Key", "secret")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		close(canceled)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for imgQueueWaiters.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("queued request never entered the waiter queue")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled request never returned")
+	}
+	if imgQueueWaiters.Load() != 0 {
+		t.Fatalf("waiters after cancel = %d, want 0 (leaked)", imgQueueWaiters.Load())
+	}
+
+	close(release)
+	for i := 0; i < maxConcurrentImageFetches; i++ {
+		<-first
 	}
 }
 
