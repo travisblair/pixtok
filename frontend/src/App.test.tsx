@@ -1,6 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import App from "./App";
+
+/** Topmost related view's cards — robust against animation-timing
+ * DOM states that make :last-of-type unreliable in tests. */
+function topRelatedCards(container: HTMLElement) {
+  const views = container.querySelectorAll(".related-view");
+  if (views.length === 0) return [];
+  return Array.from(views[views.length - 1].querySelectorAll(".feed-card"));
+}
+
 import { makeFeedOf, makeFeed, makeIllust } from "./test-fixtures";
 
 vi.mock("./api", () => ({
@@ -652,7 +661,7 @@ describe("App", () => {
     // Push 10 levels (the max) — tap a related work, never the anchor.
     for (let i = 0; i < 10; i++) {
       const topCard = container.querySelector(".related-view")
-        ? container.querySelectorAll(".related-view:last-of-type .feed-card")[1]
+        ? topRelatedCards(container)[1]
         : container.querySelectorAll(".feed-card")[0];
       await fireEvent.click(topCard.querySelector(".card-overlay")!);
       await new Promise((r) => setTimeout(r, 30));
@@ -660,9 +669,7 @@ describe("App", () => {
     expect(container.querySelectorAll(".related-view").length).toBe(10);
 
     // The 11th tap must not silently vanish — a toast explains the cap.
-    const topCard = container.querySelectorAll(
-      ".related-view:last-of-type .feed-card"
-    )[1];
+    const topCard = topRelatedCards(container)[1];
     await fireEvent.click(topCard.querySelector(".card-overlay")!);
     await waitFor(() =>
       expect(container.querySelector(".toast")?.textContent).toContain(
@@ -830,7 +837,7 @@ describe("App", () => {
     // Push two levels.
     for (let i = 0; i < 2; i++) {
       const topCard = container.querySelector(".related-view")
-        ? container.querySelectorAll(".related-view:last-of-type .feed-card")[1]
+        ? topRelatedCards(container)[1]
         : container.querySelectorAll(".feed-card")[0];
       await fireEvent.click(topCard.querySelector(".card-overlay")!);
       await new Promise((r) => setTimeout(r, 30));
@@ -916,7 +923,7 @@ describe("App", () => {
     // Push two levels (tap a related work, never the anchor).
     for (let i = 0; i < 2; i++) {
       const topCard = container.querySelector(".related-view")
-        ? container.querySelectorAll(".related-view:last-of-type .feed-card")[1]
+        ? topRelatedCards(container)[1]
         : container.querySelectorAll(".feed-card")[0];
       await fireEvent.click(topCard.querySelector(".card-overlay")!);
       await new Promise((r) => setTimeout(r, 30));
@@ -1018,9 +1025,7 @@ describe("App", () => {
         expect(container.querySelectorAll(".related-view").length).toBe(1)
       );
       await fireEvent.click(
-        container
-          .querySelectorAll(".related-view:last-of-type .feed-card")[1]
-          .querySelector(".card-overlay")!
+        topRelatedCards(container)[1].querySelector(".card-overlay")!
       );
       await waitFor(() =>
         expect(container.querySelectorAll(".related-view").length).toBe(2)
@@ -1037,7 +1042,7 @@ describe("App", () => {
 
       // Artist page on top of both stack levels.
       await fireEvent.click(
-        container.querySelector(".related-view:last-of-type .card-artist a")!
+        (topRelatedCards(container)[0]?.querySelector(".card-artist a") as HTMLElement)!
       );
       await waitFor(() =>
         expect(container.querySelector(".artist-view")).toBeTruthy()

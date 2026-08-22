@@ -68,6 +68,7 @@ export default function FeedCard(props: {
   let loadTimer: ReturnType<typeof setTimeout> | undefined;
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
   let settleRead: number | undefined;
+  let scrollRaf = 0; // rAF handle for the onScroll throttle
 
   const pages = props.illust.meta_pages?.length
     ? props.illust.meta_pages
@@ -292,14 +293,22 @@ export default function FeedCard(props: {
 
   function onScroll() {
     if (!pagesRef) return;
-    const idx = Math.round(pagesRef.scrollLeft / pagesRef.clientWidth);
-    setCurrentPage(idx);
     // Re-arm the settle detector. While the snap/momentum animation is
     // still moving scrollLeft, keep polling; when two reads agree, the
     // slider is at rest and THAT page owns the load window.
     clearTimeout(settleTimer);
     settleRead = undefined;
     settleTimer = setTimeout(checkSettle, 120);
+    // rAF-throttle the counter update: scroll events can fire several
+    // times per frame mid-gesture, and each one used to re-render the
+    // whole slider. One update per frame is all the eye can see.
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0;
+      if (!pagesRef) return;
+      const idx = Math.round(pagesRef.scrollLeft / pagesRef.clientWidth);
+      setCurrentPage(idx);
+    });
   }
 
   function checkSettle() {
@@ -367,6 +376,10 @@ export default function FeedCard(props: {
           src={shouldLoad(i) ? imgUrl : PIXEL}
           alt={`${props.illust.title} — page ${i + 1}`}
           class={loaded().has(i) ? "card-image loaded" : "card-image"}
+          // Decode off the scroll path: Safari decodes images on the
+          // main thread, and a master1200 landing mid-swipe used to
+          // stutter the gesture.
+          decoding="async"
           onLoad={() => onPageLoad(i)}
           onError={() => onPageError(i)}
         />
