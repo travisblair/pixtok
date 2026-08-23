@@ -1,6 +1,7 @@
 import {
   createSignal,
   createEffect,
+  createMemo,
   For,
   Show,
   onCleanup,
@@ -326,13 +327,33 @@ export default function FeedCard(props: {
     settleTimer = setTimeout(checkSettle, 120);
   }
 
+  // DOM virtualization for big sliders: a 120-page work renders only
+  // the pages near the load window (+RENDER_MARGIN) as real elements —
+  // off-window pages cost nothing: no img elements, no reactive churn,
+  // no layout. The spacer preserves the native scroll width, so
+  // scrollLeft-based paging and scroll-snap keep working unchanged.
+  // (A search page full of 60+ page manga used to mount ~10k nodes and
+  // stutter every swipe.)
+  const RENDER_MARGIN = 2;
+  const visiblePageRange = createMemo(() => {
+    const [lo, hi] = sliderWindowBounds(
+      currentPage(),
+      settledPage(),
+      windowSize
+    );
+    return [
+      Math.max(0, lo - RENDER_MARGIN),
+      Math.min(pages.length - 1, hi + RENDER_MARGIN),
+    ] as const;
+  });
+
   function renderPage(page: (typeof pages)[0], i: number) {
     // Ugoira works are animated — hand the visible page to the canvas
     // player (which loads frames only while actually on screen). Covered
     // layers get the static frame instead (players are heavy).
     if (props.illust.type === "ugoira" && i === 0 && !props.suppressImages) {
       return (
-        <div class="card-page">
+        <div class="card-page" style={{ left: `${i * 100}%` }}>
           <UgoiraPlayer
             illustId={props.illust.id}
             staticUrl={page.image_urls.large}
@@ -352,7 +373,7 @@ export default function FeedCard(props: {
         : page.image_urls.large;
     const imgUrl = `/api/img?url=${encodeURIComponent(sizeUrl)}${attempt > 0 ? `&r=${attempt}` : ""}`;
     return (
-      <div class="card-page">
+      <div class="card-page" style={{ left: `${i * 100}%` }}>
         <Show when={shouldLoad(i) && !loaded().has(i) && !error().has(i)}>
           <div class="card-placeholder">
             <div class="spinner" />
@@ -409,8 +430,32 @@ export default function FeedCard(props: {
       >
         {/* Multi-page slider */}
         <div class="card-pages" ref={pagesRef} onScroll={onScroll}>
+          {/* Spacer: keeps the native scroll width = pages.length × 100% */}
+          <div
+            class="card-pages-spacer"
+            style={{ width: `${pages.length * 100}%` }}
+          />
           <For each={pages}>
-            {(page, i) => renderPage(page, i())}
+            {(page, i) => (
+              <>
+                {/* Snap anchor: every page keeps its snap point even
+                    when its real content is virtualized away — without
+                    these, scroll-snap mandatory yanks a long swipe
+                    back to the nearest rendered page. */}
+                <div
+                  class="card-page-anchor"
+                  style={{ left: `${i() * 100}%` }}
+                />
+                <Show
+                  when={
+                    i() >= visiblePageRange()[0] &&
+                    i() <= visiblePageRange()[1]
+                  }
+                >
+                  {renderPage(page, i())}
+                </Show>
+              </>
+            )}
           </For>
         </div>
         <div class="page-counter">

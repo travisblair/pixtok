@@ -78,17 +78,21 @@ test.describe("Multi-page slider", () => {
 
     const firstCard = page.locator(".feed-card").first();
     const slider = firstCard.locator(".card-pages");
-    const pageImg = (i) => slider.locator(".card-page").nth(i).locator("img");
+    // Sliders are DOM-virtualized: only pages near the load window
+    // exist as elements (plus zero-cost snap anchors for every page).
+    // Locate a page by its image alt, not its DOM position.
+    const pageImg = (i) =>
+      slider.locator(`img[alt="夏祭りの夜 1 — page ${i + 1}"]`);
 
-    // Page 1: only the first two pages hold real image srcs; the rest are
-    // the 1px placeholder (data:) — 120 decoded master1200s must never
-    // exist at once.
+    // Page 1: the first two pages hold real image srcs; farther pages
+    // don't exist in the DOM at all — 120 decoded master1200s must
+    // never exist at once, and 120 element-trees must never exist.
     await expect(pageImg(0)).toHaveAttribute("src", /\/api\/img/);
     await expect(pageImg(1)).toHaveAttribute("src", /\/api\/img/);
-    await expect(pageImg(2)).toHaveAttribute("src", /^data:/);
+    await expect(pageImg(5)).toHaveCount(0);
 
     // Jump to page 51: window is 50-52 (indexes 49-51); page 1 is
-    // offloaded.
+    // offloaded and virtualized away.
     await slider.evaluate((el) => {
       el.scrollLeft = 50 * el.clientWidth;
     });
@@ -99,11 +103,11 @@ test.describe("Multi-page slider", () => {
     // resting page — the load window follows the SETTLED page, and the
     // counter can flip from the live scroll event first.
     await settle();
-    await expect(pageImg(0)).toHaveAttribute("src", /^data:/);
+    await expect(pageImg(0)).toHaveCount(0);
     await expect(pageImg(49)).toHaveAttribute("src", /\/api\/img/);
     await expect(pageImg(50)).toHaveAttribute("src", /\/api\/img/);
     await expect(pageImg(51)).toHaveAttribute("src", /\/api\/img/);
-    await expect(pageImg(52)).toHaveAttribute("src", /^data:/);
+    await expect(pageImg(55)).toHaveCount(0);
 
     // Jump to page 101: 100-102 real; page 51 offloaded. Memory stays
     // bounded no matter how far the user swipes.
@@ -114,10 +118,10 @@ test.describe("Multi-page slider", () => {
       .poll(() => firstCard.locator(".page-counter").textContent())
       .toBe("101/120");
     await settle();
-    await expect(pageImg(50)).toHaveAttribute("src", /^data:/);
+    await expect(pageImg(50)).toHaveCount(0);
     await expect(pageImg(99)).toHaveAttribute("src", /\/api\/img/);
     await expect(pageImg(100)).toHaveAttribute("src", /\/api\/img/);
     await expect(pageImg(101)).toHaveAttribute("src", /\/api\/img/);
-    await expect(pageImg(102)).toHaveAttribute("src", /^data:/);
+    await expect(pageImg(105)).toHaveCount(0);
   });
 });
