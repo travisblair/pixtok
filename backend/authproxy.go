@@ -380,12 +380,18 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// and belong to accounts.pixiv.net. Flow-cookie gated like the px
 	// routes (10-minute window, only set by pkce/start). The post-login
 	// "continue using account" interstitial POSTs /account-selected the
-	// same way (found live Aug 24) — same treatment.
+	// same way (found live Aug 24) — BUT the endpoint lives on www, not
+	// accounts (accounts 404s it; www 302-chains it toward the OAuth
+	// continuation). Both slash variants registered: the upstream
+	// redirects /account-selected → /account-selected/.
 	mux.HandleFunc("/ajax/", func(w http.ResponseWriter, r *http.Request) {
 		serveProxy("accounts", r.URL.RequestURI(), w, r)
 	})
 	mux.HandleFunc("/account-selected", func(w http.ResponseWriter, r *http.Request) {
-		serveProxy("accounts", r.URL.RequestURI(), w, r)
+		serveProxy("www", r.URL.RequestURI(), w, r)
+	})
+	mux.HandleFunc("/account-selected/", func(w http.ResponseWriter, r *http.Request) {
+		serveProxy("www", r.URL.RequestURI(), w, r)
 	})
 
 	// GET /api/auth/pkce/start — the FE Sign-in button navigates here.
