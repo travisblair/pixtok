@@ -378,8 +378,13 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// The login SPA's XHRs are root-relative (/ajax/login, /ajax/login/
 	// two-factor-authentication/...) — from OUR origin they arrive here
 	// and belong to accounts.pixiv.net. Flow-cookie gated like the px
-	// routes (10-minute window, only set by pkce/start).
+	// routes (10-minute window, only set by pkce/start). The post-login
+	// "continue using account" interstitial POSTs /account-selected the
+	// same way (found live Aug 24) — same treatment.
 	mux.HandleFunc("/ajax/", func(w http.ResponseWriter, r *http.Request) {
+		serveProxy("accounts", r.URL.RequestURI(), w, r)
+	})
+	mux.HandleFunc("/account-selected", func(w http.ResponseWriter, r *http.Request) {
 		serveProxy("accounts", r.URL.RequestURI(), w, r)
 	})
 

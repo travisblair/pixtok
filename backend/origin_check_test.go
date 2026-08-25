@@ -136,6 +136,7 @@ func TestOriginCheckExemptsLoginProxyPaths(t *testing.T) {
 		"/ajax/login/passkey/generate-options",
 		"/api/auth/px/accounts/post-redirect",
 		"/cdn-cgi/challenge-platform/scripts/precursor/main.js",
+		"/account-selected", // pixiv's "continue using account" POST (Origin: null)
 	} {
 		req := httptest.NewRequest(http.MethodPost, "https://pixtok.example"+path, nil)
 		req.Header.Set("Origin", "https://evil.example.com") // opaque/challenge origins

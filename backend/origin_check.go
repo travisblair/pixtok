@@ -19,7 +19,12 @@ import (
 func originCheckPathExempt(path string) bool {
 	return strings.HasPrefix(path, "/ajax/") ||
 		strings.HasPrefix(path, "/api/auth/") ||
-		strings.HasPrefix(path, "/cdn-cgi/")
+		strings.HasPrefix(path, "/cdn-cgi/") ||
+		// Pixiv's post-login "continue using account" interstitial
+		// (found live Aug 24): POSTs to a ROOT-RELATIVE path with an
+		// opaque Origin ("null"), so it lands on our origin and can
+		// never satisfy a same-host rule. Proxied like /ajax/.
+		path == "/account-selected"
 }
 
 // originCheck rejects cross-origin state-changing requests. Browsers
