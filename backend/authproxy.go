@@ -383,7 +383,11 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// same way (found live Aug 24) — BUT the endpoint lives on www, not
 	// accounts (accounts 404s it; www 302-chains it toward the OAuth
 	// continuation). Both slash variants registered: the upstream
-	// redirects /account-selected → /account-selected/.
+	// redirects /account-selected → /account-selected/. Pixiv's OAuth
+	// continuation also lands on root-relative /web/v1/users/auth/pixiv/
+	// paths (found live Aug 25: after "continue", the browser is sent to
+	// /web/v1/... which belongs on app-api.pixiv.net) — proxied here too,
+	// with the callback intercepted by the app-route handler below.
 	mux.HandleFunc("/ajax/", func(w http.ResponseWriter, r *http.Request) {
 		serveProxy("accounts", r.URL.RequestURI(), w, r)
 	})
@@ -392,6 +396,18 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	})
 	mux.HandleFunc("/account-selected/", func(w http.ResponseWriter, r *http.Request) {
 		serveProxy("www", r.URL.RequestURI(), w, r)
+	})
+	mux.HandleFunc("/web/v1/login", func(w http.ResponseWriter, r *http.Request) {
+		serveProxy("app", r.URL.RequestURI(), w, r)
+	})
+	mux.HandleFunc("/web/v1/login/", func(w http.ResponseWriter, r *http.Request) {
+		serveProxy("app", r.URL.RequestURI(), w, r)
+	})
+	mux.HandleFunc("/web/v1/users/auth/pixiv/start", func(w http.ResponseWriter, r *http.Request) {
+		serveProxy("app", r.URL.RequestURI(), w, r)
+	})
+	mux.HandleFunc("/web/v1/users/auth/pixiv/start/", func(w http.ResponseWriter, r *http.Request) {
+		serveProxy("app", r.URL.RequestURI(), w, r)
 	})
 
 	// GET /api/auth/pkce/start — the FE Sign-in button navigates here.
