@@ -31,6 +31,9 @@ export default function RelatedView(props: {
   const seen = new Set<number>([props.anchor.id]);
 
   async function loadRelated() {
+    if (loading()) return;
+    setLoading(true);
+    setError(false);
     try {
       const data = await api.getRelated(props.anchor.id);
       const fresh = dedupeSeen(
@@ -45,6 +48,8 @@ export default function RelatedView(props: {
     } catch (err) {
       console.error("Failed to load related:", err);
       setError(true);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -102,7 +107,11 @@ export default function RelatedView(props: {
 
         <div ref={sentinelRef} class="feed-sentinel">
           {loading() && <div class="spinner" />}
-          {error() && !loading() && <span>Couldn't load related works</span>}
+          {error() && !loading() && (
+            <button type="button" class="mode-pill" onClick={() => void loadRelated()}>
+              Couldn't load related works — tap to retry
+            </button>
+          )}
           {loadMoreError() && !loading() && (
             <button type="button" class="mode-pill" onClick={() => void loadMore()}>
               Couldn't load — tap to retry

@@ -222,12 +222,13 @@ func TestLikeUnlikeMethodEnforcement(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	for _, path := range []string{"/api/illust/123/like", "/api/illust/123/unlike"} {
-		if rr := doReq(t, h, http.MethodGet, path, "secret"); rr.Code != http.StatusMethodNotAllowed {
-			t.Errorf("GET %s = %d, want 405", path, rr.Code)
+	for _, path := range []string{"POST /api/illust/123/like", "POST /api/illust/123/unlike"} {
+		p := strings.TrimPrefix(path, "POST ")
+		if rr := doReq(t, h, http.MethodGet, p, "secret"); rr.Code != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s = %d, want 405", p, rr.Code)
 		}
-		if rr := doReq(t, h, http.MethodPost, path, "secret"); rr.Code != http.StatusOK {
-			t.Errorf("POST %s = %d, want 200", path, rr.Code)
+		if rr := doReq(t, h, http.MethodPost, p, "secret"); rr.Code != http.StatusOK {
+			t.Errorf("POST %s = %d, want 200", p, rr.Code)
 		}
 	}
 }
@@ -1091,6 +1092,7 @@ func TestUgoiraMetaHandler(t *testing.T) {
 	}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
+	// POST is rejected by the method check inside the GET-only subtree.
 	if rr := doReq(t, h, http.MethodPost, "/api/illust/5/ugoira_meta", "secret"); rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST ugoira_meta = %d, want 405", rr.Code)
 	}
@@ -1099,6 +1101,23 @@ func TestUgoiraMetaHandler(t *testing.T) {
 	}
 	if gotID != "5" {
 		t.Errorf("gotID = %q, want 5", gotID)
+	}
+}
+
+// TestUgoiraMetaDeadlineOverride pins the per-response write deadline on
+// the meta route (review finding): the client allows 60s but the global
+// WriteTimeout killed the handler cycle at 15s first. httptest recorders
+// don't support deadlines — the handler must LOG the warning and still
+// serve, never fail the request.
+func TestUgoiraMetaDeadlineUnsupportedStillServes(t *testing.T) {
+	f := &fakeAPI{
+		ugoiraMetaFn: func(id string) ([]byte, error) {
+			return []byte(`{"error":false,"body":{"frames":[]}}`), nil
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	if rr := doReq(t, h, http.MethodGet, "/api/illust/7/ugoira_meta", "secret"); rr.Code != http.StatusOK {
+		t.Errorf("GET ugoira_meta = %d, want 200 even when SetWriteDeadline is unsupported", rr.Code)
 	}
 }
 

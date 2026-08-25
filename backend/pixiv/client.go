@@ -109,10 +109,10 @@ type Client struct {
 	refreshToken   string
 	accessToken    string
 	expiresAt      time.Time
+	webMu          sync.Mutex // guards phpSessID + csrfTokenCache (login capture swaps them mid-flight while feeds read them)
 	phpSessID      string
 	mu             sync.Mutex
 	refreshMu      sync.Mutex // single-flights refresh so concurrent requests don't stack auth calls
-	csrfMu         sync.Mutex
 	csrfTokenCache string
 	http           *http.Client
 	// upstreamSlots bounds CONCURRENT non-image upstream calls (app API
@@ -199,7 +199,9 @@ func NewClient() (*Client, error) {
 	}
 
 	// Also try loading PHPSESSID and the csrf token for web AJAX — env
-	// first (mirrors the refresh token), .env file as fallback.
+	// first (mirrors the refresh token), .env file as fallback. These
+	// writes happen before the client is reachable by any request
+	// handler, so no lock is needed yet.
 	if v := os.Getenv("PIXIV_PHPSESSID"); v != "" {
 		c.phpSessID = v
 	}
@@ -565,7 +567,7 @@ func (c *Client) webGet(u string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", webUA)
-	req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+	req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
 	req.Header.Set("Referer", "https://www.pixiv.net/")
 
 	resp, err := c.doWith(c.http, req)
@@ -629,6 +631,38 @@ func (c *Client) GetRecommended() ([]byte, error) {
 	return c.doGet(u)
 }
 
+// webSession returns the current PHPSESSID + csrf token under one lock.
+// SetWebSession swaps BOTH mid-flight (in-app login capture) while feed
+// requests read them — unsynchronized reads were a data race. Callers
+// that need only the session id use webSessionID().
+func (c *Client) webSession() (string, string) {
+	c.webMu.Lock()
+	defer c.webMu.Unlock()
+	return c.phpSessID, c.csrfTokenCache
+}
+
+// webSessionID returns the current PHPSESSID under the web-session lock.
+func (c *Client) webSessionID() string {
+	c.webMu.Lock()
+	defer c.webMu.Unlock()
+	return c.phpSessID
+}
+
+// setWebCache updates both halves of the web session atomically.
+func (c *Client) setWebCache(phpsessid, csrfToken string) {
+	c.webMu.Lock()
+	defer c.webMu.Unlock()
+	c.phpSessID = phpsessid
+	c.csrfTokenCache = csrfToken
+}
+
+// invalidateCsrf drops the cached csrf token (a 400/401 retry path).
+func (c *Client) invalidateCsrf() {
+	c.webMu.Lock()
+	c.csrfTokenCache = ""
+	c.webMu.Unlock()
+}
+
 // csrfToken returns (and caches) the x-csrf-token needed for street POSTs.
 // The token is SESSION-BOUND: it must be fetched with the same PHPSESSID
 // that will make the street calls, or pixiv 400s with a login-again error.
@@ -636,16 +670,15 @@ func (c *Client) GetRecommended() ([]byte, error) {
 // user profile page is not — it embeds the same session-bound token in its
 // preloaded state.
 func (c *Client) csrfToken() (string, error) {
-	c.csrfMu.Lock()
-	defer c.csrfMu.Unlock()
-	if c.csrfTokenCache != "" {
-		return c.csrfTokenCache, nil
+	if tok, _ := c.webSession(); tok != "" {
+		return tok, nil
 	}
-	tok, err := c.fetchCsrfToken(c.phpSessID)
+	sessID := c.webSessionID()
+	tok, err := c.fetchCsrfToken(sessID)
 	if err != nil {
 		return "", err
 	}
-	c.csrfTokenCache = tok
+	c.setWebCache(sessID, tok)
 	return tok, nil
 }
 
@@ -771,10 +804,7 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 // SetWebSession hot-swaps the web session (PHPSESSID + its bound csrf
 // token) into the running client and persists both to .env.
 func (c *Client) SetWebSession(phpsessid, csrfToken string) error {
-	c.csrfMu.Lock()
-	c.phpSessID = phpsessid
-	c.csrfTokenCache = csrfToken
-	c.csrfMu.Unlock()
+	c.setWebCache(phpsessid, csrfToken)
 	return UpdateEnvFile(map[string]string{
 		"PIXIV_PHPSESSID":   phpsessid,
 		"PIXTOK_CSRF_TOKEN": csrfToken,
@@ -911,7 +941,7 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 		}
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
 		req.Header.Set("x-csrf-token", token)
-		req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+		req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
 		req.Header.Set("User-Agent", webUA)
 		req.Header.Set("Referer", homeURL)
 		// Pixiv's CSRF check pairs the token with Origin/Accept — the site
@@ -947,9 +977,7 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 	// race-safe. (Reviewer finding: the old window covered ALL 4xx.)
 	var se *statusError
 	if err != nil && errors.As(err, &se) && (se.status == 400 || se.status == 401) {
-		c.csrfMu.Lock()
-		c.csrfTokenCache = ""
-		c.csrfMu.Unlock()
+		c.invalidateCsrf()
 		body, err = do()
 	}
 	return body, err
@@ -987,7 +1015,7 @@ func (c *Client) GetUgoiraMeta(illustID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+	req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
 	req.Header.Set("User-Agent", webUA)
 	req.Header.Set("Referer", fmt.Sprintf("https://www.pixiv.net/en/artworks/%s", illustID))
 
@@ -1055,7 +1083,7 @@ func (c *Client) GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
 	if maxPages < 1 || maxPages > 25 {
 		return nil, fmt.Errorf("%w: invalid maxPages", ErrInvalidParam)
 	}
-	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
+	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
 	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
 	}
@@ -1112,7 +1140,7 @@ func (c *Client) GetBookmarkIllusts(restrict string) ([]byte, error) {
 	if restrict != "public" && restrict != "private" {
 		return nil, fmt.Errorf("%w: invalid restrict", ErrInvalidParam)
 	}
-	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
+	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
 	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
 	}
@@ -1131,7 +1159,7 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 	if order != "desc" && order != "asc" {
 		return nil, fmt.Errorf("%w: invalid order", ErrInvalidParam)
 	}
-	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
+	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
 	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
 	}
@@ -1148,7 +1176,7 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 			return nil, err
 		}
 		req.Header.Set("x-csrf-token", token)
-		req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+		req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
 		req.Header.Set("User-Agent", webUA)
 		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
 		req.Header.Set("Accept", "application/json")
@@ -1171,9 +1199,7 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 	body, err := do()
 	var se *statusError
 	if err != nil && errors.As(err, &se) && (se.status == 400 || se.status == 401) {
-		c.csrfMu.Lock()
-		c.csrfTokenCache = ""
-		c.csrfMu.Unlock()
+		c.invalidateCsrf()
 		body, err = do()
 	}
 	return body, err
@@ -1182,7 +1208,7 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 // GetBookmarkTags fetches the user's bookmark-tag list (web AJAX,
 // crawl-verified): body.public/private arrays of {tag, cnt}.
 func (c *Client) GetBookmarkTags() ([]byte, error) {
-	uid := strings.SplitN(c.phpSessID, "_", 2)[0]
+	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
 	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
 	}
@@ -1197,7 +1223,7 @@ func (c *Client) GetBookmarkTags() ([]byte, error) {
 			return nil, err
 		}
 		req.Header.Set("x-csrf-token", token)
-		req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+		req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
 		req.Header.Set("User-Agent", webUA)
 		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
 		req.Header.Set("Accept", "application/json")
@@ -1220,9 +1246,7 @@ func (c *Client) GetBookmarkTags() ([]byte, error) {
 	body, err := do()
 	var se *statusError
 	if err != nil && errors.As(err, &se) && (se.status == 400 || se.status == 401) {
-		c.csrfMu.Lock()
-		c.csrfTokenCache = ""
-		c.csrfMu.Unlock()
+		c.invalidateCsrf()
 		body, err = do()
 	}
 	return body, err
@@ -1301,7 +1325,7 @@ func (c *Client) GetWorkRecommend(illustID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Cookie", "PHPSESSID="+c.phpSessID)
+	req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
 	req.Header.Set("User-Agent", webUA)
 	req.Header.Set("Referer", "https://www.pixiv.net/")
 
@@ -1489,7 +1513,18 @@ func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte,
 	// cache misses used to allocate up to 25 MB each — on the Pi's
 	// memory budget that's an OOM vector. Bodies over the ceiling stream
 	// straight through under the same 25 MB cap and are never cached.
-	head := make([]byte, maxCacheableBody+1)
+	//
+	// Size the buffer from ContentLength when upstream declares it
+	// (review finding): the old code allocated the FULL 5 MB ceiling per
+	// miss even for a 100 KB thumbnail — 8 concurrent semaphore slots ×
+	// 5 MB of transient garbage on a GOMEMLIMIT=80MiB Pi during exactly
+	// the grid-burst scenario the semaphore exists to handle. Unknown
+	// lengths (chunked, -1) fall back to the ceiling-sized buffer.
+	bufSize := int64(maxCacheableBody + 1)
+	if cl := resp.ContentLength; cl > 0 && cl < bufSize {
+		bufSize = cl + 1 // +1 so a body AT the ceiling still detects overflow
+	}
+	head := make([]byte, bufSize)
 	n, err := io.ReadFull(resp.Body, head)
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		return head[:n], contentType, nil

@@ -418,6 +418,11 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 			MaxAge:   10 * 60,
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
+			// Match the transport's Secure posture like every other
+			// cookie this backend sets (review finding): kept on HTTPS
+			// transports, dropped on plaintext so the flow still works
+			// over direct tailnet/localhost HTTP.
+			Secure: secureForRequest(r),
 		})
 		http.Redirect(w, r,
 			"/api/auth/px/app/web/v1/login?code_challenge="+challenge+

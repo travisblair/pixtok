@@ -216,6 +216,35 @@ describe("SearchScreen", () => {
     );
   });
 
+  it("a failed fresh search resets pagination so the old query's hasMore can't fire", async () => {
+    // Page 1 of "fantasy" succeeds with more pages (hasMore=true); a
+    // "broken" query then fails. Before the fix, page/hasMore still
+    // described the FIRST query — the sentinel fetched page N+1 of the
+    // NEW query and appended it to the OLD query's results (the
+    // mixed-results bug). Route by word so sentinel timing can't
+    // desync the mock queue.
+    mockedApi.searchArtworks.mockImplementation((params: { word: string; p?: number }) => {
+      if (params.word === "broken") {
+        return Promise.reject(new Error("upstream down"));
+      }
+      return Promise.resolve(artworksResp(params.p ?? 1, 3));
+    });
+    const { container } = render(() => <SearchScreen {...baseProps} />);
+    const input = container.querySelector(".search-input") as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "fantasy" } });
+    await fireEvent.submit(input.closest("form")!);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBeGreaterThanOrEqual(3)
+    );
+    await fireEvent.input(input, { target: { value: "broken" } });
+    await fireEvent.submit(input.closest("form")!);
+    // The failed fresh run must flag the error.
+    await waitFor(() => expect(container.textContent).toContain("Couldn't search"));
+    // No continuation of the OLD result set may fire afterwards.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(mockedApi.searchArtworks.mock.calls.filter((c) => c[0].word === "broken").length).toBe(1);
+  });
+
   it("opening Filters and picking a content mode refetches with the new mode", async () => {
     const { container, getByText } = render(() => <SearchScreen {...baseProps} />);
     const input = container.querySelector(".search-input") as HTMLInputElement;

@@ -184,8 +184,17 @@ export default function SearchScreen(props: {
     } catch (err) {
       if (seq === reqSeq) {
         console.error("Search failed:", err);
-        if (fresh) setError(true);
-        else setLoadMoreError(true);
+        if (fresh) {
+          setError(true);
+          // A failed fresh search must not leave the PREVIOUS query's
+          // pagination live: hasMore/page still described the old result
+          // set, so the sentinel could fetch page N+1 of the NEW query
+          // and append it to the OLD query's results.
+          setHasMore(false);
+          setPage(0);
+        } else {
+          setLoadMoreError(true);
+        }
       }
     } finally {
       if (seq === reqSeq) setLoading(false);

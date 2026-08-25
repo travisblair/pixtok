@@ -604,14 +604,21 @@ func TestRefreshPersistenceFailureDoesNotCommitRotation(t *testing.T) {
 type staticBodyTransport struct {
 	body []byte
 	ct   string
+	// contentLen overrides the response ContentLength (-1 = unknown).
+	contentLen int64
 }
 
 func (r *staticBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cl := r.contentLen
+	if cl == 0 && r.body != nil {
+		cl = int64(len(r.body))
+	}
 	return &http.Response{
-		StatusCode: 200,
-		Header:     http.Header{"Content-Type": []string{r.ct}},
-		Body:       io.NopCloser(bytes.NewReader(r.body)),
-		Request:    req,
+		StatusCode:    200,
+		Header:        http.Header{"Content-Type": []string{r.ct}},
+		Body:          io.NopCloser(bytes.NewReader(r.body)),
+		ContentLength: cl,
+		Request:       req,
 	}, nil
 }
 
@@ -664,6 +671,42 @@ func TestProxyImageStreamBuffersSmallBody(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("small body was written by the client (%d bytes) — the handler writes it", rec.Body.Len())
+	}
+}
+
+// The miss-path buffer must be sized from upstream's declared
+// ContentLength (review finding): allocating the full 5 MB cache ceiling
+// per miss put 8 slots × 5 MB of transient garbage on the Pi during grid
+// bursts. A body whose declared length is smaller than its real size must
+// still buffer correctly (the +1 overflow detection holds regardless).
+func TestProxyImageStreamBufferSizedFromContentLength(t *testing.T) {
+	payload := bytes.Repeat([]byte("b"), 100<<10) // 100 KB thumbnail
+	tr := &staticBodyTransport{body: payload, ct: "image/jpeg", contentLen: int64(len(payload))}
+	c := &Client{http: &http.Client{Transport: tr}}
+
+	rec := httptest.NewRecorder()
+	body, _, err := c.ProxyImageStream("https://i.pximg.net/img-master/1.jpg", rec)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("buffered %d bytes, want %d", len(body), len(payload))
+	}
+}
+
+// Unknown length (chunked / -1): falls back to the ceiling-sized buffer
+// and small bodies still buffer for the cache.
+func TestProxyImageStreamUnknownLengthStillBuffersSmallBody(t *testing.T) {
+	payload := []byte("tiny")
+	tr := &staticBodyTransport{body: payload, ct: "image/png", contentLen: -1}
+	c := &Client{http: &http.Client{Transport: tr}}
+
+	body, _, err := c.ProxyImageStream("https://i.pximg.net/img-master/2.png", httptest.NewRecorder())
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("buffered body = %q, want %q", body, payload)
 	}
 }
 

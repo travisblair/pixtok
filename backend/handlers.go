@@ -730,6 +730,14 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 				http.Error(w, "invalid illust id", http.StatusBadRequest)
 				return
 			}
+			// Meta rides the slow Pi relay like the zip (review finding):
+			// the client allows 60s, but without a per-response deadline
+			// the server's global 15s WriteTimeout killed the whole
+			// handler cycle first — the client's longer wait was
+			// illusory. Same override as the image route.
+			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(60 * time.Second)); err != nil {
+				log.Printf("WARNING ugoira meta write deadline: %v", err)
+			}
 			body, err := api.GetUgoiraMeta(id)
 			if err != nil {
 				log.Printf("ERROR ugoira meta(%s): %v", id, err)
