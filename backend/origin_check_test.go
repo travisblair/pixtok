@@ -119,3 +119,39 @@ func TestOriginCheckAllowsPreflight(t *testing.T) {
 		t.Fatalf("preflight = %d, want 204", rr.Code)
 	}
 }
+
+// The proxied pixiv login flow is exempt from the same-host check (found
+// live Aug 24: the post-redirect bouncer loads Cloudflare's challenge
+// script, whose opaque-origin POSTs got 403'd and killed the flow AFTER
+// a successful login). These surfaces are flow-cookie gated + CSP-exempt;
+// cross-origin POSTs there must pass through to the proxy.
+func TestOriginCheckExemptsLoginProxyPaths(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := originCheck(inner)
+
+	for _, path := range []string{
+		"/ajax/login",
+		"/ajax/login/passkey/generate-options",
+		"/api/auth/px/accounts/post-redirect",
+		"/cdn-cgi/challenge-platform/scripts/precursor/main.js",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "https://pixtok.example"+path, nil)
+		req.Header.Set("Origin", "https://evil.example.com") // opaque/challenge origins
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("POST %s with foreign Origin = %d, want pass-through 204", path, rr.Code)
+		}
+	}
+
+	// Non-login paths keep the protection.
+	req := httptest.NewRequest(http.MethodPost, "https://pixtok.example/api/prefs/blocked-tags", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin POST outside login flow = %d, want 403", rr.Code)
+	}
+}

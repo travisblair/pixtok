@@ -1,11 +1,26 @@
 package main
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 )
+
+// originCheckPathsExempt skip the same-host check entirely: the proxied
+// pixiv login (/ajax/*, /api/auth/*) and Cloudflare's challenge platform
+// (/cdn-cgi/*, served through the proxied pages) legitimately issue
+// POSTs whose Origin will never satisfy a same-host rule (opaque/null
+// origins from challenge frames, pixiv's own SPA machinery). These
+// surfaces are already gated by the login-flow cookie and were already
+// CSP-exempt for the same reason. Everything else keeps the check —
+// mutations outside the login flow stay protected.
+func originCheckPathExempt(path string) bool {
+	return strings.HasPrefix(path, "/ajax/") ||
+		strings.HasPrefix(path, "/api/auth/") ||
+		strings.HasPrefix(path, "/cdn-cgi/")
+}
 
 // originCheck rejects cross-origin state-changing requests. Browsers
 // attach an Origin header to cross-origin POSTs (and, via fetch, to
@@ -24,10 +39,9 @@ import (
 // "same host". Authentication (gate cookie / API key) is the real
 // boundary — this check is defense-in-depth.
 //
-// Defense-in-depth on top of the existing controls: mutations are
-// POST-only with validated IDs, the gate unlock requires a JSON
-// content-type (which forces cross-origin form posts into a preflight),
-// and the gate cookie is SameSite=Lax (never sent on cross-site POSTs).
+// Rejections are LOGGED with method/path/Origin/Host (found live Aug 24:
+// originCheck wrapped OUTSIDE logRequests, so its 403s produced no REQ
+// line and a broken login flow left zero trace in the journal).
 func originCheck(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -35,9 +49,12 @@ func originCheck(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if origin := r.Header.Get("Origin"); origin != "" {
+		if origin := r.Header.Get("Origin"); origin != "" && !originCheckPathExempt(r.URL.Path) {
 			u, err := url.Parse(origin)
-			if err != nil || !strings.EqualFold(u.Hostname(), hostnameOf(r.Host)) {
+			hostMatch := err == nil && strings.EqualFold(u.Hostname(), hostnameOf(r.Host))
+			if !hostMatch {
+				log.Printf("WARN origin rejected: %s %s origin=%q host=%q",
+					r.Method, r.URL.Path, origin, r.Host)
 				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 				return
 			}
