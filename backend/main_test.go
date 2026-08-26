@@ -1411,6 +1411,51 @@ func TestAuthProxyStripsPixtokCookies(t *testing.T) {
 	}
 }
 
+func TestAuthProxyAppSessionCookieScoping(t *testing.T) {
+	// app_api_session_id must ride ONLY the app-host proxy: pixiv's OAuth
+	// continuation POST validates against it, and stripped upstream it
+	// 404s "invalid request" — the exact no-cookie response (live finding
+	// Aug 26). It must never reach accounts/www (least privilege).
+	var upstreamCookie atomic.Value
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCookie.Store(r.Header.Get("Cookie"))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("<html>ok</html>"))
+	}))
+	t.Cleanup(up.Close)
+	withProxyTargets(t, map[string]string{
+		"accounts": up.URL,
+		"app":      up.URL,
+		"www":      up.URL,
+		"oauth":    up.URL,
+	})
+	f := &fakeAPI{}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/api/auth/px/app/web/v1/users/auth/pixiv/start", true},
+		{"/api/auth/px/accounts/login", false},
+		{"/api/auth/px/www/account-selected", false},
+	} {
+		req := withFlowCookie(httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader("x=1")))
+		req.AddCookie(&http.Cookie{Name: "app_api_session_id", Value: "appsess123"})
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s proxied = %d, want 200", tc.path, rr.Code)
+		}
+		got, _ := upstreamCookie.Load().(string)
+		has := strings.Contains(got, "app_api_session_id=appsess123")
+		if has != tc.want {
+			t.Fatalf("%s upstream cookie %q (app session forwarded: %v, want %v)", tc.path, got, has, tc.want)
+		}
+	}
+}
+
 func TestAuthProxyRewritesCookiesAndLocations(t *testing.T) {
 	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false") // pin: strip Secure for HTTP dev
 	_, targets := fakePixivUpstream(t)

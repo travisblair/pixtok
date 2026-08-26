@@ -292,6 +292,16 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 				switch name {
 				case "PHPSESSID", "device_token":
 					kept = append(kept, strings.TrimSpace(part))
+				case "app_api_session_id":
+					// The OAuth continuation POST on the app host
+					// validates against this cookie — stripped
+					// upstream it 404s "invalid request", the exact
+					// no-cookie response (live finding Aug 26). It is
+					// only meaningful to app-api; accounts/www must
+					// not receive it (least privilege).
+					if kind == "app" {
+						kept = append(kept, strings.TrimSpace(part))
+					}
 				}
 			}
 			if len(kept) > 0 {
