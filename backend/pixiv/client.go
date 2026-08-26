@@ -670,7 +670,12 @@ func (c *Client) invalidateCsrf() {
 // user profile page is not — it embeds the same session-bound token in its
 // preloaded state.
 func (c *Client) csrfToken() (string, error) {
-	if tok, _ := c.webSession(); tok != "" {
+	// webSession() returns (phpSessID, csrfTokenCache) — the CACHE is the
+	// token. Regression (Aug 26): the web-session-race refactor read the
+	// first value and sent the PHPSESSID itself as x-csrf-token; pixiv
+	// 400s that pairing with a login-again error.
+	_, tok := c.webSession()
+	if tok != "" {
 		return tok, nil
 	}
 	sessID := c.webSessionID()

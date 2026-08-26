@@ -97,6 +97,42 @@ func newStreetClient(rt http.RoundTripper) *Client {
 	}
 }
 
+// headerTransport records the x-csrf-token + Cookie headers and answers
+// 200 JSON — lets the street request shape be asserted without a network.
+type headerTransport struct {
+	csrfToken string
+	cookie    string
+}
+
+func (r *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.csrfToken = req.Header.Get("x-csrf-token")
+	r.cookie = req.Header.Get("Cookie")
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"body":{"illusts":[]}}`)),
+		Request:    req,
+	}, nil
+}
+
+func TestStreetSendsCachedCsrfNotSession(t *testing.T) {
+	// Regression (Aug 26): the web-session-race refactor made csrfToken()
+	// return the PHPSESSID itself, so every street POST sent the session
+	// id as x-csrf-token and pixiv 400'd "log in once again". The cached
+	// csrf must ride the header; the session id must never.
+	rt := &headerTransport{}
+	c := newStreetClient(rt)
+	if _, err := c.GetStreet("{}"); err != nil {
+		t.Fatalf("GetStreet = %v, want success", err)
+	}
+	if rt.csrfToken != "tok" {
+		t.Fatalf("x-csrf-token = %q, want %q (the cached csrf)", rt.csrfToken, "tok")
+	}
+	if rt.cookie != "PHPSESSID=test" {
+		t.Fatalf("Cookie = %q, want %q (session rides the cookie only)", rt.cookie, "PHPSESSID=test")
+	}
+}
+
 func TestStreetRetriesOn400(t *testing.T) {
 	rt := &scriptTransport{codes: []int{400, 200}}
 	c := newStreetClient(rt)
