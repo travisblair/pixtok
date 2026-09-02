@@ -20,7 +20,7 @@ import FollowButton from "./FollowButton";
 
 const PIXEL =
   "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
-const CARD_MARGIN = "600% 0px 600% 0px"; // load/unload threshold: 6 viewports
+const CARD_MARGIN = "300% 0px 300% 0px"; // load/unload threshold: 3 viewports
 
 export default function FeedCard(props: {
   illust: PixivIllust;

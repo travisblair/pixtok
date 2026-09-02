@@ -1,4 +1,10 @@
-import { createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  For,
+  Show,
+  onCleanup,
+} from "solid-js";
 import type { PixivIllust } from "../types";
 import { getLikeState } from "../store";
 import { api } from "../api";
@@ -6,6 +12,12 @@ import UgoiraPlayer from "./UgoiraPlayer";
 
 const PIXEL =
   "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+// Load/unload window for grid cells: 3 viewports. Cells scrolled beyond
+// it swap their src to the 1px placeholder, freeing the decode; coming
+// back re-fetches from cache. square_medium thumbs are small (~50-100KB)
+// but hundreds of accumulated decodes after a long scroll is exactly
+// the footprint that gets the iOS tab purged — bounded beats churn.
+const GRID_MARGIN = "300% 0px 300% 0px";
 
 /**
  * Grid renderer for feed tabs + artist pages (the view-mode toggle).
@@ -13,12 +25,11 @@ const PIXEL =
  * Cells are deliberately minimal (settled spec): image + heart + ugoira
  * badge. No title/artist/tags — the strip carries the text overlays.
  *
- * Unlike the strip FeedCard, grid cells are EXEMPT from the scroll-based
- * image unload window: square_medium thumbs are ~50-100KB each and a
- * grid consumes them much faster than the strip — unload churn would
- * cost more than it saves. Offscreen fetches are deferred by native
- * lazy loading instead. Ugoira teardown on scroll-away still applies
- * (UgoiraPlayer's own IntersectionObserver) because zips are MBs.
+ * Cells carry the same scroll-based image window as the strip: within
+ * 3 viewports → image loaded; scrolled past → unloaded to a 1px
+ * placeholder (500ms exit hysteresis so boundary wiggle doesn't churn).
+ * Covered layers unload entirely via suppressImages. Ugoira teardown on
+ * scroll-away stays in UgoiraPlayer's own observer (zips are MBs).
  */
 export default function GridFeed(props: {
   illusts: PixivIllust[];
@@ -70,6 +81,49 @@ function GridCell(props: {
   const like = getLikeState(props.illust.id, props.illust.is_bookmarked);
   const liked = like.liked;
   const setLiked = like.setLiked;
+  // Scroll-based image window: offscreen cells hold no decode (see the
+  // GRID_MARGIN docs above). Defaults inactive — the IO flips it on.
+  const [active, setActive] = createSignal(false);
+  let rootRef: HTMLDivElement | undefined;
+  let unloadTimer: ReturnType<typeof setTimeout> | undefined;
+
+  createEffect(() => {
+    if (props.suppressImages) {
+      setActive(false);
+      setLoaded(false);
+      setError(false);
+      return;
+    }
+    const root = rootRef?.closest<HTMLElement>(".feed-container") ?? null;
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          clearTimeout(unloadTimer);
+          setActive(true);
+        } else {
+          // Hysteresis: only unload after 500ms out of range so boundary
+          // wiggle doesn't re-fetch/re-decode in a churn loop.
+          clearTimeout(unloadTimer);
+          unloadTimer = setTimeout(() => setActive(false), 500);
+        }
+      },
+      { root, rootMargin: GRID_MARGIN }
+    );
+    if (rootRef) io.observe(rootRef);
+    onCleanup(() => {
+      io.disconnect();
+      clearTimeout(unloadTimer);
+    });
+  });
+
+  // Deactivation resets per-cell state so re-activation loads fresh and
+  // no stale spinners/retries render offscreen.
+  createEffect(() => {
+    if (!active()) {
+      setLoaded(false);
+      setError(false);
+    }
+  });
 
   // square_medium is the grid's native size. Feeds that don't carry it
   // fall back to medium → large (same chain as the data-saver pick).
@@ -79,7 +133,7 @@ function GridCell(props: {
     props.illust.image_urls.large;
 
   const src = () =>
-    props.suppressImages
+    props.suppressImages || !active()
       ? PIXEL
       : `/api/img?url=${encodeURIComponent(img)}${
           attempts() > 0 ? `&r=${attempts()}` : ""
@@ -123,7 +177,7 @@ function GridCell(props: {
   }
 
   return (
-    <div class="grid-cell" onClick={handleTap}>
+    <div class="grid-cell" onClick={handleTap} ref={rootRef}>
       <Show
         when={props.illust.type === "ugoira" && !props.suppressImages}
         fallback={

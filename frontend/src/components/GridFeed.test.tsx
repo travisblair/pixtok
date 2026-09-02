@@ -134,4 +134,50 @@ describe("GridFeed", () => {
     const src = container.querySelector("img")!.getAttribute("src")!;
     expect(src).toContain(encodeURIComponent("https://i.pximg.net/m3.jpg"));
   });
+
+  // ── Scroll-based image window ───────────────────────────────────────
+  // The MockIntersectionObserver (test-setup) fires isIntersecting on
+  // observe(); these tests drive it manually to simulate scroll exit and
+  // re-entry. Instances are per-cell in mount order; the most recent
+  // instance belongs to the newest cell.
+  function fireIO(target: Element, isIntersecting: boolean) {
+    const IO = globalThis.IntersectionObserver as unknown as {
+      instances: { callback: (entries: unknown[]) => void }[];
+    };
+    const io = IO.instances[IO.instances.length - 1];
+    io.callback([{ isIntersecting, target }]);
+  }
+
+  it("cells scrolled out of the window unload to the placeholder after the 500ms hysteresis", () => {
+    vi.useFakeTimers();
+    const illusts = makeFeedOf(1, 1).illusts;
+    const { container } = render(() => <GridFeed illusts={illusts} />);
+    const cell = container.querySelector<HTMLElement>(".grid-cell")!;
+    const img = cell.querySelector("img")!;
+    expect(img.getAttribute("src")).toContain("/api/img?url="); // in window
+
+    fireIO(cell, false);
+    vi.advanceTimersByTime(499);
+    expect(img.getAttribute("src")).toContain("/api/img?url="); // hysteresis holds
+
+    vi.advanceTimersByTime(2);
+    expect(img.getAttribute("src")).toMatch(/^data:image\/gif;base64/); // unloaded
+    vi.useRealTimers();
+  });
+
+  it("cells re-entering the window restore their image src", () => {
+    vi.useFakeTimers();
+    const illusts = makeFeedOf(1, 1).illusts;
+    const { container } = render(() => <GridFeed illusts={illusts} />);
+    const cell = container.querySelector<HTMLElement>(".grid-cell")!;
+    const img = cell.querySelector("img")!;
+
+    fireIO(cell, false);
+    vi.advanceTimersByTime(501);
+    expect(img.getAttribute("src")).toMatch(/^data:image\/gif;base64/);
+
+    fireIO(cell, true);
+    expect(img.getAttribute("src")).toContain("/api/img?url="); // restored
+    vi.useRealTimers();
+  });
 });
