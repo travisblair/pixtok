@@ -173,6 +173,10 @@ func (f *fakeAPI) GetBookmarkIDs(restrict string, maxPages int) ([]string, error
 	}
 	return nil, nil
 }
+func (f *fakeAPI) CachedBookmarkIDs(restrict string, maxPages int) ([]string, error) {
+	// The cache lives in the real client; the fake passes through.
+	return f.GetBookmarkIDs(restrict, maxPages)
+}
 
 func (f *fakeAPI) GetBookmarkIllusts(restrict string) ([]byte, error) {
 	if f.bookmarkIllustsFn != nil {

@@ -35,6 +35,7 @@ type pixivAPI interface {
 	BookmarkAdd(illustID string, isPrivate bool) error
 	BookmarkDelete(illustID string) error
 	GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
+	CachedBookmarkIDs(restrict string, maxPages int) ([]string, error)
 	GetBookmarkIllusts(restrict string) ([]byte, error)
 	GetBookmarkPage(tag string, offset, limit int, order string) ([]byte, error)
 	GetBookmarkTags() ([]byte, error)
@@ -396,13 +397,15 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		}
 		// Both visibility pools: pixtok likes are private; the site's
 		// heart makes public ones. Merge so hearts are right either way.
-		privateIDs, err := api.GetBookmarkIDs("private", pages)
+		// Cached: repeat boots (and iOS reload spirals) must not re-walk
+		// 12 upstream pages every time — see pixiv/bookmarkids.go.
+		privateIDs, err := api.CachedBookmarkIDs("private", pages)
 		if err != nil {
 			log.Printf("ERROR bookmark ids (private): %v", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		publicIDs, err := api.GetBookmarkIDs("public", pages)
+		publicIDs, err := api.CachedBookmarkIDs("public", pages)
 		if err != nil {
 			log.Printf("ERROR bookmark ids (public): %v", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)

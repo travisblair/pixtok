@@ -137,6 +137,10 @@ type Client struct {
 	// upstream request per artist per window — see followstate.go.
 	// nil disables caching (test clients built as literals).
 	followState *followStateCache
+	// bookmarkIDs caches GetBookmarkIDs results (TTL + single-flight)
+	// so repeat boots don't re-walk 12 upstream pages — see
+	// bookmarkids.go. nil disables caching (test clients).
+	bookmarkIDs *bookmarkIDsCache
 }
 
 // maxUpstreamConcurrency sizes the doWith gate: high enough that a feed
@@ -196,6 +200,7 @@ func NewClient() (*Client, error) {
 		// even a throttled 6-at-a-time stream out-runs the limiter when
 		// every render re-asks for ~50 artists.)
 		followState: newFollowStateCache(30 * time.Minute),
+		bookmarkIDs: newBookmarkIDsCache(bookmarkIDsTTL),
 	}
 
 	// Also try loading PHPSESSID and the csrf token for web AJAX — env
