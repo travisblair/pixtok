@@ -2638,6 +2638,18 @@ func TestClientLogEndpoint(t *testing.T) {
 		t.Fatalf("ugoira journal line missing: %q", buf.String())
 	}
 
+	// Crash-trap breadcrumbs (uncaught errors from the phone) → 200.
+	reqC := httptest.NewRequest(http.MethodPost, "/api/log",
+		strings.NewReader(`{"session":"abc123","scope":"crash","msg":"error","data":{"m":"boom","s":"at App (index.js:1)"}}`))
+	rrC := httptest.NewRecorder()
+	h.ServeHTTP(rrC, reqC)
+	if rrC.Code != http.StatusOK {
+		t.Fatalf("crash scope = %d, want 200", rrC.Code)
+	}
+	if !strings.Contains(buf.String(), "CLIENT [abc123] crash: error") {
+		t.Fatalf("crash journal line missing: %q", buf.String())
+	}
+
 	// Malformed JSON → 400.
 	req3 := httptest.NewRequest(http.MethodPost, "/api/log", strings.NewReader("{nope"))
 	rr3 := httptest.NewRecorder()

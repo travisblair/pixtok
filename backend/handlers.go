@@ -203,7 +203,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			return
 		}
 		switch entry.Scope {
-		case "gesture", "layers", "follow", "gate", "boot", "app", "ugoira":
+		case "gesture", "layers", "follow", "gate", "boot", "app", "ugoira", "crash":
 		default:
 			http.Error(w, "invalid scope", http.StatusBadRequest)
 			return

@@ -1,5 +1,6 @@
 import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
 import { api, setOnGateLocked, setOnRequestError, logEvent } from "./api";
+import { uploadCrashBuffer } from "./crash-trap";
 import type { PixivIllust } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
 import {
@@ -806,6 +807,10 @@ export default function App() {
       .then((s) => {
         logEvent("gate", s.locked ? "locked" : "open");
         if (s.locked) return; // gate screen stays up; boot on unlock
+        // Flush any crash entries the previous page load left behind —
+        // the ring survives reloads, and this is the first moment the
+        // gate cookie guarantees /api/log will accept them.
+        uploadCrashBuffer();
         setGateLocked(false);
         boot();
       })
