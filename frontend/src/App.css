@@ -53,6 +53,13 @@
   scroll-snap-align: start;
   position: relative;
   display: flex;
+  /* Skip rendering for offscreen cards entirely (layout + paint +
+     render-tree memory). The DOM and snap points stay, and the fixed
+     100dvh height makes the intrinsic size exact — no scroll jumps.
+     This is the iOS tab-pressure fix: hundreds of cards stay cheap
+     instead of accumulating full render trees. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 100dvh;
   align-items: center;
   justify-content: center;
   background: #000;
@@ -1457,6 +1464,11 @@
   overflow: hidden;
   border-radius: 6px;
   background: #161616;
+  /* Same render-skip as .feed-card: offscreen cells stop costing
+     layout/paint. Intrinsic size is auto — the 1:1 aspect keeps it
+     exact per cell. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 118px;
 }
 
 .grid-cell-placeholder {
