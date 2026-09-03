@@ -22,8 +22,8 @@ function baseSnapshot(): SnapshotInput {
     recs: [makeIllust({ id: 11 })],
     recsSource: "Source",
     modalOpen: true,
-    searchOpen: false,
-    search: null,
+    searchStack: [],
+    searchTags: [],
     layerOrder: ["s0", "artist"],
   };
 }
@@ -75,6 +75,52 @@ describe("saveSnapshot/loadSnapshot", () => {
     expect(loaded.stack.map((i) => i.id)).toEqual([9]);
     expect(loaded.artist).toEqual({ id: 42, name: "ArtistName" });
     expect("illusts" in loaded).toBe(false);
+  });
+
+  it("migrates a legacy single-search payload into searchStack[0]", () => {
+    // Pre-multi-search snapshots carried searchOpen/search. The tag
+    // identity is unknowable — the word stands in so the dedupe rule
+    // still sees "this tag is open" after an upgrade.
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+        searchOpen: true,
+        search: {
+          word: "snow",
+          mode: "works",
+          order: "date_d",
+          contentMode: "all",
+          workType: "all",
+          sMode: "s_tag_full",
+          aiType: "0",
+          dateMode: "all",
+          scd: "",
+          sce: "",
+          works: [],
+          popular: [],
+          related: [],
+          users: [],
+          page: 0,
+          hasMore: false,
+        },
+        layerOrder: ["search", "s0"],
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.searchStack.length).toBe(1);
+    expect(loaded.searchStack[0].word).toBe("snow");
+    expect(loaded.searchTags).toEqual(["snow"]);
   });
 
   it("defaults artist to null when absent or malformed", () => {

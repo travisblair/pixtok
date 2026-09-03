@@ -1,4 +1,4 @@
-import { createSignal, createEffect, on, For, Show } from "solid-js";
+import { createSignal, createEffect, on, onMount, For, Show } from "solid-js";
 import { api } from "../api";
 import type { PixivIllust, SearchUserResult } from "../types";
 import FeedCard from "./FeedCard";
@@ -105,12 +105,6 @@ export default function SearchScreen(props: {
 
   let sentinelRef: HTMLDivElement | undefined;
   let reqSeq = 0;
-  // The restore auto-run (below) may fire exactly ONCE per mount. Without
-  // this flag a restored search that resolves to zero works — or rejects —
-  // re-fired runSearch every time loading() flipped back to false: an
-  // infinite search loop (the rejection case doesn't even yield to the
-  // event loop — app unusable until kill).
-  let autoRan = false;
   const seen = new Set<number>(
     initial ? initial.works.map((w) => w.id) : []
   );
@@ -126,7 +120,6 @@ export default function SearchScreen(props: {
     // setLoading(false), and the new run was blocked by the guard —
     // endless spinner with zero requests.
     const seq = ++reqSeq;
-    autoRan = true;
     setLoading(true);
     setError(false);
     setLoadMoreError(false);
@@ -299,12 +292,13 @@ export default function SearchScreen(props: {
     });
   });
 
-  // Auto-run only when a query was restored without results (the layer
-  // refetches nothing by default — restored state renders verbatim).
-  // autoRan caps this at ONE attempt per mount: a zero-result or failed
-  // restore must not re-fire the effect forever.
-  createEffect(() => {
-    if (initial && query() && !autoRan && works().length === 0 && users().length === 0 && !loading()) {
+  // Auto-run: a RESTORED query without results refetches once per mount.
+  // onMount, NOT a createEffect — a reactive effect subscribed to
+  // query()/works()/loading() could interleave with the user's submit
+  // in a real browser and double-fire the search (two identical
+  // upstream calls; caught by the e2e search spec).
+  onMount(() => {
+    if (initial && query() && works().length === 0 && users().length === 0) {
       void runSearch(true);
     }
   });

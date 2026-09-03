@@ -1187,6 +1187,119 @@ describe("App", () => {
 });
 
 
+  describe("multi-search layers", () => {
+    function tapChip(container: HTMLElement, name: string) {
+      const chip = [...container.querySelectorAll(".card-tag-chip")].find((c) =>
+        c.textContent?.includes(name)
+      ) as HTMLElement;
+      expect(chip).toBeTruthy();
+      return fireEvent.click(chip);
+    }
+
+    it("tag taps stack search pages instead of re-seeding one layer", async () => {
+      mockedApi.getStreet.mockResolvedValue(
+        makeFeed([
+          makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+          makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+        ])
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      await tapChip(container, "rain");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+      // Both layers fetched their own tag page.
+      expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(2);
+      // The covered layer's images are suppressed (top layer owns them).
+      const views = container.querySelectorAll(".search-screen");
+      expect(views[0].querySelector("img")?.getAttribute("src")).toContain(
+        "data:image/gif"
+      );
+    });
+
+    it("tapping a tag already open toasts instead of stacking a duplicate", async () => {
+      mockedApi.getStreet.mockResolvedValue(
+        makeFeed([makeIllust({ id: 1, tags: [{ name: "snow" }] })])
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelector(".toast")?.textContent).toContain(
+          "already open"
+        )
+      );
+      expect(container.querySelectorAll(".search-screen").length).toBe(1);
+    });
+
+    it("back on the top search layer reveals the layer beneath", async () => {
+      mockedApi.getStreet.mockResolvedValue(
+        makeFeed([
+          makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+          makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+        ])
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      await tapChip(container, "rain");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+      // Close the top layer (its back button) — the #snow page remains.
+      const top = container.querySelectorAll(".search-screen")[1];
+      await fireEvent.click(top.querySelector(".related-back")!);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      const input = container.querySelector(
+        ".search-screen .search-input"
+      ) as HTMLInputElement;
+      expect(input.value).toBe("snow");
+    });
+
+    it("caps search pages at MAX_SEARCH_DEPTH with a toast", async () => {
+      const tags = Array.from({ length: 11 }, (_, i) => `tag${i}`);
+      mockedApi.getStreet.mockResolvedValue(
+        makeFeed(
+          tags.map((t, i) => makeIllust({ id: i + 1, tags: [{ name: t }] }))
+        )
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      for (const t of tags) {
+        await tapChip(container, t);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(container.querySelectorAll(".search-screen").length).toBe(10);
+      await waitFor(() =>
+        expect(container.querySelector(".toast")?.textContent).toContain(
+          "Max search pages"
+        )
+      );
+    });
+  });
+
   describe("grid view mode", () => {
     it("grid toggle renders cells in the main feed; stack layers stay strip", async () => {
       mockedApi.getFeedViewMode.mockResolvedValue({ value: "grid" });

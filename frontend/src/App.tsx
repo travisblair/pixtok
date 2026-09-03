@@ -31,6 +31,7 @@ import {
   loadSnapshot,
   saveSnapshot,
   MAX_STACK_DEPTH,
+  MAX_SEARCH_DEPTH,
 } from "./state-persistence";
 import { useFeedSentinel, useToast } from "./hooks";
 import "./App.css";
@@ -94,15 +95,20 @@ export default function App() {
   const [configOpen, setConfigOpen] = createSignal(false);
   const [loginOpen, setLoginOpen] = createSignal(false);
   const [tagsIllust, setTagsIllust] = createSignal<PixivIllust | null>(null);
-  // When the search layer is ALREADY open, tag taps re-seed it through
-  // this signal (SearchScreen re-runs on change instead of remounting).
-  const [searchSeed, setSearchSeed] = createSignal<string | null>(null);
   const [artist, setArtist] = createSignal<{ id: number; name: string; z: number } | null>(null);
   const [artistClosing, setArtistClosing] = createSignal(false);
-  // Search layer (opened from the drawer — own feed, own state).
-  const [searchLayer, setSearchLayer] = createSignal<{ z: number } | null>(null);
-  const [searchClosing, setSearchClosing] = createSignal(false);
-  const [searchState, setSearchState] = createSignal<SearchState | null>(null);
+  // Stacked search layers (2026-09 multi-search): every tag tap
+  // instances a NEW page on top, like the related stack. Entries are
+  // STABLE ({tag,z}) so <For> never remounts a layer; each layer's
+  // SearchState lives in the parallel searchStates array (same split
+  // as the related stack: stable keys, content elsewhere). tag=null =
+  // free-form drawer search; tag identity feeds the dedupe rule.
+  const [searchStack, setSearchStack] = createSignal<
+    { tag: string | null; z: number }[]
+  >([]);
+  const [searchStates, setSearchStates] = createSignal<SearchState[]>([]);
+  // z of the search layer currently animating out; null = none.
+  const [closingSearchZ, setClosingSearchZ] = createSignal<number | null>(null);
   // 1-based depth of the stack level currently animating out; null = none.
   const [closingDepth, setClosingDepth] = createSignal<number | null>(null);
   const [stack, setStack] = createSignal<{ illust: PixivIllust; z: number }[]>([]);
@@ -132,9 +138,10 @@ export default function App() {
       if (key === "artist") {
         const a = artist();
         if (a && !artistClosing()) z = a.z;
-      } else if (key === "search") {
-        const sl = searchLayer();
-        if (sl && !searchClosing()) z = sl.z;
+      } else if (key.startsWith("search")) {
+        const i = Number(key.slice(6));
+        const entry = searchStack()[i];
+        if (entry && closingSearchZ() !== entry.z) z = entry.z;
       } else if (key.startsWith("s")) {
         const i = Number(key.slice(1));
         const entry = stack()[i];
@@ -153,8 +160,11 @@ export default function App() {
       const offenders: string[] = [];
       const a = artist();
       if (a && !artistClosing() && a.z > tz) offenders.push(`artist(z=${a.z})`);
-      const sl = searchLayer();
-      if (sl && !searchClosing() && sl.z > tz) offenders.push(`search(z=${sl.z})`);
+      const sl = searchStack();
+      if (sl.length > 0 && closingSearchZ() === null) {
+        const topSearch = sl[sl.length - 1];
+        if (topSearch.z > tz) offenders.push(`search(z=${topSearch.z})`);
+      }
       stack().forEach((entry, i) => {
         if (closingDepth() !== i + 1 && entry.z > tz) {
           offenders.push(`s${i}(z=${entry.z})`);
@@ -361,10 +371,10 @@ export default function App() {
     if (
       stack().length === 0 &&
       !artist() &&
-      !searchLayer() &&
+      searchStack().length === 0 &&
       closingDepth() === null &&
       !artistClosing() &&
-      !searchClosing()
+      closingSearchZ() === null
     ) {
       layerZ = LAYER_Z_BASE;
     }
@@ -381,7 +391,9 @@ export default function App() {
     // open search layer from the open order while it stayed rendered,
     // topZ fell to 0 and every search image stayed suppressed (the
     // black-search-page-after-✕ bug; only a reload restored it).
-    setLayerSeq(layerSeq().filter((k) => k === "search" || k === "artist"));
+    setLayerSeq(
+      layerSeq().filter((k) => k.startsWith("search") || k === "artist")
+    );
     persistNow({ stack: [], modalOpen: false });
     setStack([]);
     setModalOpen(false);
@@ -424,10 +436,18 @@ export default function App() {
   }
 
   function openSearch() {
-    if (searchLayer()) return;
+    if (searchStack().length >= MAX_SEARCH_DEPTH) {
+      showToast(
+        `Max search pages reached (${MAX_SEARCH_DEPTH}) — close one to open more`,
+        false
+      );
+      return;
+    }
     layerZ++;
-    setSearchLayer({ z: layerZ });
-    setLayerSeq([...layerSeq(), "search"]);
+    const idx = searchStack().length;
+    setSearchStates([...searchStates(), makeInitialSearchState("")]);
+    setSearchStack([...searchStack(), { tag: null, z: layerZ }]);
+    setLayerSeq([...layerSeq(), `search${idx}`]);
   }
 
   /** Fresh search-layer state seeded with a tag (the tag's works page). */
@@ -452,29 +472,55 @@ export default function App() {
     };
   }
 
-  /** Tap a tag anywhere → its works page (pixiv's tag page). */
+  /**
+   * Tap a tag anywhere → a NEW search layer for that tag's works page
+   * (multi-search: layers stack like related views). A tag already open
+   * in the stack re-opens nothing — the "already open" contract, same
+   * as tapping a work that's already in the related stack.
+   */
   function openTagPage(tag: string) {
     setTagsIllust(null);
-    if (searchLayer()) {
-      // Re-seed the existing layer in place (SearchScreen listens on
-      // seedTag and re-runs — same as tapping a related-tag pill).
-      setSearchSeed(tag);
-    } else {
-      setSearchState(makeInitialSearchState(tag));
-      openSearch();
+    if (searchStack().some((s) => s.tag === tag)) {
+      showToast("This tag is already open — tap Back to return to it", false);
+      return;
     }
+    if (searchStack().length >= MAX_SEARCH_DEPTH) {
+      showToast(
+        `Max search pages reached (${MAX_SEARCH_DEPTH}) — close one to open more`,
+        false
+      );
+      return;
+    }
+    layerZ++;
+    const idx = searchStack().length;
+    setSearchStates([...searchStates(), makeInitialSearchState(tag)]);
+    setSearchStack([...searchStack(), { tag, z: layerZ }]);
+    setLayerSeq([...layerSeq(), `search${idx}`]);
   }
 
-  function closeSearch() {
-    if (searchClosing()) return;
-    logEvent("layers", "closeSearch", { layers: layerSeq().length });
-    setSearchClosing(true); // play the slide-out
-    const closingZ = searchLayer()?.z;
-    setLayerSeq(layerSeq().filter((k) => k !== "search"));
-    persistNow({ searchOpen: false, search: null });
+  /** Report state for one search layer (index in the stack). */
+  function updateSearchState(idx: number, s: SearchState) {
+    setSearchStates((prev) => prev.map((e, i) => (i === idx ? s : e)));
+  }
+
+  function closeSearch(z: number) {
+    if (closingSearchZ() !== null) return;
+    const idx = searchStack().findIndex((s) => s.z === z);
+    if (idx === -1) return;
+    logEvent("layers", "closeSearch", { layers: layerSeq().length, idx });
+    setClosingSearchZ(z); // play the slide-out
+    // The close MUST hit the snapshot immediately (jetsam-during-animation
+    // would resurrect this layer on the next reload) — same flush as every
+    // other close path.
+    setLayerSeq(layerSeq().filter((k) => k !== `search${idx}`));
+    persistNow({
+      searchStack: searchStates().filter((_, i) => i !== idx),
+      searchTags: searchStack().filter((_, i) => i !== idx).map((e) => e.tag),
+    });
     setTimeout(() => {
-      setSearchLayer(sl => (closingZ !== undefined && sl && sl.z === closingZ ? null : sl));
-      setSearchClosing(false);
+      setSearchStack((prev) => prev.filter((s) => s.z !== z));
+      setSearchStates((prev) => prev.filter((_, i) => i !== idx));
+      setClosingSearchZ(null);
       resetLayerZIfIdle();
     }, CLOSE_TIMEOUT_MS);
   }
@@ -576,7 +622,11 @@ export default function App() {
     const top = layerSeq().at(-1);
     logEvent("layers", "popTopLayer", { top, layers: layerSeq().length });
     if (top === "artist") closeArtist();
-    else if (top === "search") closeSearch();
+    else if (top?.startsWith("search")) {
+      const i = Number(top.slice(6));
+      const entry = searchStack()[i];
+      if (entry) closeSearch(entry.z);
+    }
     else if (top?.startsWith("s")) popRelated();
   }
 
@@ -695,17 +745,24 @@ export default function App() {
       // the artist on top: an artist-under-stack session came back
       // flipped, and wrong obscured flags suppressed the top layer's
       // images (the recurring black-screen class).
-      let restoredSearchZ = 0;
       let restoredArtistZ = 0;
       const restoredZs: number[] = new Array(snap.stack.length).fill(0);
+      const restoredSearchZs: number[] = new Array(snap.searchStack.length).fill(0);
       const order =
         snap.layerOrder.length > 0
           ? snap.layerOrder
-          : ["search", ...snap.stack.map((_, i) => `s${i}`), "artist"];
+          : [
+              ...snap.searchStack.map((_, i) => `search${i}`),
+              ...snap.stack.map((_, i) => `s${i}`),
+              "artist",
+            ];
       for (const key of order) {
-        if (key === "search" && snap.searchOpen && snap.search) {
-          layerZ++;
-          restoredSearchZ = layerZ;
+        if (key.startsWith("search")) {
+          const i = Number(key.slice(6));
+          if (Number.isInteger(i) && i >= 0 && i < snap.searchStack.length) {
+            layerZ++;
+            restoredSearchZs[i] = layerZ;
+          }
         } else if (key === "artist" && snap.artist) {
           layerZ++;
           restoredArtistZ = layerZ;
@@ -719,9 +776,11 @@ export default function App() {
       }
       // Any layer missing from the saved order still gets a z (appended
       // on top — matches "opened later" semantics).
-      if (snap.searchOpen && snap.search && restoredSearchZ === 0) {
-        layerZ++;
-        restoredSearchZ = layerZ;
+      for (let i = 0; i < snap.searchStack.length; i++) {
+        if (restoredSearchZs[i] === 0) {
+          layerZ++;
+          restoredSearchZs[i] = layerZ;
+        }
       }
       for (let i = 0; i < snap.stack.length; i++) {
         if (restoredZs[i] === 0) {
@@ -734,17 +793,22 @@ export default function App() {
         restoredArtistZ = layerZ;
       }
 
-      if (snap.searchOpen && snap.search) {
-        setSearchState(snap.search);
-        setSearchLayer({ z: restoredSearchZ });
-      }
+      // States land FIRST: the For rows mount on the searchStack write,
+      // and each row reads its initial state at mount time.
+      setSearchStates(snap.searchStack);
+      setSearchStack(
+        snap.searchTags.map((tag, i) => ({ tag, z: restoredSearchZs[i] }))
+      );
       setStack(snap.stack.map((ill, i) => ({ illust: ill, z: restoredZs[i] })));
       if (snap.artist) {
         setArtist({ id: snap.artist.id, name: snap.artist.name, z: restoredArtistZ });
       }
       setLayerSeq(
         order.filter((k) => {
-          if (k === "search") return snap.searchOpen && !!snap.search;
+          if (k.startsWith("search")) {
+            const i = Number(k.slice(6));
+            return Number.isInteger(i) && i >= 0 && i < snap.searchStack.length;
+          }
           if (k === "artist") return !!snap.artist;
           const i = Number(k.slice(1));
           return Number.isInteger(i) && i >= 0 && i < snap.stack.length;
@@ -837,8 +901,8 @@ export default function App() {
     void recs();
     void recsSource();
     void modalOpen();
-    void searchLayer();
-    void searchState();
+    void searchStack();
+    void searchStates();
     void gateLocked();
     clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
@@ -863,8 +927,8 @@ export default function App() {
       recs: recs(),
       recsSource: recsSource(),
       modalOpen: modalOpen(),
-      searchOpen: searchLayer() !== null,
-      search: searchState(),
+      searchStack: searchStates(),
+      searchTags: searchStack().map((e) => e.tag),
       layerOrder: [...layerSeq()],
     };
   }
@@ -1111,17 +1175,18 @@ export default function App() {
         )}
       </Show>
 
-      {/* Search layer — its own feed, stacks/artist push on top of it */}
-      <Show when={searchLayer()}>
-        {(sl) => (
+      {/* Search layers — stacked, one per tag tap; the related stack and
+          the artist page push on top of the TOPMOST search page. Each
+          layer keeps its own state and closes independently. */}
+      <For each={searchStack()}>
+        {(entry, i) => (
           <SearchScreen
-            zIndex={sl().z}
-            closing={searchClosing()}
-            obscured={sl().z !== topZ() || searchClosing()}
-            initial={searchState() ?? undefined}
-            seedTag={searchSeed() ?? undefined}
-            onState={setSearchState}
-            onClose={closeSearch}
+            zIndex={entry.z}
+            closing={closingSearchZ() === entry.z}
+            obscured={entry.z !== topZ() || closingSearchZ() === entry.z}
+            initial={searchStates()[i()]}
+            onState={(s) => updateSearchState(i(), s)}
+            onClose={() => closeSearch(entry.z)}
             onImageTap={pushRelated}
             onArtistOpen={openArtist}
             onUserOpen={openArtistUser}
@@ -1129,7 +1194,7 @@ export default function App() {
             onTagOpen={openTagPage}
           />
         )}
-      </Show>
+      </For>
 
       {/* Settings (blocked tags) */}
       <Show when={configOpen()}>
