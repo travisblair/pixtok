@@ -108,6 +108,13 @@ func newPkceStore() *pkceStore {
 }
 
 const pkceTTL = 10 * time.Minute
+
+// Per-response write deadlines for the slow relay routes — the tarpit
+// pattern: the global 15s WriteTimeout covers the whole handler cycle,
+// which multi-MB image relays outlive on the Pi. Ugoira meta rides the
+// same slow path as the zip it describes.
+const ugoiraMetaWriteDeadline = 60 * time.Second
+const imageWriteDeadline = 120 * time.Second
 const pkceMaxEntries = 32
 
 func (s *pkceStore) put(state, verifier string) {
@@ -738,7 +745,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			// the server's global 15s WriteTimeout killed the whole
 			// handler cycle first — the client's longer wait was
 			// illusory. Same override as the image route.
-			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(60 * time.Second)); err != nil {
+			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(ugoiraMetaWriteDeadline)); err != nil {
 				log.Printf("WARNING ugoira meta write deadline: %v", err)
 			}
 			body, err := api.GetUgoiraMeta(id)
@@ -812,7 +819,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		// Set here for the CACHE-HIT path, and again after the slot
 		// acquire for misses: time spent QUEUED must not eat the 120s
 		// transfer budget.
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second)); err != nil {
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(imageWriteDeadline)); err != nil {
 			log.Printf("WARNING img write deadline: %v", err)
 		}
 
@@ -852,7 +859,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		}
 		defer func() { <-imgFetchSlots }()
 
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second)); err != nil {
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(imageWriteDeadline)); err != nil {
 			log.Printf("WARNING img write deadline: %v", err)
 		}
 

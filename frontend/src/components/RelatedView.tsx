@@ -1,5 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
-import { api } from "../api";
+import { getRelated } from "../api/illust";
+import { getNextPage } from "../api/feeds";
+import { reportApiError } from "../api/client";
 import type { PixivIllust } from "../types";
 import FeedCard from "./FeedCard";
 import { filterBlockedTags, dedupeSeen } from "../helpers";
@@ -35,7 +37,7 @@ export default function RelatedView(props: {
     setLoading(true);
     setError(false);
     try {
-      const data = await api.getRelated(props.anchor.id);
+      const data = await getRelated(props.anchor.id);
       const fresh = dedupeSeen(
         seen,
         filterBlockedTags(
@@ -46,6 +48,7 @@ export default function RelatedView(props: {
       setIllusts(prev => [...prev, ...fresh]);
       setNextUrl(data.next_url);
     } catch (err) {
+      reportApiError(err);
       console.error("Failed to load related:", err);
       setError(true);
     } finally {
@@ -58,13 +61,14 @@ export default function RelatedView(props: {
     setLoading(true);
     setLoadMoreError(false);
     try {
-      const data = await api.getNextPage(nextUrl()!);
+      const data = await getNextPage(nextUrl()!);
       setIllusts(prev => [
         ...prev,
         ...dedupeSeen(seen, filterBlockedTags(data.illusts, blockedTags())),
       ]);
       setNextUrl(data.next_url);
     } catch (err) {
+      reportApiError(err);
       console.error("Failed to load more related:", err);
       // The observer won't re-fire on its own — surface a retry.
       setLoadMoreError(true);

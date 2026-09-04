@@ -4,17 +4,24 @@ import GridFeed from "./GridFeed";
 import { makeIllust, makeFeedOf } from "../test-fixtures";
 import { getLikeState } from "../store";
 
-vi.mock("../api", () => ({
-  api: {
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    getUgoiraMeta: vi.fn(),
-  },
-  logEvent: vi.fn(),
+vi.mock("../api/illust", () => ({
+  like: vi.fn(async () => {}),
+  unlike: vi.fn(async () => {}),
 }));
+vi.mock("../api/search", () => ({
+  getUgoiraMeta: vi.fn(),
+}));
+vi.mock("../api/client", async () => {
+  const actual = await vi.importActual("../api/client");
+  return { logEvent: vi.fn(), reportApiError: vi.fn(), ApiError: actual.ApiError };
+});
 
-import { api } from "../api";
-const mockedApi = api as unknown as {
+import * as illust from "../api/illust";
+import * as search from "../api/search";
+const mockedApi = {
+  ...illust,
+  ...search,
+} as unknown as {
   like: ReturnType<typeof vi.fn>;
   unlike: ReturnType<typeof vi.fn>;
   getUgoiraMeta: ReturnType<typeof vi.fn>;

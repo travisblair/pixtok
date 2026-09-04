@@ -1,6 +1,7 @@
 import { createSignal, createEffect, on, onMount, onCleanup, Show } from "solid-js";
 import { unzip, type Unzipped } from "fflate";
-import { api, logEvent } from "../api";
+import { ApiError, logEvent, reportApiError } from "../api/client";
+import { getUgoiraMeta } from "../api/search";
 
 /**
  * Canvas-based ugoira player, mirroring how pixiv.net does it: fetch
@@ -154,6 +155,7 @@ export default function UgoiraPlayer(props: {
       drawStatic();
       setPosterReady(true);
     } catch (e) {
+      if (e instanceof ApiError) reportApiError(e);
       if (e instanceof Error && e.name === "AbortError") {
         // Deadline abort (seq still current) = the poster genuinely
         // stalled — badge it like any other failure. Teardown aborts
@@ -189,7 +191,7 @@ export default function UgoiraPlayer(props: {
     // deadline (the Pi can take well over 30s to relay a big zip).
     const timeout = setTimeout(() => controller.abort(), 120_000);
     try {
-      const meta = await api.getUgoiraMeta(props.illustId);
+      const meta = await getUgoiraMeta(props.illustId);
       const body = meta.body;
 
       const zipRes = await fetch(`/api/img?url=${encodeURIComponent(body.src)}`, {
@@ -234,6 +236,7 @@ export default function UgoiraPlayer(props: {
       setStatus("playing");
       step();
     } catch (e) {
+      if (e instanceof ApiError) reportApiError(e);
       if (e instanceof Error && e.name === "AbortError") {
         // Deadline abort (seq still current) = the zip genuinely stalled
         // past 120s. Before this check the catch returned silently and
@@ -272,12 +275,12 @@ export default function UgoiraPlayer(props: {
           1,
           maxSide / Math.max(img.naturalWidth, img.naturalHeight)
         );
-        const c = document.createElement("canvas");
-        c.width = Math.max(1, Math.round(img.naturalWidth * scale));
-        c.height = Math.max(1, Math.round(img.naturalHeight * scale));
-        c.getContext("2d")?.drawImage(img, 0, 0, c.width, c.height);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
         URL.revokeObjectURL(url);
-        resolve(c);
+        resolve(canvas);
       };
       img.onerror = () => {
         URL.revokeObjectURL(url);
@@ -308,14 +311,14 @@ export default function UgoiraPlayer(props: {
     // Owns its taps — the card must NOT push a related stack on play/pause.
     e?.stopPropagation();
     e?.preventDefault();
-    const s = status();
-    if (s === "loading") return;
-    if (s === "playing") {
+    const state = status();
+    if (state === "loading") return;
+    if (state === "playing") {
       clearTimer();
       setStatus("paused"); // frozen frame stays on canvas; ▶ returns
       return;
     }
-    if (s === "paused") {
+    if (state === "paused") {
       setStatus("playing");
       step(); // resume from the current frame
       return;

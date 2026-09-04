@@ -7,7 +7,8 @@ import {
 } from "solid-js";
 import type { PixivIllust } from "../types";
 import { getLikeState } from "../store";
-import { api } from "../api";
+import { like as likeWork, unlike as unlikeWork } from "../api/illust";
+import { reportApiError } from "../api/client";
 import UgoiraPlayer from "./UgoiraPlayer";
 
 const PIXEL =
@@ -148,13 +149,14 @@ function GridCell(props: {
     setLiked(newLiked);
     try {
       if (newLiked) {
-        await api.like(props.illust.id);
+        await likeWork(props.illust.id);
         props.onLike?.(props.illust);
       } else {
-        await api.unlike(props.illust.id);
+        await unlikeWork(props.illust.id);
         props.onUnlike?.(props.illust); // bookmarks tab removes the cell
       }
-    } catch {
+    } catch (err) {
+      reportApiError(err);
       setLiked(!newLiked); // revert on failure
     } finally {
       setBusy(false);
@@ -169,10 +171,10 @@ function GridCell(props: {
 
   function handleTap(e: MouseEvent) {
     if (!props.onTap) return;
-    const t = e.target as HTMLElement;
+    const target = e.target as HTMLElement;
     // Ignore taps on the cell's interactive children — heart, ugoira
     // badge, retry — so controls never open a stack.
-    if (t.closest(".grid-cell-heart, .grid-cell-ugoira, .grid-cell-retry")) return;
+    if (target.closest(".grid-cell-heart, .grid-cell-ugoira, .grid-cell-retry")) return;
     props.onTap(props.illust);
   }
 

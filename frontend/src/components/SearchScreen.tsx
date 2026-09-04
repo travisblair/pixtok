@@ -1,5 +1,6 @@
 import { createSignal, createEffect, on, onMount, For, Show } from "solid-js";
-import { api } from "../api";
+import { searchArtworks, searchUsers } from "../api/search";
+import { reportApiError } from "../api/client";
 import type { PixivIllust, SearchUserResult } from "../types";
 import FeedCard from "./FeedCard";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
@@ -110,8 +111,8 @@ export default function SearchScreen(props: {
   );
 
   async function runSearch(fresh: boolean) {
-    const q = query().trim();
-    if (!q) return;
+    const term = query().trim();
+    if (!term) return;
     // NOTE: no loading() early-return here. Each call takes the seq —
     // a new call invalidates any in-flight run (its finally skips
     // setLoading) and owns the spinner itself. The old guard +
@@ -125,9 +126,9 @@ export default function SearchScreen(props: {
     setLoadMoreError(false);
     try {
       if (mode() === "works") {
-        const p = fresh ? 1 : page() + 1;
-        const data = await api.searchArtworks({
-          word: q,
+        const nextPage = fresh ? 1 : page() + 1;
+        const data = await searchArtworks({
+          word: term,
           order: order(),
           contentMode: contentMode(),
           workType: workType(),
@@ -135,7 +136,7 @@ export default function SearchScreen(props: {
           aiType: aiType(),
           scd: scd(),
           sce: sce(),
-          p,
+          p: nextPage,
         });
         if (seq !== reqSeq) return;
         // A fresh search/order change starts a NEW result set — reset
@@ -150,19 +151,19 @@ export default function SearchScreen(props: {
         } else {
           setWorks((prev) => [...prev, ...freshWorks]);
         }
-        setPage(p);
-        setHasMore(p < data.last_page);
+        setPage(nextPage);
+        setHasMore(nextPage < data.last_page);
       } else {
-        const p = fresh ? 1 : page() + 1;
-        const data = await api.searchUsers(q, p);
+        const nextPage = fresh ? 1 : page() + 1;
+        const data = await searchUsers(term, nextPage);
         if (seq !== reqSeq) return;
         if (fresh) {
           setUsers(data.users);
         } else {
           setUsers((prev) => [...prev, ...data.users]);
         }
-        setPage(p);
-        setHasMore(p * USERS_PER_PAGE < data.total);
+        setPage(nextPage);
+        setHasMore(nextPage * USERS_PER_PAGE < data.total);
       }
       // A fresh search starts a NEW result set — jump back to the top
       // so the page-1 popular/tags rows and the first results are
@@ -171,10 +172,11 @@ export default function SearchScreen(props: {
       // jsdom (no Element.scrollTo) from throwing inside the search
       // try-block and masquerading as an upstream failure.
       if (fresh) {
-        const c = sentinelRef?.closest<HTMLElement>(".feed-container");
-        if (c && typeof c.scrollTo === "function") c.scrollTo({ top: 0 });
+        const container = sentinelRef?.closest<HTMLElement>(".feed-container");
+        if (container && typeof container.scrollTo === "function") container.scrollTo({ top: 0 });
       }
     } catch (err) {
+      reportApiError(err);
       if (seq === reqSeq) {
         console.error("Search failed:", err);
         if (fresh) {
@@ -196,9 +198,9 @@ export default function SearchScreen(props: {
 
   function submit(e: Event) {
     e.preventDefault();
-    const q = word().trim();
-    if (!q) return;
-    setQuery(q);
+    const term = word().trim();
+    if (!term) return;
+    setQuery(term);
     void runSearch(true);
   }
 
