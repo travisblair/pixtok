@@ -87,7 +87,8 @@ export default function FollowButton(props: {
     try {
       if (next) await follow(props.userId);
       else await unfollow(props.userId);
-    } catch {
+    } catch (err) {
+      reportApiError(err);
       setFollowed(!next); // revert — the tap was not authoritative
     } finally {
       setBusy(false);
