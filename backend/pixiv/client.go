@@ -85,8 +85,8 @@ func validAPIHost(raw string) bool {
 	if err != nil || u.Scheme != "https" || u.Hostname() != "app-api.pixiv.net" {
 		return false
 	}
-	p := u.Port()
-	return p == "" || p == "443"
+	port := u.Port()
+	return port == "" || port == "443"
 }
 
 // validImageURL enforces the allowlist for the /api/img proxy:
@@ -101,8 +101,8 @@ func validImageURL(raw string) bool {
 	if u.User != nil || u.Fragment != "" {
 		return false
 	}
-	p := u.Port()
-	return p == "" || p == "443"
+	port := u.Port()
+	return port == "" || port == "443"
 }
 
 type Client struct {
@@ -154,6 +154,30 @@ const maxUpstreamConcurrency = 6
 // buttons once it has.
 const followCooldownDuration = 5 * time.Minute
 
+// clientTimeout caps every upstream fetch on the shared app-API client.
+// The image path carries its own longer ceiling (imageClientTimeout).
+const clientTimeout = 30 * time.Second
+
+// followStateTTL is the follow-state cache window (see newFollowStateCache).
+const followStateTTL = 30 * time.Minute
+
+// tokenRetryBackoff is how long a failed refresh stays failed: expiresAt
+// moves to now+this, so ensureToken retries once the window passes
+// instead of hammering the token endpoint on every request.
+const tokenRetryBackoff = 30 * time.Second
+
+// tokenExpirySkew: tokens are treated as expired this far before the
+// upstream expiry so a slow Pi never serves a token that dies mid-flight.
+const tokenExpirySkew = 5 * time.Minute
+
+// tlsHandshakeTimeout extends Go's default 10s handshake ceiling (the
+// Pi Zero's render-storm bursts starved queued handshakes).
+const tlsHandshakeTimeout = 20 * time.Second
+
+// imageClientTimeout is the slow-path ceiling for image/zip relays
+// (multi-MB ugoira zips over a weak radio). Feeds stay on clientTimeout.
+const imageClientTimeout = 120 * time.Second
+
 // ErrFollowCooldown marks a follow-state answer of "unknown" during the
 // 429 circuit-breaker window. It is NOT an upstream failure: the
 // handler answers 200 with a null followed field so the button hides
@@ -189,7 +213,7 @@ func NewClient() (*Client, error) {
 	c := &Client{
 		refreshToken: rt,
 		http: &http.Client{
-			Timeout:   30 * time.Second,
+			Timeout:   clientTimeout,
 			Transport: newPixivTransport(),
 		},
 		upstreamSlots: make(chan struct{}, maxUpstreamConcurrency),
@@ -199,7 +223,7 @@ func NewClient() (*Client, error) {
 		// (Was 5 minutes; the app-API 429 storms of 2026-08-21 showed
 		// even a throttled 6-at-a-time stream out-runs the limiter when
 		// every render re-asks for ~50 artists.)
-		followState: newFollowStateCache(30 * time.Minute),
+		followState: newFollowStateCache(followStateTTL),
 		bookmarkIDs: newBookmarkIDsCache(bookmarkIDsTTL),
 	}
 
@@ -267,7 +291,7 @@ func (c *Client) refresh() error {
 	if err != nil {
 		// Fail fast for blocked waiters instead of serial retries.
 		c.mu.Lock()
-		c.expiresAt = time.Now().Add(30 * time.Second)
+		c.expiresAt = time.Now().Add(tokenRetryBackoff)
 		c.mu.Unlock()
 		return fmt.Errorf("auth request failed: %w", err)
 	}
@@ -279,7 +303,7 @@ func (c *Client) refresh() error {
 	}
 	if resp.StatusCode != 200 {
 		c.mu.Lock()
-		c.expiresAt = time.Now().Add(30 * time.Second)
+		c.expiresAt = time.Now().Add(tokenRetryBackoff)
 		c.mu.Unlock()
 		// Auth-endpoint errors log STATUS ONLY (reviewer finding):
 		// token-endpoint bodies can echo identifiers and must never
@@ -310,7 +334,7 @@ func (c *Client) refresh() error {
 			"PIXIV_REFRESH_TOKEN": tr.RefreshToken,
 		}); err != nil {
 			c.mu.Lock()
-			c.expiresAt = time.Now().Add(30 * time.Second)
+			c.expiresAt = time.Now().Add(tokenRetryBackoff)
 			c.mu.Unlock()
 			return fmt.Errorf("persist rotated refresh token: %w", err)
 		}
@@ -318,7 +342,7 @@ func (c *Client) refresh() error {
 
 	c.mu.Lock()
 	c.accessToken = tr.AccessToken
-	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-5 * time.Minute)
+	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-tokenExpirySkew)
 	if tr.RefreshToken != "" {
 		c.refreshToken = tr.RefreshToken
 	}
@@ -344,9 +368,9 @@ func (c *Client) ensureToken() error {
 // proxy inherits this transport through newValidatedClient (it copies
 // the client), so its 120s-ceiling streams get the same cushion.
 func newPixivTransport() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.TLSHandshakeTimeout = 20 * time.Second
-	return t
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSHandshakeTimeout = tlsHandshakeTimeout
+	return tr
 }
 
 // newValidatedClient returns a copy of the shared client whose redirect
@@ -732,11 +756,11 @@ func (c *Client) fetchCsrfToken(phpsessid string) (string, error) {
 
 	// The token sits in the preloaded state as escaped JSON:
 	// token\":\"<32 hex>. Match leniently so either quoting style works.
-	m := csrfTokenRE.FindSubmatch(body)
-	if m == nil {
+	match := csrfTokenRE.FindSubmatch(body)
+	if match == nil {
 		return "", fmt.Errorf("csrf token not found in profile page HTML")
 	}
-	return string(m[1]), nil
+	return string(match[1]), nil
 }
 
 // ScrapeCsrfFor fetches + returns the csrf token bound to the given
@@ -804,7 +828,7 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 	c.mu.Lock()
 	c.refreshToken = refreshToken
 	c.accessToken = accessToken
-	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-5 * time.Minute)
+	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-tokenExpirySkew)
 	c.mu.Unlock()
 	return UpdateEnvFile(map[string]string{
 		"PIXIV_REFRESH_TOKEN": refreshToken,
@@ -860,9 +884,9 @@ func envFilePath() string {
 		)
 	}
 	candidates = append(candidates, "../.env", ".env")
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
 		}
 	}
 	return candidates[0]
@@ -1127,8 +1151,8 @@ func (c *Client) GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
 		if err := json.Unmarshal(body, &parsed); err != nil {
 			return nil, err
 		}
-		for _, w := range parsed.Illusts {
-			ids = append(ids, w.ID.String())
+		for _, work := range parsed.Illusts {
+			ids = append(ids, work.ID.String())
 		}
 		next = parsed.NextURL
 		// The next URL comes from the upstream response, not the client —
@@ -1490,7 +1514,7 @@ func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte,
 	// the shared 30s client. Feeds stay strict; a stalled zip burns a
 	// bounded 2 minutes, then dies.
 	imgClient := c.newValidatedClient(validImageURL)
-	imgClient.Timeout = 120 * time.Second
+	imgClient.Timeout = imageClientTimeout
 	resp, err := imgClient.Do(req)
 	if err != nil {
 		return nil, "", err

@@ -1,7 +1,8 @@
 import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
 import { api, setOnGateLocked, setOnRequestError, logEvent } from "./api";
 import { uploadCrashBuffer } from "./crash-trap";
-import type { PixivIllust } from "./types";
+import type { ContentMode, PixivIllust, RankingMode } from "./types";
+import { isRankingMode } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
 import {
   blockedTags,
@@ -72,8 +73,8 @@ const EDGE_BACK_POP_COOLDOWN = 350; // ms ≈ close animation + margin
 export default function App() {
   const [feedType, setFeedType] = createSignal<FeedType>("home");
   // Ranking tab: content row (all | r18) + mode row (day/week/...).
-  const [rankContent, setRankContent] = createSignal("all");
-  const [rankMode, setRankMode] = createSignal("day");
+  const [rankContent, setRankContent] = createSignal<ContentMode>("all");
+  const [rankMode, setRankMode] = createSignal<RankingMode>("day");
   // Newest tab: all | r18 content filter.
   const [newestR18, setNewestR18] = createSignal(false);
   // Bookmarks tab: tag pills from the bookmarks page (public list) +
@@ -83,7 +84,7 @@ export default function App() {
   >([]);
   const [bookmarkTag, setBookmarkTag] = createSignal("");
   // Illustrations (top page) tab: all | r18.
-  const [topMode, setTopMode] = createSignal("all");
+  const [topMode, setTopMode] = createSignal<ContentMode>("all");
   const [illusts, setIllusts] = createSignal<PixivIllust[]>([]);
   const [nextUrl, setNextUrl] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(false);
@@ -133,22 +134,22 @@ export default function App() {
   // Closing layers are skipped: they're already on the way out, so the
   // layer beneath takes over immediately.
   const topZ = createMemo(() => {
-    let z = 0;
+    let top = 0;
     for (const key of layerSeq()) {
       if (key === "artist") {
-        const a = artist();
-        if (a && !artistClosing()) z = a.z;
+        const artistPage = artist();
+        if (artistPage && !artistClosing()) top = artistPage.z;
       } else if (key.startsWith("search")) {
-        const i = Number(key.slice(6));
-        const entry = searchStack()[i];
-        if (entry && closingSearchZ() !== entry.z) z = entry.z;
+        const idx = Number(key.slice(6));
+        const entry = searchStack()[idx];
+        if (entry && closingSearchZ() !== entry.z) top = entry.z;
       } else if (key.startsWith("s")) {
-        const i = Number(key.slice(1));
-        const entry = stack()[i];
-        if (entry && closingDepth() !== i + 1) z = entry.z;
+        const idx = Number(key.slice(1));
+        const entry = stack()[idx];
+        if (entry && closingDepth() !== idx + 1) top = entry.z;
       }
     }
-    return z;
+    return top;
   });
 
   // Dev invariant: a rendered, non-closing layer must never sit above
@@ -158,8 +159,8 @@ export default function App() {
     createEffect(() => {
       const tz = topZ();
       const offenders: string[] = [];
-      const a = artist();
-      if (a && !artistClosing() && a.z > tz) offenders.push(`artist(z=${a.z})`);
+      const artistPage = artist();
+      if (artistPage && !artistClosing() && artistPage.z > tz) offenders.push(`artist(z=${artistPage.z})`);
       const sl = searchStack();
       if (sl.length > 0 && closingSearchZ() === null) {
         const topSearch = sl[sl.length - 1];
@@ -287,7 +288,7 @@ export default function App() {
     void loadMore(true); // fresh first page, sequenced AFTER the resets
   }
 
-  function changeRankingContent(c: string) {
+  function changeRankingContent(c: ContentMode) {
     if (c === rankContent()) return;
     reqSeq++; // invalidate any in-flight load
     setRankContent(c);
@@ -298,22 +299,22 @@ export default function App() {
     resetFeedAndReload();
   }
 
-  function changeRankingMode(m: string) {
+  function changeRankingMode(m: RankingMode) {
     if (m === rankMode()) return;
     reqSeq++;
     setRankMode(m);
     resetFeedAndReload();
   }
 
-  function changeNewestR18(c: string) {
-    const v = c === "r18";
-    if (v === newestR18()) return;
+  function changeNewestR18(c: ContentMode) {
+    const isR18 = c === "r18";
+    if (isR18 === newestR18()) return;
     reqSeq++;
-    setNewestR18(v);
+    setNewestR18(isR18);
     resetFeedAndReload();
   }
 
-  function changeTopMode(m: string) {
+  function changeTopMode(m: ContentMode) {
     if (m === topMode()) return;
     reqSeq++;
     setTopMode(m);
@@ -537,15 +538,15 @@ export default function App() {
   function edgeBackStart(e: TouchEvent) {
     edgePan = null;
     if (gateLocked() || e.touches.length !== 1 || layerSeq().length === 0) return;
-    const t = e.touches[0];
-    if (t.clientX > EDGE_BACK_ZONE) return;
+    const touch = e.touches[0];
+    if (touch.clientX > EDGE_BACK_ZONE) return;
     const target = e.target as Element | null;
     // Native multi-page sliders own horizontal drags that start on
     // them — an edge start there must not arm the gesture. Single-page
     // cards (no horizontal overflow) fall through and arm normally.
     const pages = target?.closest?.(".card-pages");
     if (pages && pages.scrollWidth > pages.clientWidth + 1) {
-      logEvent("gesture", "ignored-slider-owns-edge", { x: Math.round(t.clientX) });
+      logEvent("gesture", "ignored-slider-owns-edge", { x: Math.round(touch.clientX) });
       return;
     }
     if (
@@ -554,9 +555,9 @@ export default function App() {
       )
     )
       return;
-    edgePan = { x: t.clientX, y: t.clientY, t: performance.now(), active: false };
+    edgePan = { x: touch.clientX, y: touch.clientY, t: performance.now(), active: false };
     logEvent("gesture", "armed", {
-      x: Math.round(t.clientX),
+      x: Math.round(touch.clientX),
       layers: layerSeq().length,
     });
   }
@@ -572,9 +573,9 @@ export default function App() {
     // Tradeoff: an edge-zone-start vertical scroll inside a layer is
     // blocked too — the zone is 24px, layers only, acceptable.
     e.preventDefault();
-    const t = e.touches[0];
-    const dx = t.clientX - edgePan.x;
-    const dy = t.clientY - edgePan.y;
+    const touch = e.touches[0];
+    const dx = touch.clientX - edgePan.x;
+    const dy = touch.clientY - edgePan.y;
     if (!edgePan.active && dx > EDGE_BACK_ARM_DX && Math.abs(dx) > Math.abs(dy) * 1.2) {
       edgePan.active = true;
       logEvent("gesture", "claimed", { dx: Math.round(dx), dy: Math.round(dy) });
@@ -588,8 +589,8 @@ export default function App() {
 
   function edgeBackEnd(e: TouchEvent) {
     if (!edgePan) return;
-    const t = e.changedTouches[0];
-    const dx = t ? t.clientX - edgePan.x : 0;
+    const touch = e.changedTouches[0];
+    const dx = touch ? touch.clientX - edgePan.x : 0;
     const dt = performance.now() - edgePan.t;
     const popped = edgePan.active;
     edgePan = null;
@@ -623,8 +624,8 @@ export default function App() {
     logEvent("layers", "popTopLayer", { top, layers: layerSeq().length });
     if (top === "artist") closeArtist();
     else if (top?.startsWith("search")) {
-      const i = Number(top.slice(6));
-      const entry = searchStack()[i];
+      const idx = Number(top.slice(6));
+      const entry = searchStack()[idx];
       if (entry) closeSearch(entry.z);
     }
     else if (top?.startsWith("s")) popRelated();
@@ -736,7 +737,7 @@ export default function App() {
       // let browsers diverge (STP vs Safari showed different feeds).
       setFeedType(snap.feedType as FeedType);
       setRankContent(snap.rankContent === "r18" ? "r18" : "all");
-      setRankMode(snap.rankMode);
+      setRankMode(isRankingMode(snap.rankMode) ? snap.rankMode : "day");
       setNewestR18(!!snap.newestR18);
       setTopMode(snap.topMode === "r18" ? "r18" : "all");
 
@@ -758,19 +759,19 @@ export default function App() {
             ];
       for (const key of order) {
         if (key.startsWith("search")) {
-          const i = Number(key.slice(6));
-          if (Number.isInteger(i) && i >= 0 && i < snap.searchStack.length) {
+          const idx = Number(key.slice(6));
+          if (Number.isInteger(idx) && idx >= 0 && idx < snap.searchStack.length) {
             layerZ++;
-            restoredSearchZs[i] = layerZ;
+            restoredSearchZs[idx] = layerZ;
           }
         } else if (key === "artist" && snap.artist) {
           layerZ++;
           restoredArtistZ = layerZ;
         } else if (key.startsWith("s")) {
-          const i = Number(key.slice(1));
-          if (Number.isInteger(i) && i >= 0 && i < snap.stack.length) {
+          const idx = Number(key.slice(1));
+          if (Number.isInteger(idx) && idx >= 0 && idx < snap.stack.length) {
             layerZ++;
-            restoredZs[i] = layerZ;
+            restoredZs[idx] = layerZ;
           }
         }
       }
@@ -806,12 +807,12 @@ export default function App() {
       setLayerSeq(
         order.filter((k) => {
           if (k.startsWith("search")) {
-            const i = Number(k.slice(6));
-            return Number.isInteger(i) && i >= 0 && i < snap.searchStack.length;
+            const idx = Number(k.slice(6));
+            return Number.isInteger(idx) && idx >= 0 && idx < snap.searchStack.length;
           }
           if (k === "artist") return !!snap.artist;
-          const i = Number(k.slice(1));
-          return Number.isInteger(i) && i >= 0 && i < snap.stack.length;
+          const idx = Number(k.slice(1));
+          return Number.isInteger(idx) && idx >= 0 && idx < snap.stack.length;
         })
       );
 

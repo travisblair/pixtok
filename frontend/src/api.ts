@@ -146,7 +146,7 @@ function queuedPrefWrite<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 export const api = {
-  getTop(mode = "day") {
+  getTop(mode: import("./types").RankingMode = "day") {
     return request<import("./types").FeedResponse>(`/top?mode=${mode}`, {
       signal: AbortSignal.timeout(15_000),
     });

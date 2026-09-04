@@ -59,3 +59,33 @@ export interface SearchUsersResponse {
   page: number;
   next_url: string | null;
 }
+
+/** Content filter shared by the Ranking/Newest/Top feed pills. */
+export type ContentMode = "all" | "r18";
+
+/**
+ * App-API ranking modes (GET /v1/illust/ranking?mode=...). Single
+ * source of truth: RankingSelector's pill lists and the snapshot
+ * restore boundary type-check against it.
+ */
+export const RANKING_MODES = [
+  "day",
+  "week",
+  "month",
+  "week_rookie",
+  "week_original",
+  "day_ai",
+  "day_male",
+  "day_female",
+  "day_r18",
+  "week_r18",
+  "day_male_r18",
+  "day_female_r18",
+] as const;
+
+export type RankingMode = (typeof RANKING_MODES)[number];
+
+/** Snapshot-restore boundary: true only for real ranking modes. */
+export function isRankingMode(v: string): v is RankingMode {
+  return (RANKING_MODES as readonly string[]).includes(v);
+}
