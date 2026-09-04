@@ -1,5 +1,10 @@
 import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
-import { api, setOnGateLocked, setOnRequestError, logEvent } from "./api";
+import { logEvent, reportApiError, setOnGateLocked, setOnRequestError } from "./api/client";
+import { getStreet, getNewest, getNewestNext, getNextPage, getTop, getTopIllust, getRecommended } from "./api/feeds";
+import { getBookmarkIds, getBookmarkTags, getBookmarks, getBookmarksNext } from "./api/bookmarks";
+import { getWorkRecs } from "./api/illust";
+import { getBlockedTags, getImageSize, getFeedViewMode, getArtistViewMode } from "./api/prefs";
+import { gateStatus } from "./api/auth";
 import { uploadCrashBuffer } from "./crash-trap";
 import type { ContentMode, PixivIllust, RankingMode } from "./types";
 import { isRankingMode } from "./types";
@@ -194,34 +199,34 @@ export default function App() {
       let data;
       if (feedType() === "home") {
         // Street: next_url carries the nextParams cursor JSON verbatim.
-        data = await api.getStreet(fresh ? "" : (nextUrl() ?? ""));
+        data = await getStreet(fresh ? "" : (nextUrl() ?? ""));
       } else if (feedType() === "newest") {
         // Newest firehose: next_url is a relative /api/newest cursor URL.
         data =
           !fresh && nextUrl()
-            ? await api.getNewestNext(nextUrl()!)
-            : await api.getNewest(newestR18());
+            ? await getNewestNext(nextUrl()!)
+            : await getNewest(newestR18());
       } else if (feedType() === "illustrations") {
         // App-API ranking: paginated via next_url like other app feeds.
         data =
           !fresh && nextUrl()
-            ? await api.getNextPage(nextUrl()!)
-            : await api.getTop(rankMode());
+            ? await getNextPage(nextUrl()!)
+            : await getTop(rankMode());
       } else if (feedType() === "top") {
         // /illustration top page: fixed grid, no pagination.
-        data = await api.getTopIllust(topMode());
+        data = await getTopIllust(topMode());
       } else if (feedType() === "bookmarks") {
         // Bookmarks PAGE (web AJAX, crawl-verified): tag-filtered with
         // blind offset pagination. next_url is self-referential
         // /api/bookmarks and must NOT ride /api/next (SSRF allowlist).
         data =
           !fresh && nextUrl()
-            ? await api.getBookmarksNext(nextUrl()!)
-            : await api.getBookmarks(bookmarkTag());
+            ? await getBookmarksNext(nextUrl()!)
+            : await getBookmarks(bookmarkTag());
       } else if (nextUrl() && !fresh) {
-        data = await api.getNextPage(nextUrl()!);
+        data = await getNextPage(nextUrl()!);
       } else {
-        data = await api.getRecommended();
+        data = await getRecommended();
       }
 
       // Feed or mode changed while this request was in flight — discard.
@@ -239,6 +244,7 @@ export default function App() {
       setNextUrl(data.next_url);
       setLoadError(false);
     } catch (err) {
+      reportApiError(err);
       if (seq === reqSeq) {
         console.error("Failed to load feed:", err);
         // Surface the failure at the sentinel — the observer won't
@@ -654,7 +660,7 @@ export default function App() {
       // Per-work recommendations via recommend/init — the same "Related
       // works" section the site shows on this work's page. Intentionally
       // DISTINCT from the tap-stack's v2/related similarity engine.
-      const data = await api.getWorkRecs(illust.id, signal);
+      const data = await getWorkRecs(illust.id, signal);
       if (data.illusts.length === 0) return;
       // Replace semantics: each like loads a fresh recs batch for the modal.
       setRecs(filterBlockedTags(data.illusts, blockedTags()));
@@ -662,6 +668,7 @@ export default function App() {
       // Full title — the toast wraps (full-width bar), no truncation.
       showToast(`Recommendations for "${illust.title}"`);
     } catch (err) {
+      reportApiError(err);
       // AbortError = superseded by a newer like — not a failure.
       if (!signal.aborted) {
         console.error("Failed to load work recommendations:", err);
@@ -699,34 +706,28 @@ export default function App() {
     // Server truth seeds (fire-and-forget, reactive): hearts from
     // pixiv's bookmarks endpoint, blocked tags from the prefs DB.
     // Both update already-mounted cards when they land.
-    void api
-      .getBookmarkIds()
+    void getBookmarkIds()
       .then((d) => seedLikedIds(d.ids))
-      .catch(() => {});
-    void api
-      .getBlockedTags()
+      .catch(reportApiError);
+    void getBlockedTags()
       .then((d) => setBlockedTagsList(d.tags))
-      .catch(() => {});
-    void api
-      .getImageSize()
+      .catch(reportApiError);
+    void getImageSize()
       .then((d) => setImageSizeFromServer(d.value))
-      .catch(() => {});
+      .catch(reportApiError);
     // View modes are global prefs (server DB), not session state — they
     // seed like blocked tags and never touch the snapshot.
-    void api
-      .getFeedViewMode()
+    void getFeedViewMode()
       .then((d) => setFeedViewModeFromServer(d.value))
-      .catch(() => {});
-    void api
-      .getArtistViewMode()
+      .catch(reportApiError);
+    void getArtistViewMode()
       .then((d) => setArtistViewModeFromServer(d.value))
-      .catch(() => {});
+      .catch(reportApiError);
     // Bookmark tags feed the bookmarks-tab pills (public list only —
     // the page's default view).
-    void api
-      .getBookmarkTags()
+    void getBookmarkTags()
       .then((d) => setBookmarkTags(d.public))
-      .catch(() => {});
+      .catch(reportApiError);
 
     const snap = loadSnapshot();
     if (snap) {
@@ -867,8 +868,7 @@ export default function App() {
     // A restored page is treated as stale: reload clean; the snapshot
     // puts the CURRENT layers back.
     window.addEventListener("pageshow", handlePageShow);
-    void api
-      .gateStatus()
+    void gateStatus()
       .then((s) => {
         logEvent("gate", s.locked ? "locked" : "open");
         if (s.locked) return; // gate screen stays up; boot on unlock
@@ -879,7 +879,8 @@ export default function App() {
         setGateLocked(false);
         boot();
       })
-      .catch(() => {
+      .catch((err) => {
+        reportApiError(err);
         // Backend unreachable — show the gate; a reload re-checks.
         logEvent("gate", "unreachable");
         setGateLocked(true);

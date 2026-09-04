@@ -1,5 +1,6 @@
 import { createSignal, Show, onMount } from "solid-js";
-import { api } from "../api";
+import { getAuthStatus } from "../api/auth";
+import { reportApiError } from "../api/client";
 import BaseModal from "./BaseModal";
 
 /**
@@ -21,8 +22,9 @@ export default function LoginScreen(props: { onClose: () => void }) {
   async function refresh() {
     setLoading(true);
     try {
-      setStatus(await api.getAuthStatus());
-    } catch {
+      setStatus(await getAuthStatus());
+    } catch (err) {
+      reportApiError(err);
       setStatus(null);
     } finally {
       setLoading(false);

@@ -1,5 +1,11 @@
 import { createSignal, type Accessor, type Setter } from "solid-js";
-import { api } from "./api";
+import { reportApiError } from "./api/client";
+import {
+  setBlockedTags as persistBlockedTags,
+  setImageSize as persistImageSize,
+  setFeedViewMode as persistFeedViewMode,
+  setArtistViewMode as persistArtistViewMode,
+} from "./api/prefs";
 
 /**
  * Shared bookmark state keyed by illust id. The same work can be mounted
@@ -95,10 +101,7 @@ function updateBlockedTags(updater: (prev: string[]) => string[]): string[] {
     next = updater(prev);
     return next;
   });
-  void api.setBlockedTags(next).catch(() => {
-    // Backend unreachable — keep the in-session list; it just won't
-    // survive a reload.
-  });
+  void persistBlockedTags(next).catch(reportApiError);
   return next;
 }
 
@@ -132,9 +135,7 @@ export function setImageSizeFromServer(v: "large" | "medium") {
 /** User action: update locally + persist to the prefs DB. */
 export function setImageSize(v: "large" | "medium") {
   setImageSizeRaw(v);
-  void api.setImageSize(v).catch(() => {
-    // Backend unreachable — the setting applies for this session only.
-  });
+  void persistImageSize(v).catch(reportApiError);
 }
 
 /** Test hook. */
@@ -163,9 +164,7 @@ export function setFeedViewModeFromServer(v: string) {
 /** User action: update locally + persist to the prefs DB. */
 export function setFeedViewMode(v: ViewMode) {
   setFeedViewModeRaw(v);
-  void api.setFeedViewMode(v).catch(() => {
-    // Backend unreachable — the setting applies for this session only.
-  });
+  void persistFeedViewMode(v).catch(reportApiError);
 }
 
 /** Test hook. */
@@ -183,9 +182,7 @@ export function setArtistViewModeFromServer(v: string) {
 /** User action: update locally + persist to the prefs DB. */
 export function setArtistViewMode(v: ViewMode) {
   setArtistViewModeRaw(v);
-  void api.setArtistViewMode(v).catch(() => {
-    // Backend unreachable — the setting applies for this session only.
-  });
+  void persistArtistViewMode(v).catch(reportApiError);
 }
 
 /** Test hook. */

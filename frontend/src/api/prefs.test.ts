@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { api } from "./index";
+import { setBlockedTags } from "./prefs";
 
 // The prefs write queue (reviewer finding): rapid PUTs must apply in
 // the order they were issued — ["a"] then ["a","b"] — never race.
@@ -28,8 +28,8 @@ describe("prefs write queue", () => {
       return Promise.resolve(respond());
     }) as unknown as typeof fetch;
 
-    const first = api.setBlockedTags(["a"]);
-    const second = api.setBlockedTags(["a", "b"]);
+    const first = setBlockedTags(["a"]);
+    const second = setBlockedTags(["a", "b"]);
     // The queued write reaches fetch on the next microtask — settle
     // that first, THEN assert the queue held the second write back.
     await Promise.resolve();

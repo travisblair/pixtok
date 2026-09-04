@@ -1,66 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api, setOnGateLocked, setOnRequestError } from "./index";
+import { ApiError, reportApiError, setOnGateLocked, setOnRequestError } from "./client";
+import { getNewest } from "./feeds";
 
-// Mid-session gate re-lock: a 403 "gate locked" on ANY later request
-// must fire the registered listener (App re-shows the GateScreen).
-// Other 403s (e.g. an origin mismatch) must not.
-describe("mid-session gate re-lock detection", () => {
-  const origFetch = globalThis.fetch;
-  let status = 200;
-  let body = "{}";
-
-  afterEach(() => {
-    globalThis.fetch = origFetch;
-    setOnGateLocked(null);
-  });
-
-  it("fires the listener on a 403 gate-locked response", async () => {
-    const fn = vi.fn();
-    setOnGateLocked(fn);
-    status = 403;
-    body = "gate locked\n";
-    globalThis.fetch = vi.fn(async () => {
-      return new Response(body, {
-        status,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
-    await expect(api.getNewest(false)).rejects.toThrow("403");
-    expect(fn).toHaveBeenCalledTimes(1);
-  });
-
-  it("ignores 403s that are not gate locks", async () => {
-    const fn = vi.fn();
-    setOnGateLocked(fn);
-    status = 403;
-    body = "origin mismatch";
-    globalThis.fetch = vi.fn(async () => {
-      return new Response(body, {
-        status,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
-    await expect(api.getNewest(false)).rejects.toThrow("403");
-    expect(fn).not.toHaveBeenCalled();
-  });
-
-  it("does not fire on successful responses", async () => {
-    const fn = vi.fn();
-    setOnGateLocked(fn);
-    globalThis.fetch = vi.fn(async () => {
-      return new Response(JSON.stringify({ illusts: [], next_url: null }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
-    await api.getNewest(false);
-    expect(fn).not.toHaveBeenCalled();
-  });
-});
-
-// Any failed request surfaces in the red top error toast — except gate
-// locks (the GateScreen owns those) and superseded-request aborts.
-describe("request error notifications", () => {
+// request() is PURE transport: it classifies every failure into a typed
+// ApiError and fires NOTHING — no toasts, no gate-lock listener. The
+// UX policy lives in reportApiError, pinned below.
+describe("request error classification (pure transport)", () => {
   const origFetch = globalThis.fetch;
   let status = 200;
   let body = "{}";
@@ -70,14 +15,6 @@ describe("request error notifications", () => {
     status = 200;
     body = "{}";
     rejectWith = null;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = origFetch;
-    setOnRequestError(null);
-  });
-
-  function mockFetch() {
     globalThis.fetch = vi.fn(async () => {
       if (rejectWith) throw rejectWith;
       return new Response(body, {
@@ -85,56 +22,131 @@ describe("request error notifications", () => {
         headers: { "Content-Type": "application/json" },
       });
     }) as unknown as typeof fetch;
-  }
+  });
 
-  it("fires 'Request failed (N)' on HTTP errors", async () => {
-    const fn = vi.fn();
-    setOnRequestError(fn);
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+    setOnGateLocked(null);
+    setOnRequestError(null);
+  });
+
+  it("classifies a 403 gate-locked body as gate-locked", async () => {
+    status = 403;
+    body = "gate locked\n";
+    await expect(getNewest(false)).rejects.toMatchObject({ kind: "gate-locked", status: 403 });
+  });
+
+  it("classifies other 403s as plain http", async () => {
+    status = 403;
+    body = "origin mismatch";
+    await expect(getNewest(false)).rejects.toMatchObject({ kind: "http", status: 403 });
+  });
+
+  it("classifies 5xx as http", async () => {
     status = 502;
     body = "upstream error";
-    mockFetch();
-    await expect(api.getNewest(false)).rejects.toThrow("502");
-    expect(fn).toHaveBeenCalledWith("Request failed (502)");
+    await expect(getNewest(false)).rejects.toMatchObject({ kind: "http", status: 502 });
   });
 
-  it("fires 'Network error' on fetch rejection", async () => {
-    const fn = vi.fn();
-    setOnRequestError(fn);
+  it("classifies fetch rejections as network", async () => {
     rejectWith = new TypeError("Failed to fetch");
-    mockFetch();
-    await expect(api.getNewest(false)).rejects.toThrow();
-    expect(fn).toHaveBeenCalledWith("Network error");
+    await expect(getNewest(false)).rejects.toMatchObject({ kind: "network" });
   });
 
-  it("fires 'Request timed out' on TimeoutError", async () => {
-    const fn = vi.fn();
-    setOnRequestError(fn);
+  it("classifies TimeoutError as timeout", async () => {
     const te = new Error("boom");
     te.name = "TimeoutError";
     rejectWith = te;
-    mockFetch();
-    await expect(api.getNewest(false)).rejects.toThrow();
-    expect(fn).toHaveBeenCalledWith("Request timed out");
+    await expect(getNewest(false)).rejects.toMatchObject({ kind: "timeout" });
   });
 
-  it("stays silent on AbortError (superseded request, not a failure)", async () => {
-    const fn = vi.fn();
-    setOnRequestError(fn);
+  it("classifies AbortError as abort", async () => {
     const ae = new Error("aborted");
     ae.name = "AbortError";
     rejectWith = ae;
-    mockFetch();
-    await expect(api.getNewest(false)).rejects.toThrow();
+    await expect(getNewest(false)).rejects.toMatchObject({ kind: "abort" });
+  });
+
+  it("classifies a non-JSON success body as bad-response", async () => {
+    status = 200;
+    body = "<html>not json</html>";
+    await expect(getNewest(false)).rejects.toMatchObject({ kind: "bad-response" });
+  });
+
+  it("fires NO side effects by itself", async () => {
+    const gate = vi.fn();
+    const toast = vi.fn();
+    setOnGateLocked(gate);
+    setOnRequestError(toast);
+    status = 403;
+    body = "gate locked\n";
+    await expect(getNewest(false)).rejects.toThrow();
+    expect(gate).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
+});
+
+// reportApiError is the ONE place app-level reactions live: the red
+// error toast and the mid-session gate re-lock. Call sites with a
+// catch call it; the gate re-lock stays wired here, never scattered.
+describe("reportApiError policy", () => {
+  afterEach(() => {
+    setOnGateLocked(null);
+    setOnRequestError(null);
+  });
+
+  const err = (kind: "http" | "gate-locked" | "network" | "timeout" | "abort" | "bad-response", status = 0) =>
+    new ApiError(kind, status, "x");
+
+  it("fires 'Request failed (N)' for http", () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    expect(reportApiError(err("http", 502))).toBe("http");
+    expect(fn).toHaveBeenCalledWith("Request failed (502)");
+  });
+
+  it("fires 'Network error' for network", () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    reportApiError(err("network"));
+    expect(fn).toHaveBeenCalledWith("Network error");
+  });
+
+  it("fires 'Request timed out' for timeout", () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    reportApiError(err("timeout"));
+    expect(fn).toHaveBeenCalledWith("Request timed out");
+  });
+
+  it("fires 'Bad response' for bad-response", () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    reportApiError(err("bad-response"));
+    expect(fn).toHaveBeenCalledWith("Bad response");
+  });
+
+  it("stays silent on abort (superseded request, not a failure)", () => {
+    const fn = vi.fn();
+    setOnRequestError(fn);
+    reportApiError(err("abort"));
     expect(fn).not.toHaveBeenCalled();
   });
 
-  it("stays silent on a gate-locked 403 (the GateScreen owns that UX)", async () => {
+  it("fires the gate-lock listener and no toast on gate-locked", () => {
+    const gate = vi.fn();
+    const toast = vi.fn();
+    setOnGateLocked(gate);
+    setOnRequestError(toast);
+    expect(reportApiError(err("gate-locked"))).toBe("gate-locked");
+    expect(gate).toHaveBeenCalledTimes(1);
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("treats unknown errors as network", () => {
     const fn = vi.fn();
     setOnRequestError(fn);
-    status = 403;
-    body = "gate locked\n";
-    mockFetch();
-    await expect(api.getNewest(false)).rejects.toThrow("403");
-    expect(fn).not.toHaveBeenCalled();
+    reportApiError(new Error("whatever"));
+    expect(fn).toHaveBeenCalledWith("Network error");
   });
 });

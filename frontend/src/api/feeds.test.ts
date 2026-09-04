@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api } from "./index";
+import { getNewest, getNewestNext } from "./feeds";
 
 // The newest-feed continuation once fetched /api/api/newest (request()
 // prepends the /api base over next_url's own /api prefix) — a 404 on
@@ -25,14 +25,14 @@ describe("api URL shapes (no double /api prefix)", () => {
   });
 
   it("newest first page fetches /api/newest exactly once", async () => {
-    await api.getNewest(false);
+    await getNewest(false);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatch(/^\/api\/newest\?/);
     expect(calls[0]).not.toContain("/api/api");
   });
 
   it("newest continuation strips next_url's /api prefix", async () => {
-    await api.getNewestNext("/api/newest?r18=false&lastId=5000");
+    await getNewestNext("/api/newest?r18=false&lastId=5000");
     expect(calls).toHaveLength(1);
     expect(calls[0]).toBe("/api/newest?r18=false&lastId=5000");
   });
