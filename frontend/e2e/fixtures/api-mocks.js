@@ -147,8 +147,11 @@ export async function setupApiMocks(page, options = {}) {
   // ── HERMETICITY GUARD: any /api route a spec forgets to mock dies ─────
   // loudly here instead of leaking to the real Vite proxy → Go backend →
   // Pixiv. Playwright matches routes LIFO, so the specific routes below
-  // (registered after this catch-all) always win.
-  await page.route(/\api\//, (route) => {
+  // (registered after this catch-all) always win. The ^https?://[^/]+
+  // anchor keeps frontend SOURCE paths (…/src/api/*.ts) from matching —
+  // an unanchored /\api\// once 500'd every module request after the
+  // api.ts domain split and the app never booted in e2e.
+  await page.route(/^https?:\/\/[^/]+\/api\//, (route) => {
     route.fulfill(
       json({ error: "UNMOCKED /api route — add it to setupApiMocks" }, 500)
     );
