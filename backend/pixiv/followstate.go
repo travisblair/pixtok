@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// followStateTTL is the follow-state cache window (see newFollowStateCache).
+const followStateTTL = 30 * time.Minute
+
 // followStateCache — TTL cache + per-user-id single-flight for
 // IsFollowed.
 //
