@@ -7,7 +7,8 @@ import {
 } from "solid-js";
 import type { PixivIllust } from "../types";
 import { getLikeState } from "../store";
-import { api } from "../api";
+import { like as likeWork, unlike as unlikeWork } from "../api/illust";
+import { reportApiError } from "../api/client";
 import UgoiraPlayer from "./UgoiraPlayer";
 
 const PIXEL =
@@ -148,13 +149,14 @@ function GridCell(props: {
     setLiked(newLiked);
     try {
       if (newLiked) {
-        await api.like(props.illust.id);
+        await likeWork(props.illust.id);
         props.onLike?.(props.illust);
       } else {
-        await api.unlike(props.illust.id);
+        await unlikeWork(props.illust.id);
         props.onUnlike?.(props.illust); // bookmarks tab removes the cell
       }
-    } catch {
+    } catch (err) {
+      reportApiError(err);
       setLiked(!newLiked); // revert on failure
     } finally {
       setBusy(false);

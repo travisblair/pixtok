@@ -2,14 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import LoginScreen from "./LoginScreen";
 
-vi.mock("../api", () => ({
-  api: {
-    getAuthStatus: vi.fn(),
-  },
+vi.mock("../api/auth", () => ({
+  getAuthStatus: vi.fn(),
 }));
+vi.mock("../api/client", () => ({ reportApiError: vi.fn() }));
 
-import { api } from "../api";
-const mockedApi = api as unknown as { getAuthStatus: ReturnType<typeof vi.fn> };
+import * as auth from "../api/auth";
+const mockedApi = auth as unknown as { getAuthStatus: ReturnType<typeof vi.fn> };
 
 beforeEach(() => {
   mockedApi.getAuthStatus

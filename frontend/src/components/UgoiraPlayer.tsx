@@ -1,6 +1,7 @@
 import { createSignal, createEffect, on, onMount, onCleanup, Show } from "solid-js";
 import { unzip, type Unzipped } from "fflate";
-import { api, logEvent } from "../api";
+import { ApiError, logEvent, reportApiError } from "../api/client";
+import { getUgoiraMeta } from "../api/search";
 
 /**
  * Canvas-based ugoira player, mirroring how pixiv.net does it: fetch
@@ -154,6 +155,7 @@ export default function UgoiraPlayer(props: {
       drawStatic();
       setPosterReady(true);
     } catch (e) {
+      if (e instanceof ApiError) reportApiError(e);
       if (e instanceof Error && e.name === "AbortError") {
         // Deadline abort (seq still current) = the poster genuinely
         // stalled — badge it like any other failure. Teardown aborts
@@ -189,7 +191,7 @@ export default function UgoiraPlayer(props: {
     // deadline (the Pi can take well over 30s to relay a big zip).
     const timeout = setTimeout(() => controller.abort(), 120_000);
     try {
-      const meta = await api.getUgoiraMeta(props.illustId);
+      const meta = await getUgoiraMeta(props.illustId);
       const body = meta.body;
 
       const zipRes = await fetch(`/api/img?url=${encodeURIComponent(body.src)}`, {
@@ -234,6 +236,7 @@ export default function UgoiraPlayer(props: {
       setStatus("playing");
       step();
     } catch (e) {
+      if (e instanceof ApiError) reportApiError(e);
       if (e instanceof Error && e.name === "AbortError") {
         // Deadline abort (seq still current) = the zip genuinely stalled
         // past 120s. Before this check the catch returned silently and

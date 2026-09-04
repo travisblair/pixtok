@@ -3,22 +3,33 @@ import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import SearchScreen from "./SearchScreen";
 import { makeFeedOf } from "../test-fixtures";
 
-vi.mock("../api", () => ({
-  api: {
-    searchArtworks: vi.fn(),
-    searchUsers: vi.fn(),
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    follow: vi.fn(async () => {}),
-    unfollow: vi.fn(async () => {}),
-    getFollowed: vi.fn(),
-    getUgoiraMeta: vi.fn(async () => ({ error: false, body: { src: "z", frames: [] } })),
-  },
-  logEvent: vi.fn(),
+vi.mock("../api/search", () => ({
+  searchArtworks: vi.fn(),
+  searchUsers: vi.fn(),
+  getUgoiraMeta: vi.fn(async () => ({ error: false, body: { src: "z", frames: [] } })),
 }));
+vi.mock("../api/illust", () => ({
+  like: vi.fn(async () => {}),
+  unlike: vi.fn(async () => {}),
+}));
+vi.mock("../api/follow", () => ({
+  follow: vi.fn(async () => {}),
+  unfollow: vi.fn(async () => {}),
+  getFollowed: vi.fn(),
+}));
+vi.mock("../api/client", async () => {
+  const actual = await vi.importActual("../api/client");
+  return { logEvent: vi.fn(), reportApiError: vi.fn(), ApiError: actual.ApiError };
+});
 
-import { api } from "../api";
-const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+import * as search from "../api/search";
+import * as illust from "../api/illust";
+import * as follow from "../api/follow";
+const mockedApi = {
+  ...search,
+  ...illust,
+  ...follow,
+} as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 function artworksResp(page: number, lastPage: number) {
   return {

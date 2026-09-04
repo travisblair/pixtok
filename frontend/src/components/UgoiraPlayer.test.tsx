@@ -23,15 +23,17 @@ import UgoiraPlayer from "./UgoiraPlayer";
  * the card and open the related stack — the wrap has no click handler.
  */
 
-vi.mock("../api", () => ({
-  api: {
-    getUgoiraMeta: vi.fn(),
-  },
-  logEvent: vi.fn(),
+vi.mock("../api/search", () => ({
+  getUgoiraMeta: vi.fn(),
 }));
+vi.mock("../api/client", async () => {
+  const actual = await vi.importActual("../api/client");
+  return { logEvent: vi.fn(), reportApiError: vi.fn(), ApiError: actual.ApiError };
+});
 
-import { api, logEvent } from "../api";
-const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+import * as search from "../api/search";
+import { logEvent } from "../api/client";
+const mockedApi = search as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const mockedLog = logEvent as unknown as ReturnType<typeof vi.fn>;
 
 const META = {

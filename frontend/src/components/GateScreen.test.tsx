@@ -2,14 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import GateScreen from "./GateScreen";
 
-vi.mock("../api", () => ({
-  api: {
-    gateUnlock: vi.fn(),
-  },
+vi.mock("../api/auth", () => ({
+  gateUnlock: vi.fn(),
 }));
+vi.mock("../api/client", () => ({ reportApiError: vi.fn() }));
 
-import { api } from "../api";
-const mockedApi = api as unknown as { gateUnlock: ReturnType<typeof vi.fn> };
+import * as auth from "../api/auth";
+const mockedApi = auth as unknown as { gateUnlock: ReturnType<typeof vi.fn> };
 
 beforeEach(() => {
   mockedApi.gateUnlock.mockReset().mockResolvedValue({ ok: true });

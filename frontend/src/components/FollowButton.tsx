@@ -1,5 +1,6 @@
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
-import { api, logEvent } from "../api";
+import { logEvent, reportApiError } from "../api/client";
+import { follow, getFollowed, unfollow } from "../api/follow";
 
 /**
  * Follow toggle — used in the artist page header (full label, eager)
@@ -63,10 +64,11 @@ export default function FollowButton(props: {
 
   async function load() {
     try {
-      const res = await api.getFollowed(props.userId);
+      const res = await getFollowed(props.userId);
       logEvent("follow", "ok", { id: props.userId, followed: res.followed });
       setFollowed(res.followed);
     } catch (err) {
+      reportApiError(err);
       logEvent("follow", "fail", {
         id: props.userId,
         err: err instanceof Error ? err.message : String(err),
@@ -83,8 +85,8 @@ export default function FollowButton(props: {
     setFollowed(next);
     setBusy(true);
     try {
-      if (next) await api.follow(props.userId);
-      else await api.unfollow(props.userId);
+      if (next) await follow(props.userId);
+      else await unfollow(props.userId);
     } catch {
       setFollowed(!next); // revert — the tap was not authoritative
     } finally {

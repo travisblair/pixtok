@@ -12,46 +12,78 @@ function topRelatedCards(container: HTMLElement) {
 
 import { makeFeedOf, makeFeed, makeIllust } from "./test-fixtures";
 
-vi.mock("./api", () => ({
-  api: {
-    getStreet: vi.fn(),
-    getTop: vi.fn(),
-    getRecommended: vi.fn(),
-    getWorkRecs: vi.fn(),
-    getNextPage: vi.fn(),
-    getRelated: vi.fn(),
-    getUserIllusts: vi.fn(),
-    getUgoiraMeta: vi.fn(),
-    getAuthStatus: vi.fn(),
-    getBookmarkIds: vi.fn(),
-    getBlockedTags: vi.fn(),
-    setBlockedTags: vi.fn(async () => {}),
-    getImageSize: vi.fn(),
-    setImageSize: vi.fn(async () => {}),
-    getFeedViewMode: vi.fn(),
-    setFeedViewMode: vi.fn(async () => {}),
-    getArtistViewMode: vi.fn(),
-    setArtistViewMode: vi.fn(async () => {}),
-    gateStatus: vi.fn(),
-    gateUnlock: vi.fn(async () => {}),
-    getBookmarks: vi.fn(),
-    getBookmarksNext: vi.fn(),
-    getBookmarkTags: vi.fn(),
-    searchArtworks: vi.fn(),
-    searchUsers: vi.fn(),
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    follow: vi.fn(async () => {}),
-    unfollow: vi.fn(async () => {}),
-    getFollowed: vi.fn(),
-  },
-  setOnGateLocked: vi.fn(),
-  setOnRequestError: vi.fn(),
-  logEvent: vi.fn(),
+vi.mock("./api/client", async () => {
+  const actual = await vi.importActual("./api/client");
+  return {
+    logEvent: vi.fn(),
+    reportApiError: vi.fn(),
+    ApiError: actual.ApiError,
+    setOnGateLocked: vi.fn(),
+    setOnRequestError: vi.fn(),
+  };
+});
+vi.mock("./api/feeds", () => ({
+  getStreet: vi.fn(),
+  getTop: vi.fn(),
+  getRecommended: vi.fn(),
+  getNextPage: vi.fn(),
+}));
+vi.mock("./api/illust", () => ({
+  getWorkRecs: vi.fn(),
+  getRelated: vi.fn(),
+  like: vi.fn(async () => {}),
+  unlike: vi.fn(async () => {}),
+}));
+vi.mock("./api/follow", () => ({
+  getUserIllusts: vi.fn(),
+  follow: vi.fn(async () => {}),
+  unfollow: vi.fn(async () => {}),
+  getFollowed: vi.fn(),
+}));
+vi.mock("./api/search", () => ({
+  getUgoiraMeta: vi.fn(),
+  searchArtworks: vi.fn(),
+  searchUsers: vi.fn(),
+}));
+vi.mock("./api/bookmarks", () => ({
+  getBookmarkIds: vi.fn(),
+  getBookmarks: vi.fn(),
+  getBookmarksNext: vi.fn(),
+  getBookmarkTags: vi.fn(),
+}));
+vi.mock("./api/prefs", () => ({
+  getBlockedTags: vi.fn(),
+  setBlockedTags: vi.fn(async () => {}),
+  getImageSize: vi.fn(),
+  setImageSize: vi.fn(async () => {}),
+  getFeedViewMode: vi.fn(),
+  setFeedViewMode: vi.fn(async () => {}),
+  getArtistViewMode: vi.fn(),
+  setArtistViewMode: vi.fn(async () => {}),
+}));
+vi.mock("./api/auth", () => ({
+  gateStatus: vi.fn(),
+  gateUnlock: vi.fn(async () => {}),
+  getAuthStatus: vi.fn(),
 }));
 
-import { api, setOnGateLocked, setOnRequestError } from "./api";
-const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+import { setOnGateLocked, setOnRequestError } from "./api/client";
+import * as feeds from "./api/feeds";
+import * as illust from "./api/illust";
+import * as follow from "./api/follow";
+import * as search from "./api/search";
+import * as bookmarks from "./api/bookmarks";
+import * as prefs from "./api/prefs";
+import * as auth from "./api/auth";
+const mockedApi = {
+  ...feeds,
+  ...illust,
+  ...follow,
+  ...search,
+  ...bookmarks,
+  ...prefs,
+  ...auth,
+} as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 beforeEach(() => {
   // Session snapshots must not leak between tests (a leftover
@@ -312,7 +344,7 @@ describe("App", () => {
     const reg = vi.mocked(setOnRequestError);
     expect(reg).toHaveBeenCalledTimes(1);
     // Simulate a request() failure firing mid-session (the detection
-    // itself is pinned in api.test.ts and the e2e spec).
+    // itself is pinned in api/client.test.ts and the e2e spec).
     (reg.mock.calls[0][0] as (message: string) => void)("Request failed (502)");
     const toastEl = container.querySelector(".error-toast");
     expect(toastEl).not.toBeNull();
@@ -330,7 +362,7 @@ describe("App", () => {
     expect(reg).toHaveBeenCalledTimes(1);
     // The live trigger is a 403 "gate locked" inside request() — this
     // simulates that firing mid-session (unit-testable wiring; the 403
-    // detection itself is pinned in api.test.ts and the e2e spec).
+    // detection itself is pinned in api/client.test.ts and the e2e spec).
     (reg.mock.calls[0][0] as () => void)();
     expect(container.querySelector(".gate-screen")).not.toBeNull();
     expect(container.querySelectorAll(".feed-card").length).toBe(0);

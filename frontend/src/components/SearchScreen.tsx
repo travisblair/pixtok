@@ -1,5 +1,6 @@
 import { createSignal, createEffect, on, onMount, For, Show } from "solid-js";
-import { api } from "../api";
+import { searchArtworks, searchUsers } from "../api/search";
+import { reportApiError } from "../api/client";
 import type { PixivIllust, SearchUserResult } from "../types";
 import FeedCard from "./FeedCard";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
@@ -126,7 +127,7 @@ export default function SearchScreen(props: {
     try {
       if (mode() === "works") {
         const nextPage = fresh ? 1 : page() + 1;
-        const data = await api.searchArtworks({
+        const data = await searchArtworks({
           word: term,
           order: order(),
           contentMode: contentMode(),
@@ -154,7 +155,7 @@ export default function SearchScreen(props: {
         setHasMore(nextPage < data.last_page);
       } else {
         const nextPage = fresh ? 1 : page() + 1;
-        const data = await api.searchUsers(term, nextPage);
+        const data = await searchUsers(term, nextPage);
         if (seq !== reqSeq) return;
         if (fresh) {
           setUsers(data.users);
@@ -175,6 +176,7 @@ export default function SearchScreen(props: {
         if (container && typeof container.scrollTo === "function") container.scrollTo({ top: 0 });
       }
     } catch (err) {
+      reportApiError(err);
       if (seq === reqSeq) {
         console.error("Search failed:", err);
         if (fresh) {

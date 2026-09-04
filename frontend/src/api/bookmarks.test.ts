@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api } from "./index";
+import { getBookmarks, getBookmarksNext } from "./bookmarks";
 
 // The backend 400s /api/bookmarks without an offset. The first load
 // once omitted it — every page-open 400'd into the empty state, and the
@@ -24,18 +24,18 @@ describe("bookmarks page wire contract (offset required)", () => {
   });
 
   it("first page carries offset=0", async () => {
-    await api.getBookmarks();
+    await getBookmarks();
     expect(calls).toHaveLength(1);
     expect(calls[0]).toBe("/api/bookmarks?tag=&offset=0");
   });
 
   it("tag-filtered first page carries offset=0", async () => {
-    await api.getBookmarks("tag-one");
+    await getBookmarks("tag-one");
     expect(calls[0]).toBe("/api/bookmarks?tag=tag-one&offset=0");
   });
 
   it("continuation rides the backend's own offset URL, exactly one /api prefix", async () => {
-    await api.getBookmarksNext("/api/bookmarks?tag=tag-one&offset=48");
+    await getBookmarksNext("/api/bookmarks?tag=tag-one&offset=48");
     expect(calls[0]).toBe("/api/bookmarks?tag=tag-one&offset=48");
     expect(calls[0]).not.toContain("/api/api");
   });

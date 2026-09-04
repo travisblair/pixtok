@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api } from "./index";
+import * as feeds from "./feeds";
+import * as search from "./search";
+import * as bookmarks from "./bookmarks";
+import * as follow from "./follow";
+import * as illust from "./illust";
+import * as prefs from "./prefs";
+import * as auth from "./auth";
 
 // Every route's wire shape: exact URL, method, and body. Route-shape
 // drift — double prefixes, missing required params, wrong methods — is
@@ -31,15 +37,15 @@ describe("api route shapes by domain", () => {
     `${c.method} ${c.url}${c.body ? ` :: ${c.body}` : ""}`;
 
   it("feeds", async () => {
-    await api.getTop();
-    await api.getTop("week");
-    await api.getTopIllust();
-    await api.getNewest(true, "9000");
-    await api.getNewestNext("/api/newest?r18=true&lastId=9000");
-    await api.getStreet("");
-    await api.getRecommended();
+    await feeds.getTop();
+    await feeds.getTop("week");
+    await feeds.getTopIllust();
+    await feeds.getNewest(true, "9000");
+    await feeds.getNewestNext("/api/newest?r18=true&lastId=9000");
+    await feeds.getStreet("");
+    await feeds.getRecommended();
     const nextUrl = "https://app-api.pixiv.net/v1/illust/recommended?x=1";
-    await api.getNextPage(nextUrl);
+    await feeds.getNextPage(nextUrl);
     expect(calls.map(shape)).toEqual([
       "GET /api/top?mode=day",
       "GET /api/top?mode=week",
@@ -53,10 +59,10 @@ describe("api route shapes by domain", () => {
   });
 
   it("search", async () => {
-    await api.searchArtworks({ word: "summer" });
-    await api.searchArtworks({ word: "summer", workType: "ugoira", scd: "2024-01-01", p: 3 });
-    await api.searchUsers("nick", 2);
-    await api.getUgoiraMeta(9);
+    await search.searchArtworks({ word: "summer" });
+    await search.searchArtworks({ word: "summer", workType: "ugoira", scd: "2024-01-01", p: 3 });
+    await search.searchUsers("nick", 2);
+    await search.getUgoiraMeta(9);
     expect(calls.map(shape)).toEqual([
       "GET /api/search/artworks?word=summer&order=date_d&mode=all&s_mode=s_tag_full&type=all&ai_type=0",
       "GET /api/search/artworks?word=summer&order=date_d&mode=all&s_mode=s_tag_full&type=ugoira&ai_type=0&scd=2024-01-01&p=3",
@@ -66,8 +72,8 @@ describe("api route shapes by domain", () => {
   });
 
   it("bookmarks ids and tags", async () => {
-    await api.getBookmarkIds();
-    await api.getBookmarkTags();
+    await bookmarks.getBookmarkIds();
+    await bookmarks.getBookmarkTags();
     expect(calls.map(shape)).toEqual([
       "GET /api/bookmarks/ids",
       "GET /api/bookmarks/tags",
@@ -75,10 +81,10 @@ describe("api route shapes by domain", () => {
   });
 
   it("follow and user", async () => {
-    await api.follow(7);
-    await api.unfollow(7);
-    await api.getFollowed(7);
-    await api.getUserIllusts(7);
+    await follow.follow(7);
+    await follow.unfollow(7);
+    await follow.getFollowed(7);
+    await follow.getUserIllusts(7);
     expect(calls.map(shape)).toEqual([
       "POST /api/user/7/follow",
       "POST /api/user/7/unfollow",
@@ -88,10 +94,10 @@ describe("api route shapes by domain", () => {
   });
 
   it("illust actions", async () => {
-    await api.like(9);
-    await api.unlike(9);
-    await api.getRelated(9);
-    await api.getWorkRecs(9);
+    await illust.like(9);
+    await illust.unlike(9);
+    await illust.getRelated(9);
+    await illust.getWorkRecs(9);
     expect(calls.map(shape)).toEqual([
       "POST /api/illust/9/like",
       "POST /api/illust/9/unlike",
@@ -101,14 +107,14 @@ describe("api route shapes by domain", () => {
   });
 
   it("prefs", async () => {
-    await api.getBlockedTags();
-    await api.setBlockedTags(["a", "b"]);
-    await api.getImageSize();
-    await api.setImageSize("medium");
-    await api.getFeedViewMode();
-    await api.setFeedViewMode("grid");
-    await api.getArtistViewMode();
-    await api.setArtistViewMode("grid");
+    await prefs.getBlockedTags();
+    await prefs.setBlockedTags(["a", "b"]);
+    await prefs.getImageSize();
+    await prefs.setImageSize("medium");
+    await prefs.getFeedViewMode();
+    await prefs.setFeedViewMode("grid");
+    await prefs.getArtistViewMode();
+    await prefs.setArtistViewMode("grid");
     expect(calls.map(shape)).toEqual([
       "GET /api/prefs/blocked-tags",
       'PUT /api/prefs/blocked-tags :: {"tags":["a","b"]}',
@@ -122,9 +128,9 @@ describe("api route shapes by domain", () => {
   });
 
   it("auth", async () => {
-    await api.getAuthStatus();
-    await api.gateStatus();
-    await api.gateUnlock("pw");
+    await auth.getAuthStatus();
+    await auth.gateStatus();
+    await auth.gateUnlock("pw");
     expect(calls.map(shape)).toEqual([
       "GET /api/auth/status",
       "GET /api/gate/status",
