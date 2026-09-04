@@ -104,12 +104,16 @@ func (c *imageCache) reapOnce(now time.Time) {
 	}
 }
 
+// imageCacheReapInterval is how often the cache reaper sweeps expired
+// entries (the loop must stay panic-proof — see below).
+const imageCacheReapInterval = 5 * time.Minute
+
 func (c *imageCache) reapLoop() {
 	// A panic in map maintenance must not kill the process — recover
 	// INSIDE the loop body so the reaper survives and keeps ticking
 	// (a function-scope defer would unwind out of the for loop and
 	// kill the reaper permanently after one panic — reviewer finding).
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(imageCacheReapInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		func() {
@@ -408,12 +412,20 @@ func main() {
 
 	rl := newRateLimiter(nil)
 
+	// Slow relay routes (/api/img, ugoira meta) override WriteTimeout
+	// per-response via SetWriteDeadline — see handlers.go.
+	const (
+		serverReadTimeout  = 10 * time.Second
+		serverWriteTimeout = 15 * time.Second
+		serverIdleTimeout  = 60 * time.Second
+	)
+
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      originCheck(securityHeaders(logRequests(rl.middleware(handler)))),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  serverReadTimeout,
+		WriteTimeout: serverWriteTimeout,
+		IdleTimeout:  serverIdleTimeout,
 	}
 
 	// Graceful stop on SIGINT/SIGTERM (reviewer finding): drain

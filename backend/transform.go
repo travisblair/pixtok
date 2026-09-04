@@ -238,25 +238,25 @@ func transformStreet(raw []byte) ([]byte, error) {
 		if len(block.Thumbnails) == 0 {
 			continue
 		}
-		t := block.Thumbnails[0]
+		thumb := block.Thumbnails[0]
 
 		// Street thumbnails carry a `type` string (illust/manga — ugoira
 		// works are labelled illust there) and, when present, the
 		// authoritative illustType discriminator. Prefer illustType.
-		typ := t.Type
-		if t.IllustType != 0 {
-			typ = illustTypeString(t.IllustType)
+		typ := thumb.Type
+		if thumb.IllustType != 0 {
+			typ = illustTypeString(thumb.IllustType)
 		}
 
 		ill := illust{
-			ID:             t.ID,
-			Title:          t.Title,
+			ID:             thumb.ID,
+			Title:          thumb.Title,
 			Type:           typ,
-			PageCount:      t.PageCount,
-			CreateDate:     t.CreateDate,
-			Caption:        t.Description,
-			XRestrict:      t.XRestrict,
-			AIType:         t.AIType,
+			PageCount:      thumb.PageCount,
+			CreateDate:     thumb.CreateDate,
+			Caption:        thumb.Description,
+			XRestrict:      thumb.XRestrict,
+			AIType:         thumb.AIType,
 			ImageURLs:      map[string]string{},
 			TotalBookmarks: 0,
 			TotalView:      0,
@@ -265,12 +265,12 @@ func transformStreet(raw []byte) ([]byte, error) {
 		if ill.Type == "" {
 			ill.Type = "illust"
 		}
-		ill.User.ID = t.UserID
-		ill.User.Name = t.UserName
-		ill.User.Account = t.UserName
-		ill.User.ProfileImageURLs.Medium = t.ProfileImg
+		ill.User.ID = thumb.UserID
+		ill.User.Name = thumb.UserName
+		ill.User.Account = thumb.UserName
+		ill.User.ProfileImageURLs.Medium = thumb.ProfileImg
 
-		for _, tag := range t.Tags {
+		for _, tag := range thumb.Tags {
 			ill.Tags = append(ill.Tags, illustTag{
 				Name:           tag.Name,
 				TranslatedName: tag.TranslatedName,
@@ -278,18 +278,18 @@ func transformStreet(raw []byte) ([]byte, error) {
 			})
 		}
 
-		if len(t.Pages) > 0 {
-			first := t.Pages[0]
+		if len(thumb.Pages) > 0 {
+			first := thumb.Pages[0]
 			ill.ImageURLs["square_medium"] = first.Urls.Square
 			ill.ImageURLs["medium"] = first.Urls.Medium
 			ill.ImageURLs["large"] = first.Urls.Large
 		}
 
-		for _, p := range t.Pages {
+		for _, page := range thumb.Pages {
 			var mp metaPage
-			mp.ImageURLs.SquareMedium = p.Urls.Square
-			mp.ImageURLs.Medium = p.Urls.Medium
-			mp.ImageURLs.Large = p.Urls.Large
+			mp.ImageURLs.SquareMedium = page.Urls.Square
+			mp.ImageURLs.Medium = page.Urls.Medium
+			mp.ImageURLs.Large = page.Urls.Large
 			ill.MetaPages = append(ill.MetaPages, mp)
 		}
 		if len(ill.MetaPages) <= 1 {
@@ -327,15 +327,15 @@ func transformStreet(raw []byte) ([]byte, error) {
 var cThumbPrefixRe = regexp.MustCompile(`^(.+)/c/[^/]+/((?:img-master|custom-thumb)/.+)$`)
 
 func deriveLarge(thumb string) (url string, ok bool) {
-	m := cThumbPrefixRe.FindStringSubmatch(thumb)
-	if m == nil {
+	match := cThumbPrefixRe.FindStringSubmatch(thumb)
+	if match == nil {
 		return thumb, false
 	}
-	s := m[1] + "/" + m[2]
-	if strings.HasSuffix(s, "_square1200.jpg") {
-		return strings.Replace(s, "_square1200.jpg", "_master1200.jpg", 1), true
+	size := match[1] + "/" + match[2]
+	if strings.HasSuffix(size, "_square1200.jpg") {
+		return strings.Replace(size, "_square1200.jpg", "_master1200.jpg", 1), true
 	}
-	return s, true
+	return size, true
 }
 
 // pageThumb derives the i-th page's square thumbnail from a page-0
@@ -385,7 +385,7 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 	const maxPages = 200 // a corrupt pageCount could OOM the meta_pages loop
 
 	out := make([]illust, 0, len(items))
-	for _, s := range items {
+	for _, item := range items {
 		if len(out) >= maxWorks {
 			break
 		}
@@ -394,42 +394,42 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 		// The old fallback only mapped 1→manga and dropped 2 into
 		// "illust", so every ugoira work in search/newest/recs
 		// rendered as a static card and the ▶ player never mounted.
-		typ := s.Type
+		typ := item.Type
 		switch {
-		case s.IllustType == 2:
+		case item.IllustType == 2:
 			typ = "ugoira"
-		case s.IllustType == 1:
+		case item.IllustType == 1:
 			typ = "manga"
 		case typ == "":
 			typ = "illust"
 		}
 
-		large, ok := deriveLarge(s.URL)
+		large, ok := deriveLarge(item.URL)
 
 		ill := illust{
-			ID:             s.ID,
-			Title:          s.Title,
+			ID:             item.ID,
+			Title:          item.Title,
 			Type:           typ,
-			PageCount:      s.PageCount,
-			CreateDate:     s.CreateDate,
-			Caption:        s.Description,
-			XRestrict:      s.XRestrict,
-			AIType:         s.AIType,
-			IsBookmarked:   s.BookmarkData != nil,
+			PageCount:      item.PageCount,
+			CreateDate:     item.CreateDate,
+			Caption:        item.Description,
+			XRestrict:      item.XRestrict,
+			AIType:         item.AIType,
+			IsBookmarked:   item.BookmarkData != nil,
 			TotalBookmarks: 0,
 			TotalView:      0,
 			ImageURLs: map[string]string{
-				"square_medium": s.URL,
-				"medium":        s.URL,
+				"square_medium": item.URL,
+				"medium":        item.URL,
 				"large":         large,
 			},
 		}
-		ill.User.ID = s.UserID
-		ill.User.Name = s.UserName
-		ill.User.Account = s.UserName
-		ill.User.ProfileImageURLs.Medium = s.ProfileImg
+		ill.User.ID = item.UserID
+		ill.User.Name = item.UserName
+		ill.User.Account = item.UserName
+		ill.User.ProfileImageURLs.Medium = item.ProfileImg
 
-		for _, tag := range s.Tags {
+		for _, tag := range item.Tags {
 			ill.Tags = append(ill.Tags, illustTag{Name: tag})
 		}
 
@@ -438,15 +438,15 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 		// derived URLs would all be the same page-0 square and the
 		// reader would silently show one tiny image on every page.
 		// Single pages stay nil so FeedCard uses image_urls directly.
-		pages := s.PageCount
+		pages := item.PageCount
 		if pages > maxPages {
 			pages = maxPages
 		}
 		if ok && pages > 1 {
 			for i := 0; i < pages; i++ {
 				var mp metaPage
-				mp.ImageURLs.SquareMedium = pageThumb(s.URL, i)
-				mp.ImageURLs.Medium = pageThumb(s.URL, i)
+				mp.ImageURLs.SquareMedium = pageThumb(item.URL, i)
+				mp.ImageURLs.Medium = pageThumb(item.URL, i)
 				mp.ImageURLs.Large = strings.Replace(
 					large, "_p0_master1200.jpg", fmt.Sprintf("_p%d_master1200.jpg", i), 1,
 				)
@@ -494,8 +494,8 @@ func transformNewest(raw []byte, r18 bool) ([]byte, error) {
 
 	out := feedResponse{Illusts: mapWebIllusts(src.Body.Illusts, 60)}
 	if src.Body.LastID != "" {
-		u := fmt.Sprintf("/api/newest?r18=%t&lastId=%s", r18, src.Body.LastID)
-		out.NextURL = &u
+		next := fmt.Sprintf("/api/newest?r18=%t&lastId=%s", r18, src.Body.LastID)
+		out.NextURL = &next
 	}
 	return json.Marshal(out)
 }
@@ -562,9 +562,9 @@ func transformSearchArtworks(raw []byte) (searchArtworksResponse, error) {
 	popular := append(append([]webIllust{}, src.Body.Popular.Recent...), src.Body.Popular.Permanent...)
 
 	related := make([]illustTag, 0, len(src.Body.RelatedTags))
-	for _, t := range src.Body.RelatedTags {
-		rt := illustTag{Name: t}
-		if tr, ok := src.Body.TagTranslation[t]; ok && tr.En != "" {
+	for _, tag := range src.Body.RelatedTags {
+		rt := illustTag{Name: tag}
+		if tr, ok := src.Body.TagTranslation[tag]; ok && tr.En != "" {
 			rt.TranslatedName = tr.En
 		}
 		related = append(related, rt)
@@ -637,14 +637,14 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 	}
 
 	byID := make(map[string]webIllust, len(src.Body.Thumbnails.Illust))
-	for _, w := range src.Body.Thumbnails.Illust {
-		byID[w.ID] = w
+	for _, work := range src.Body.Thumbnails.Illust {
+		byID[work.ID] = work
 	}
 
 	out := searchUsersResponse{Total: src.Body.Page.Total}
-	for _, u := range src.Body.Users {
-		row := userSearchResult{ID: u.UserID, Name: u.Name, Avatar: u.Image, Premium: u.Premium, IsFollowed: u.IsFollowed}
-		if ids, ok := src.Body.Page.WorkIDs[u.UserID]; ok {
+	for _, user := range src.Body.Users {
+		row := userSearchResult{ID: user.UserID, Name: user.Name, Avatar: user.Image, Premium: user.Premium, IsFollowed: user.IsFollowed}
+		if ids, ok := src.Body.Page.WorkIDs[user.UserID]; ok {
 			previews := make([]webIllust, 0, 3)
 			for _, wid := range ids {
 				if w, ok := byID[wid.ID]; ok {
@@ -686,8 +686,8 @@ func transformBookmarkPage(raw []byte, tag string, offset, limit int, order stri
 	}
 	out := feedResponse{Illusts: mapWebIllusts(env.Body.Works, limit)}
 	if next := offset + limit; next < env.Body.Total {
-		u := fmt.Sprintf("/api/bookmarks?tag=%s&offset=%d&order=%s", url.QueryEscape(tag), next, order)
-		out.NextURL = &u
+		nextURL := fmt.Sprintf("/api/bookmarks?tag=%s&offset=%d&order=%s", url.QueryEscape(tag), next, order)
+		out.NextURL = &nextURL
 	}
 	return json.Marshal(out)
 }
@@ -728,11 +728,11 @@ func transformBookmarkTags(raw []byte) ([]byte, error) {
 		Public:  make([]outTag, 0, len(env.Body.Public)),
 		Private: make([]outTag, 0, len(env.Body.Private)),
 	}
-	for _, t := range env.Body.Public {
-		out.Public = append(out.Public, outTag{Name: t.Tag, Count: t.Cnt})
+	for _, tag := range env.Body.Public {
+		out.Public = append(out.Public, outTag{Name: tag.Tag, Count: tag.Cnt})
 	}
-	for _, t := range env.Body.Private {
-		out.Private = append(out.Private, outTag{Name: t.Tag, Count: t.Cnt})
+	for _, tag := range env.Body.Private {
+		out.Private = append(out.Private, outTag{Name: tag.Tag, Count: tag.Cnt})
 	}
 	return json.Marshal(out)
 }

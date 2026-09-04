@@ -169,10 +169,10 @@ function GridCell(props: {
 
   function handleTap(e: MouseEvent) {
     if (!props.onTap) return;
-    const t = e.target as HTMLElement;
+    const target = e.target as HTMLElement;
     // Ignore taps on the cell's interactive children — heart, ugoira
     // badge, retry — so controls never open a stack.
-    if (t.closest(".grid-cell-heart, .grid-cell-ugoira, .grid-cell-retry")) return;
+    if (target.closest(".grid-cell-heart, .grid-cell-ugoira, .grid-cell-retry")) return;
     props.onTap(props.illust);
   }
 

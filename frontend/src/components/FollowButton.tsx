@@ -63,9 +63,9 @@ export default function FollowButton(props: {
 
   async function load() {
     try {
-      const d = await api.getFollowed(props.userId);
-      logEvent("follow", "ok", { id: props.userId, followed: d.followed });
-      setFollowed(d.followed);
+      const res = await api.getFollowed(props.userId);
+      logEvent("follow", "ok", { id: props.userId, followed: res.followed });
+      setFollowed(res.followed);
     } catch (err) {
       logEvent("follow", "fail", {
         id: props.userId,

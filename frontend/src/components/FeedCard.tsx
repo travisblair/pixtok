@@ -108,14 +108,14 @@ export default function FeedCard(props: {
     const rows: number[][] = [];
     let cur: number[] = [];
     for (let i = 0; i < chips.length; i++) {
-      const t = chips[i].offsetTop;
-      if (prevTop === null || t === prevTop) {
+      const top = chips[i].offsetTop;
+      if (prevTop === null || top === prevTop) {
         cur.push(i);
       } else {
         rows.push(cur);
         cur = [i];
       }
-      prevTop = t;
+      prevTop = top;
     }
     rows.push(cur);
     if (rows.length <= 2) {
@@ -185,11 +185,11 @@ export default function FeedCard(props: {
         clearTimeout(unloadTimer);
         if (!active()) {
           clearTimeout(loadTimer);
-          const r = entry.boundingClientRect;
+          const rect = entry.boundingClientRect;
           const rb = entry.rootBounds;
           const vh = rb?.height || window.innerHeight;
           const dist = rb
-            ? Math.max(rb.top - r.bottom, r.top - rb.bottom, 0)
+            ? Math.max(rb.top - rect.bottom, rect.top - rb.bottom, 0)
             : 0;
           const delay = computeLoadDelay({ distPx: dist, viewportPx: vh });
           loadTimer = setTimeout(() => setActive(true), delay);
@@ -410,11 +410,11 @@ export default function FeedCard(props: {
 
   function handleTap(e: MouseEvent) {
     if (!props.onTap) return;
-    const t = e.target as HTMLElement;
+    const target = e.target as HTMLElement;
     // ignore taps on interactive children (like button, tags button,
     // artist link, page counter, tag chips); slider swipes don't fire
     // click so no conflict there
-    if (t.closest(".like-btn, .tags-btn, a, .page-counter, .card-tag-row")) return;
+    if (target.closest(".like-btn, .tags-btn, a, .page-counter, .card-tag-row")) return;
     props.onTap(props.illust);
   }
 
