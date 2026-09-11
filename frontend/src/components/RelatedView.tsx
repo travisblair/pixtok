@@ -3,7 +3,7 @@ import { getRelated } from "../api/illust";
 import { getNextPage } from "../api/feeds";
 import { reportApiError } from "../api/client";
 import type { PixivIllust } from "../types";
-import FeedCard from "./FeedCard";
+import FeedCard from "./FeedCard/FeedCard";
 import { filterBlockedTags, dedupeSeen } from "../helpers";
 import { blockedTags, stackHintDismissed, dismissStackHint } from "../store";
 import { useFeedSentinel } from "../hooks";

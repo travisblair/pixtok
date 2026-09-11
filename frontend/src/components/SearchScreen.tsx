@@ -2,7 +2,7 @@ import { createSignal, createEffect, onMount, For, Show } from "solid-js";
 import { searchArtworks, searchUsers } from "../api/search";
 import { reportApiError } from "../api/client";
 import type { PixivIllust, SearchUserResult } from "../types";
-import FeedCard from "./FeedCard";
+import FeedCard from "./FeedCard/FeedCard";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
 import { blockedTags } from "../store";
 import { useFeedSentinel } from "../hooks";

@@ -18,7 +18,7 @@ import {
   setFeedViewModeFromServer,
   setArtistViewModeFromServer,
 } from "./store";
-import FeedCard from "./components/FeedCard";
+import FeedCard from "./components/FeedCard/FeedCard";
 import GridFeed from "./components/GridFeed";
 import RankingSelector from "./components/RankingSelector";
 import ContentPills from "./components/ContentPills";
