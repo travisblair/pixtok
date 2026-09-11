@@ -101,11 +101,6 @@ export function filterBlockedTags(
 }
 
 /**
- * Whether a slider page should have its real image src (vs the 1px
- * placeholder). Pages outside the ±window around the current page are
- * not loaded even when the card is active.
- */
-/**
  * Load-window bounds for a slider, spanning the live page AND the
  * settled page. During a swipe the two disagree — iOS scroll-snap fires
  * its last scroll event mid-snap, with a rounded index that doesn't

@@ -6,6 +6,31 @@ import type { SearchState } from "./components/SearchScreen";
 // load an unknown tab silently).
 const FEED_TYPES = ["home", "newest", "illustrations", "top", "recommended", "bookmarks"];
 
+// Restored stack/recs entries go straight to FeedCard (no refetch), so
+// they must carry the shape its render reads unconditionally — a
+// user-less entry throws on `props.illust.user.name`, and the throw
+// escapes boot() and masquerades as gate:unreachable (boot dies, the
+// GateScreen stays up forever). The old id-only guard let `{"id":5}`
+// through; require the full render shape instead.
+function isRenderableIllustEntry(s: unknown): s is PixivIllust {
+  if (!s || typeof s !== "object") return false;
+  const entry = s as {
+    id?: unknown;
+    user?: { id?: unknown; name?: unknown } | null;
+    image_urls?: { large?: unknown } | null;
+  };
+  return (
+    typeof entry.id === "number" &&
+    !!entry.user &&
+    typeof entry.user === "object" &&
+    typeof entry.user.id === "number" &&
+    typeof entry.user.name === "string" &&
+    !!entry.image_urls &&
+    typeof entry.image_urls === "object" &&
+    typeof entry.image_urls.large === "string"
+  );
+}
+
 /**
  * Reload-safe LAYER state: survives iOS jetsam kills (localStorage, not
  * sessionStorage). Snapshot shape is versioned — old or corrupt payloads
@@ -115,6 +140,40 @@ export function loadSnapshot(): AppSnapshot | null {
     ) {
       return null;
     }
+    // Validate the search stack BEFORE deriving searchTags: the arrays
+    // are parallel, and the restore in App.tsx maps tags[i] over the
+    // VALIDATED stack.
+    const searchStack: SearchState[] = Array.isArray(parsed.searchStack)
+      ? (parsed.searchStack.filter(
+          (s): s is SearchState =>
+            !!s &&
+            typeof s === "object" &&
+            typeof s.word === "string" &&
+            Array.isArray(s.works) &&
+            Array.isArray(s.users)
+        ) as SearchState[])
+      : // Legacy single-search snapshots migrate into stack[0].
+        parsed.search &&
+        typeof parsed.search === "object" &&
+        typeof parsed.search.word === "string" &&
+        Array.isArray(parsed.search.works) &&
+        Array.isArray(parsed.search.users)
+        ? [parsed.search as SearchState]
+        : [];
+
+    const rawTags: (string | null)[] = Array.isArray(parsed.searchTags)
+      ? parsed.searchTags
+          .slice(0, MAX_SEARCH_DEPTH)
+          .map((t) => (typeof t === "string" ? t : null))
+      : parsed.search && typeof parsed.search.word === "string"
+        ? [parsed.search.word]
+        : [];
+    // A saved tags array that doesn't match the validated stack — a
+    // hand-edited snapshot, or entries the filter above dropped — would
+    // make the restore read past the stack end or silently lose layers.
+    // Pad with null / truncate to the stack length.
+    const searchTags = searchStack.map((_, i) => rawTags[i] ?? null);
+
     return {
       v: 1,
       feedType: FEED_TYPES.includes(parsed.feedType) ? parsed.feedType : "home",
@@ -122,46 +181,18 @@ export function loadSnapshot(): AppSnapshot | null {
       rankMode: parsed.rankMode ?? "day",
       newestR18: !!parsed.newestR18,
       topMode: parsed.topMode ?? "all",
-      stack: (parsed.stack as unknown[]).filter(
-        (s): s is PixivIllust =>
-          !!s && typeof s === "object" && typeof (s as { id?: unknown }).id === "number"
-      ),
+      stack: (parsed.stack as unknown[]).filter(isRenderableIllustEntry),
       artist:
         parsed.artist &&
         typeof parsed.artist.id === "number" &&
         typeof parsed.artist.name === "string"
           ? { id: parsed.artist.id, name: parsed.artist.name }
           : null,
-      recs: (parsed.recs as unknown[]).filter(
-        (s): s is PixivIllust =>
-          !!s && typeof s === "object" && typeof (s as { id?: unknown }).id === "number"
-      ),
+      recs: (parsed.recs as unknown[]).filter(isRenderableIllustEntry),
       recsSource: parsed.recsSource ?? "",
       modalOpen: !!parsed.modalOpen,
-      searchStack: Array.isArray(parsed.searchStack)
-        ? (parsed.searchStack.filter(
-            (s): s is SearchState =>
-              !!s &&
-              typeof s === "object" &&
-              typeof s.word === "string" &&
-              Array.isArray(s.works) &&
-              Array.isArray(s.users)
-          ) as SearchState[])
-        : // Legacy single-search snapshots migrate into stack[0].
-          parsed.search &&
-          typeof parsed.search === "object" &&
-          typeof parsed.search.word === "string" &&
-          Array.isArray(parsed.search.works) &&
-          Array.isArray(parsed.search.users)
-          ? [parsed.search as SearchState]
-          : [],
-      searchTags: Array.isArray(parsed.searchTags)
-        ? parsed.searchTags
-            .slice(0, MAX_SEARCH_DEPTH)
-            .map((t) => (typeof t === "string" ? t : null))
-        : parsed.search && typeof parsed.search.word === "string"
-          ? [parsed.search.word]
-          : [],
+      searchStack,
+      searchTags,
       layerOrder:
         Array.isArray(parsed.layerOrder) &&
         parsed.layerOrder.every((k) => typeof k === "string")

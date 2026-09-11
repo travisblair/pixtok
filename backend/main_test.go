@@ -2575,6 +2575,85 @@ func TestGateFailureDecay(t *testing.T) {
 	}
 }
 
+// Fix 1 companion (review): the sleep-slot cap sits BELOW the password
+// check, so it can never bound the check itself — a wrong-password
+// flood would run unbounded concurrent bcrypt. The dedicated hash
+// semaphore must refuse up front (429) once its 8 slots are busy, and
+// the owner's correct password must unlock as soon as one frees.
+func TestGateHashSemaphoreBoundsBcrypt(t *testing.T) {
+	g, err := newGate("correct horse battery staple", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	if got := cap(g.hashSlots); got != 8 {
+		t.Fatalf("hash semaphore cap = %d, want 8", got)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerGateRoutes(mux, g)
+	h := apiKeyGate("secret", g.middleware(mux))
+
+	unlock := func(password string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/gate",
+			strings.NewReader(`{"password":"`+password+`"}`))
+		req.Header.Set("X-Api-Key", "secret")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// Saturate every hash slot: a wrong password must now be refused
+	// before any bcrypt work starts.
+	for i := 0; i < cap(g.hashSlots); i++ {
+		g.hashSlots <- struct{}{}
+	}
+	if rr := unlock("wrong"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("wrong password with saturated hash slots = %d, want 429", rr.Code)
+	}
+
+	// The correct password meets the same bounded refusal while the
+	// slots are busy (the documented tradeoff) — then unlocks for real
+	// once one frees, proving the semaphore bounds without breaking the
+	// owner's path.
+	if rr := unlock("correct horse battery staple"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password with saturated hash slots = %d, want 429 (bounded refusal)", rr.Code)
+	}
+	for i := 0; i < cap(g.hashSlots); i++ {
+		<-g.hashSlots
+	}
+	if rr := unlock("correct horse battery staple"); rr.Code != http.StatusOK {
+		t.Fatalf("correct password after hash slots release = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+// Fix 3 companion (review): the sleep runs BEFORE the 401 is written,
+// and the server kills a handler cycle that outlives the connection's
+// write deadline — so an uncapped 30s/60s sleep could only ever write
+// its 401 to a dead connection. tarpitSleep is the pure policy split
+// out so skip/cap behavior is pinned with no real sleeps.
+func TestTarpitSleep(t *testing.T) {
+	cases := []struct {
+		name      string
+		delay     time.Duration
+		sinceLast time.Duration
+		want      time.Duration
+	}{
+		{"spaced-out attempt skips the sleep", 60 * time.Second, 3 * time.Second, 0},
+		{"exactly 2s apart still counts as spaced", 15 * time.Second, 2 * time.Second, 0},
+		{"burst at the 5s tier sleeps 5s", 5 * time.Second, time.Second, 5 * time.Second},
+		{"burst at the 15s tier stays 15s", 15 * time.Second, 100 * time.Millisecond, 15 * time.Second},
+		{"60s tier is capped to 25s", 60 * time.Second, 500 * time.Millisecond, 25 * time.Second},
+		{"below the failure floor never sleeps", 0, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tarpitSleep(tc.delay, tc.sinceLast); got != tc.want {
+				t.Fatalf("tarpitSleep(%v, %v) = %v, want %v", tc.delay, tc.sinceLast, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPrefsViewModesDefaultAndRoundtrip(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "prefs.db")
 	store, err := openPrefs(dbPath)

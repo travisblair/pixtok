@@ -142,10 +142,10 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 		Body struct {
 			Thumbnails struct {
 				Illust []struct {
-					ID           string `json:"id"`
+					ID           flexID `json:"id"`
 					Title        string `json:"title"`
 					IllustType   int    `json:"illustType"`
-					UserID       string `json:"userId"`
+					UserID       flexID `json:"userId"`
 					UserName     string `json:"userName"`
 					PageCount    int    `json:"pageCount"`
 					BookmarkData *struct {
@@ -173,7 +173,7 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 			break
 		}
 		ill := illust{
-			ID:             srcIll.ID,
+			ID:             string(srcIll.ID),
 			Title:          srcIll.Title,
 			Type:           illustTypeString(srcIll.IllustType),
 			PageCount:      srcIll.PageCount,
@@ -184,7 +184,7 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 			Caption:        srcIll.Description,
 			ImageURLs:      srcIll.Urls,
 		}
-		ill.User.ID = srcIll.UserID
+		ill.User.ID = string(srcIll.UserID)
 		ill.User.Name = srcIll.UserName
 		ill.User.Account = srcIll.UserName
 		ill.User.ProfileImageURLs.Medium = srcIll.ProfileImg
@@ -665,7 +665,7 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 		Error bool `json:"error"`
 		Body  struct {
 			Users []struct {
-				UserID     string `json:"userId"`
+				UserID     flexID `json:"userId"`
 				Name       string `json:"name"`
 				Image      string `json:"image"`
 				Premium    bool   `json:"premium"`
@@ -698,8 +698,8 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 
 	out := searchUsersResponse{Total: src.Body.Page.Total}
 	for _, user := range src.Body.Users {
-		row := userSearchResult{ID: user.UserID, Name: user.Name, Avatar: user.Image, Premium: user.Premium, IsFollowed: user.IsFollowed}
-		if ids, ok := src.Body.Page.WorkIDs[user.UserID]; ok {
+		row := userSearchResult{ID: string(user.UserID), Name: user.Name, Avatar: user.Image, Premium: user.Premium, IsFollowed: user.IsFollowed}
+		if ids, ok := src.Body.Page.WorkIDs[string(user.UserID)]; ok {
 			previews := make([]webIllust, 0, 3)
 			for _, wid := range ids {
 				if w, ok := byID[string(wid.ID)]; ok {

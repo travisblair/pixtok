@@ -69,6 +69,13 @@ func (c *Client) refresh() error {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
+		// Arm the circuit breaker like every other refresh failure: a
+		// mid-body read failure (connection reset) used to leave
+		// expiresAt in the past, so EVERY subsequent request re-hit the
+		// token endpoint.
+		c.mu.Lock()
+		c.expiresAt = time.Now().Add(tokenRetryBackoff)
+		c.mu.Unlock()
 		return fmt.Errorf("read auth response: %w", err)
 	}
 	if resp.StatusCode != 200 {

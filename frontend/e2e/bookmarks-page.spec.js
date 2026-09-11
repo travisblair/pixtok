@@ -11,9 +11,8 @@ test.describe("Bookmarks page", () => {
     await switchFeedViaDrawer(page, "Bookmarks");
     await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
 
-    // Pills: All active, tag-one from the tags endpoint.
-    const allPill = page.locator(".mode-pill", { hasText: "All" });
-    await expect(allPill).toHaveClass(/active/);
+    // Tag pill (tag-one from the tags endpoint) is a TOGGLE: no
+    // separate All pill — tapping the active folder clears the filter.
     const tagPill = page.locator(".mode-pill", { hasText: "tag-one" });
     await expect(tagPill).toBeVisible();
 
@@ -27,8 +26,8 @@ test.describe("Bookmarks page", () => {
     await expect(page.locator(".feed-card")).toHaveCount(5, { timeout: 15000 });
     expect(mocks.unlikeCalls.length).toBeGreaterThan(0);
 
-    // Back to All: offset 0 with no tag.
-    await allPill.click();
+    // Clear the filter: re-tap the active tag.
+    await tagPill.click();
     await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
     expect(mocks.bookmarkCalls.at(-1)).toEqual({ tag: "", offset: 0 });
   });

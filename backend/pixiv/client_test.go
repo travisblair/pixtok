@@ -1142,3 +1142,83 @@ func TestSetWebCacheIfCurrent(t *testing.T) {
 		t.Fatalf("current-session commit lost: tok=%q", tok)
 	}
 }
+
+// ── Refresh body-read failure arms the breaker ─────────────────────────
+
+// failingReader errors on every Read — simulates the connection being
+// reset mid-body after the token endpoint's response headers arrived.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+func (failingReader) Close() error             { return nil }
+
+// failingReadTransport answers every request with a 200 whose Body
+// errors on the first Read.
+type failingReadTransport struct{}
+
+func (r *failingReadTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       failingReader{},
+		Request:    req,
+	}, nil
+}
+
+// Regression: a body-READ failure (connection reset mid-body) returned
+// without arming the circuit breaker — expiresAt stayed in the past and
+// every request re-hit the token endpoint. The read-failure path must
+// arm the backoff like the parse-error and empty-token paths.
+func TestRefreshBodyReadErrorArmsBackoff(t *testing.T) {
+	c := &Client{
+		http: &http.Client{Transport: &failingReadTransport{}},
+	}
+	if err := c.refresh(); err == nil {
+		t.Fatal("expected error from mid-body read failure")
+	}
+	c.mu.Lock()
+	backoff := time.Until(c.expiresAt)
+	c.mu.Unlock()
+	if backoff <= 0 {
+		t.Fatal("expiresAt was not armed — every request will re-hit the token endpoint")
+	}
+	if backoff < 25*time.Second || backoff > 31*time.Second {
+		t.Fatalf("circuit breaker backoff = %v, want ~30s (tokenRetryBackoff)", backoff)
+	}
+}
+
+// ── Invalidate/finish epoch cleanup ────────────────────────────────────
+
+// Regression: invalidate() bumps the epoch while a call is in flight;
+// that call's finish() correctly dropped the stale value, but its
+// CONDITIONAL epoch delete skipped (epochs[id] != call.epoch) — the
+// bumped marker leaked forever. The marker exists only to supersede
+// that call; finish() must delete it unconditionally.
+func TestFollowStateInvalidateCleansEpochAfterInflightFinishes(t *testing.T) {
+	bt := &blockingTransport{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		respBody: `{"user":{"is_followed":true}}`,
+	}
+	c := newFollowClient(bt)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.IsFollowed("12345")
+		close(done)
+	}()
+	<-bt.started
+	// User toggles while the detail fetch is in flight: the epoch is
+	// bumped to supersede the call.
+	c.followState.invalidate("12345")
+	close(bt.release)
+	<-done
+
+	// The superseded call has finished; its marker must not outlive it.
+	c.followState.mu.Lock()
+	_, leaked := c.followState.epochs["12345"]
+	c.followState.mu.Unlock()
+	if leaked {
+		t.Fatal("epoch marker leaked after the superseded in-flight call finished")
+	}
+}
