@@ -107,7 +107,7 @@ test.describe("Layer pagination failure guards (same storm, other screens)", () 
   test("artist page grid: a failing next page stops and shows the retry button", async ({ page }) => {
     const mocks = await setupApiMocks(page, {
       artistViewMode: "grid",
-      userBatch: { illusts: makeFeedOf(6, 4001).illusts, next_url: "/api/next?url=artist2" },
+      userBatch: { illusts: makeFeedOf(6, 4001).illusts, next_url: "https://app-api.pixiv.net/v1/user/illusts?user_id=4001&offset=0" },
       nextFails: true,
     });
     await gotoApp(page);
@@ -130,7 +130,7 @@ test.describe("Layer pagination failure guards (same storm, other screens)", () 
     const mocks = await setupApiMocks(page, {
       relatedBatch: {
         illusts: makeFeedOf(8, 3001).illusts,
-        next_url: "/api/next?url=related2",
+        next_url: "https://app-api.pixiv.net/v2/illust/related?offset=8",
       },
       nextFails: true,
     });
