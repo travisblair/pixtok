@@ -108,20 +108,23 @@ test.describe("UX round", () => {
     await expect(page.locator(".artist-view")).toBeVisible();
     await expect.poll(() => mocks.userCalls.length).toBe(1);
 
-    // Tap a DIFFERENT artist's name on a card inside the view (user 5001).
+    // Tap a DIFFERENT artist's name on a card inside the view.
     const swapLink = page
       .locator(".artist-view .feed-card")
       .first()
       .locator(".card-artist a");
     const swapName = (await swapLink.textContent()).trim();
+    const swapHref = await swapLink.getAttribute("href");
+    const swapId = Number(swapHref.split("/users/")[1]);
     await swapLink.click();
 
     // The view must REMOUNT for the new artist: a fresh user-illusts
-    // request with the NEW id, and the badge showing the NEW name.
+    // request with the TAPPED id (the id-derived mock makes stale-works
+    // regressions detectable), and the badge showing the NEW name.
     // Regression: the view used to reconcile in place, keeping the
     // previous artist's works under the new name.
     await expect.poll(() => mocks.userCalls.length).toBe(2);
-    expect(mocks.userCalls[1].id).toBe(5001);
+    expect(mocks.userCalls[1].id).toBe(swapId);
     await expect(page.locator(".artist-name-badge")).toHaveText(swapName);
   });
 
