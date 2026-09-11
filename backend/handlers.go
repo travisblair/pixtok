@@ -483,6 +483,27 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		w.Write(out)
 	})
 
+	// Private bookmarks: the app-API feed (restrict=private). Pixtok
+	// likes are PRIVATE by design, so this is the pile that mirrors
+	// them — the web page above only lists PUBLIC bookmarks.
+	// Passthrough: the app-API response is already the FeedResponse
+	// shape (illusts + ABSOLUTE app-api next_url). Continuations ride
+	// /api/next, where the allowlist re-validates the URL.
+	mux.HandleFunc("GET /api/bookmarks/private", func(w http.ResponseWriter, r *http.Request) {
+		body, err := api.GetBookmarkIllusts("private")
+		if err != nil {
+			log.Printf("ERROR private bookmarks: %v", err)
+			if errors.Is(err, pixiv.ErrInvalidParam) {
+				http.Error(w, "invalid parameter", http.StatusBadRequest)
+				return
+			}
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	})
+
 	mux.HandleFunc("GET /api/bookmarks/tags", func(w http.ResponseWriter, r *http.Request) {
 		body, err := api.GetBookmarkTags()
 		if err != nil {

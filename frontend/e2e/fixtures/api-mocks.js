@@ -131,6 +131,7 @@ export async function setupApiMocks(page, options = {}) {
     searchCalls: [], // [{ word, order, r18, p }]
     searchUsersCalls: [], // [{ nick, p }]
     bookmarkCalls: [], // [{ tag, offset }]
+    bookmarkPrivateCalls: [],
     followedCalls: [], // [{ id }]
     followCalls: [], // [{ id }]
     unfollowCalls: [], // [{ id }]
@@ -210,6 +211,19 @@ export async function setupApiMocks(page, options = {}) {
   });
   // The (?<!\/api) lookbehind mirrors the newest route: a double-prefixed
   // URL must fall through to the hermeticity guard.
+  // Private pile: app-API passthrough (absolute next_url rides /api/next).
+  await page.route(/(?<!\/api)\/api\/bookmarks\/private$/, (route) => {
+    mocks.bookmarkPrivateCalls.push({});
+    route.fulfill(
+      json(
+        toResponse(
+          options.privateBatch ??
+            makeFeedOf(6, 9801, "https://app-api.pixiv.net/v1/user/bookmarks/illust?offset=0")
+        )
+      )
+    );
+  });
+
   await page.route(/(?<!\/api)\/api\/bookmarks\/tags$/, (route) => {
     route.fulfill(
       json({

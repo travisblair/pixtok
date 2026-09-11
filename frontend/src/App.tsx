@@ -1,7 +1,7 @@
 import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { logEvent, reportApiError, setOnGateLocked, setOnRequestError } from "./api/client";
 import { getStreet, getNewest, getNewestNext, getNextPage, getTop, getTopIllust, getRecommended } from "./api/feeds";
-import { getBookmarkIds, getBookmarkTags, getBookmarks, getBookmarksNext } from "./api/bookmarks";
+import { getBookmarkIds, getBookmarkTags, getBookmarks, getBookmarksNext, getBookmarksPrivate } from "./api/bookmarks";
 import { getWorkRecs } from "./api/illust";
 import { getBlockedTags, getImageSize, getFeedViewMode, getArtistViewMode } from "./api/prefs";
 import { gateStatus } from "./api/auth";
@@ -88,6 +88,10 @@ export default function App() {
     { name: string; count: number }[]
   >([]);
   const [bookmarkTag, setBookmarkTag] = createSignal("");
+  // Public | private pile toggle. Pixtok likes are PRIVATE — the web
+  // bookmarks page only lists PUBLIC ones, so the private pile needs
+  // its own view (the app-API feed).
+  const [bookmarkVis, setBookmarkVis] = createSignal<"public" | "private">("public");
   // Illustrations (top page) tab: all | r18.
   const [topMode, setTopMode] = createSignal<ContentMode>("all");
   const [illusts, setIllusts] = createSignal<PixivIllust[]>([]);
@@ -216,13 +220,22 @@ export default function App() {
         // /illustration top page: fixed grid, no pagination.
         data = await getTopIllust(topMode());
       } else if (feedType() === "bookmarks") {
-        // Bookmarks PAGE (web AJAX, crawl-verified): tag-filtered with
-        // blind offset pagination. next_url is self-referential
-        // /api/bookmarks and must NOT ride /api/next (SSRF allowlist).
-        data =
-          !fresh && nextUrl()
-            ? await getBookmarksNext(nextUrl()!)
-            : await getBookmarks(bookmarkTag());
+        if (bookmarkVis() === "private") {
+          // App-API private pile (pixtok likes): passthrough feed, its
+          // ABSOLUTE next_url rides /api/next (allowlist-validated).
+          data =
+            !fresh && nextUrl()
+              ? await getNextPage(nextUrl()!)
+              : await getBookmarksPrivate();
+        } else {
+          // Bookmarks PAGE (web AJAX, crawl-verified): tag-filtered with
+          // blind offset pagination. next_url is self-referential
+          // /api/bookmarks and must NOT ride /api/next (SSRF allowlist).
+          data =
+            !fresh && nextUrl()
+              ? await getBookmarksNext(nextUrl()!)
+              : await getBookmarks(bookmarkTag());
+        }
       } else if (nextUrl() && !fresh) {
         data = await getNextPage(nextUrl()!);
       } else {
@@ -277,6 +290,14 @@ export default function App() {
     if (tag === bookmarkTag()) return;
     reqSeq++; // invalidate any in-flight load
     setBookmarkTag(tag);
+    resetFeedAndReload();
+  }
+
+  function changeBookmarkVis(v: "public" | "private") {
+    if (v === bookmarkVis()) return;
+    reqSeq++; // invalidate any in-flight load
+    setBookmarkVis(v);
+    setBookmarkTag(""); // tag folders don't exist in the private pile
     resetFeedAndReload();
   }
 
@@ -1078,6 +1099,27 @@ export default function App() {
               <div class="mode-pill-row no-scrollbar fade-edges">
                 <button
                   type="button"
+                  class={
+                    bookmarkVis() === "public" ? "mode-pill active" : "mode-pill"
+                  }
+                  onClick={() => changeBookmarkVis("public")}
+                >
+                  Public
+                </button>
+                <button
+                  type="button"
+                  class={
+                    bookmarkVis() === "private" ? "mode-pill active" : "mode-pill"
+                  }
+                  onClick={() => changeBookmarkVis("private")}
+                >
+                  Private
+                </button>
+              </div>
+              <Show when={bookmarkVis() === "public"}>
+                <div class="mode-pill-row no-scrollbar fade-edges">
+                <button
+                  type="button"
                   class={bookmarkTag() === "" ? "mode-pill active" : "mode-pill"}
                   onClick={() => selectBookmarkTag("")}
                 >
@@ -1098,7 +1140,8 @@ export default function App() {
                     </button>
                   )}
                 </For>
-              </div>
+                </div>
+              </Show>
             </Show>
           </div>
           <Show when={feedType() === "illustrations"}>

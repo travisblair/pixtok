@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getBookmarks, getBookmarksNext } from "./bookmarks";
+import { getBookmarks, getBookmarksNext, getBookmarksPrivate } from "./bookmarks";
 
 // The backend 400s /api/bookmarks without an offset. The first load
 // once omitted it — every page-open 400'd into the empty state, and the
@@ -38,5 +38,10 @@ describe("bookmarks page wire contract (offset required)", () => {
     await getBookmarksNext("/api/bookmarks?tag=tag-one&offset=48");
     expect(calls[0]).toBe("/api/bookmarks?tag=tag-one&offset=48");
     expect(calls[0]).not.toContain("/api/api");
+  });
+
+  it("private pile hits /api/bookmarks/private", async () => {
+    await getBookmarksPrivate();
+    expect(calls[0]).toBe("/api/bookmarks/private");
   });
 });

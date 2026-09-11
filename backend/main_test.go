@@ -2442,6 +2442,32 @@ func TestGateOwnerUnlocksDuringSaturatedSlots(t *testing.T) {
 	}
 }
 
+func TestPrivateBookmarksPassthrough(t *testing.T) {
+	fake := &fakeAPI{
+		bookmarkIllustsFn: func(restrict string) ([]byte, error) {
+			if restrict != "private" {
+				t.Fatalf("restrict = %q, want private", restrict)
+			}
+			return []byte(
+				`{"illusts":[{"id":"9","title":"P"}],"next_url":"https://app-api.pixiv.net/v1/next"}`,
+			), nil
+		},
+	}
+	mux := newServerBase(fake, newImageCache(time.Hour, 10, 512<<20))
+	h := apiKeyGate("secret", mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/bookmarks/private", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"id":"9"`) {
+		t.Fatalf("body not passthrough: %s", rr.Body.String())
+	}
+}
+
 func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
 	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
 	h := newGatedServer(t, "correct horse battery staple")

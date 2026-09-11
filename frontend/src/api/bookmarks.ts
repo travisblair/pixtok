@@ -30,6 +30,16 @@ export function getBookmarksNext(url: string) {
   });
 }
 
+// Private bookmarks: the app-API feed (restrict=private) — pixtok likes
+// are private by design, so this pile mirrors them. Passthrough shape
+// (illusts + ABSOLUTE app-api next_url); continuations ride /api/next
+// via getNextPage, where the backend re-validates the URL.
+export function getBookmarksPrivate() {
+  return request<FeedResponse>("/bookmarks/private", {
+    signal: AbortSignal.timeout(15_000),
+  });
+}
+
 export function getBookmarkTags() {
   return request<{
     public: { name: string; count: number }[];

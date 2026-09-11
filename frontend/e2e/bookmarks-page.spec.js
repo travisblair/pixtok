@@ -32,4 +32,25 @@ test.describe("Bookmarks page", () => {
     await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
     expect(mocks.bookmarkCalls.at(-1)).toEqual({ tag: "", offset: 0 });
   });
+
+  test("Private pill switches to the app-API private pile (pixtok likes)", async ({ page }) => {
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    await switchFeedViaDrawer(page, "Bookmarks");
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
+
+    // Switch to Private: the app-API passthrough feed loads, and the
+    // web-page tag pills (public-only folders) disappear.
+    await page.locator(".mode-pill", { hasText: "Private" }).click();
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
+    expect(mocks.bookmarkPrivateCalls).toHaveLength(1);
+    await expect(page.locator(".mode-pill", { hasText: "tag-one" })).toHaveCount(0);
+
+    // Back to Public reloads the web-page feed (offset 0, no tag).
+    await page.locator(".mode-pill", { hasText: "Public" }).click();
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
+    expect(mocks.bookmarkCalls.at(-1)).toEqual({ tag: "", offset: 0 });
+  });
 });
