@@ -104,7 +104,12 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://localhost:8080",
-        changeOrigin: true,
+        // changeOrigin REWRITES Host to localhost:8080, which originCheck
+        // then compares against the browser Origin hostname — every POST
+        // from a non-localhost origin (the phone's tailnet URL) 403'd as
+        // "cross-origin". Preserve the browser's Host so originCheck can
+        // actually verify same-host requests.
+        changeOrigin: false,
         headers: { "X-Api-Key": loadApiKey() },
       },
       // pixiv's login SPA posts to root-relative /ajax/* paths (e.g.
@@ -113,7 +118,7 @@ export default defineConfig({
       // which proxies them onward to accounts.pixiv.net.
       "/ajax": {
         target: "http://localhost:8080",
-        changeOrigin: true,
+        changeOrigin: false,
         headers: { "X-Api-Key": loadApiKey() },
       },
     },

@@ -24,7 +24,12 @@ func originCheckPathExempt(path string) bool {
 		// (found live Aug 24): POSTs to a ROOT-RELATIVE path with an
 		// opaque Origin ("null"), so it lands on our origin and can
 		// never satisfy a same-host rule. Proxied like /ajax/.
-		path == "/account-selected"
+		path == "/account-selected" ||
+		path == "/account-selected/" ||
+		path == "/web/v1/login" ||
+		path == "/web/v1/login/" ||
+		path == "/web/v1/users/auth/pixiv/start" ||
+		path == "/web/v1/users/auth/pixiv/start/"
 }
 
 // originCheck rejects cross-origin state-changing requests. Browsers

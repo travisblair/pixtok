@@ -2393,6 +2393,55 @@ func TestSecureForRequest(t *testing.T) {
 // tailnet URL). Browsers store a Secure cookie but never send it over
 // HTTP, so the login "succeeded" and every follow-up request 403'd —
 // the whole app dead for HTTP origins.
+func TestGateOwnerUnlocksDuringSaturatedSlots(t *testing.T) {
+	g, err := newGate("correct horse battery staple", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerGateRoutes(mux, g)
+	h := apiKeyGate("secret", g.middleware(mux))
+
+	// Saturate every slot, simulating a wrong-password flood.
+	for i := 0; i < 10; i++ {
+		g.slots <- struct{}{}
+	}
+
+	// The owner's CORRECT password must not 429 behind the flood — the
+	// check runs before slot acquisition (regression: the old order held
+	// slots during the tarpit sleep and locked the owner out).
+	req := httptest.NewRequest(http.MethodPost, "/api/gate",
+		strings.NewReader(`{"password":"correct horse battery staple"}`))
+	req.Header.Set("X-Api-Key", "secret")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("correct unlock during saturated slots = %d, want 200", rr.Code)
+	}
+
+	// Drain (the correct path took no slot), re-saturate: a WRONG
+	// password during saturation still 429s (bounded sleepers).
+	for i := 0; i < 10; i++ {
+		<-g.slots
+	}
+	for i := 0; i < 10; i++ {
+		g.slots <- struct{}{}
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/api/gate",
+		strings.NewReader(`{"password":"wrong"}`))
+	req2.Header.Set("X-Api-Key", "secret")
+	req2.Header.Set("Content-Type", "application/json")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusTooManyRequests {
+		t.Fatalf("wrong password during saturated slots = %d, want 429", rr2.Code)
+	}
+	for i := 0; i < 10; i++ {
+		<-g.slots
+	}
+}
+
 func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
 	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
 	h := newGatedServer(t, "correct horse battery staple")

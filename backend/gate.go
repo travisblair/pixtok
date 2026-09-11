@@ -140,9 +140,17 @@ func (g *gate) recordSuccess() {
 // endpoints (status + unlock) and /health. Everything else — feeds,
 // images, the proxied login, prefs — is gated.
 func gatePathAllowed(path string) bool {
-	return path == "/api/gate/status" ||
+	if path == "/api/gate/status" ||
 		path == "/api/gate" ||
-		path == "/health"
+		path == "/health" {
+		return true
+	}
+	// Login-flow continuation legs (root-relative POSTs from pixiv's
+	// proxied SPA): they arrive mid-login, when the gate is by definition
+	// still locked. Flow-cookie gated inside serveProxy.
+	return path == "/account-selected" || path == "/account-selected/" ||
+		path == "/web/v1/login" || path == "/web/v1/login/" ||
+		path == "/web/v1/users/auth/pixiv/start" || path == "/web/v1/users/auth/pixiv/start/"
 }
 
 // middleware wraps the mux: gated routes 403 without a valid cookie.
@@ -197,7 +205,44 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 			_, _ = w.Write([]byte(`{"ok":true}`))
 			return
 		}
-		// Concurrency cap: when the tarpit is saturated, fall back to 429.
+		// Concurrency cap moved BELOW the password check: the slot now
+		// bounds concurrent wrong-password SLEEPERS only. The owner's
+		// correct unlock never contends with them (the old order 429'd
+		// the owner during a flood).
+
+		var body struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+
+		// The correct password must NEVER contend with wrong-password
+		// sleeps: checking before the slot means the owner unlocks
+		// instantly even while a flood holds every slot.
+		if bcrypt.CompareHashAndPassword(g.hash, []byte(body.Password)) == nil {
+			g.recordSuccess()
+			// The unlock response carries the auth cookie — never cache
+			// it (reviewer finding).
+			w.Header().Set("Cache-Control", "no-store")
+			http.SetCookie(w, &http.Cookie{
+				Name:     gateCookie,
+				Value:    g.validToken(),
+				Path:     "/",
+				MaxAge:   30 * 24 * 60 * 60,
+				HttpOnly: true,
+				Secure:   secureForRequest(r),
+				SameSite: http.SameSiteLaxMode,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+
+		g.recordFailure()
+
+		// The slot bounds CONCURRENT SLEEPERS only (the check is done).
 		select {
 		case g.slots <- struct{}{}:
 			defer func() { <-g.slots }()
@@ -210,40 +255,13 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 		delay := g.failureDelay()
 		sinceLast := time.Since(g.lastFailTime)
 		g.mu.Unlock()
-		// Slow successive failures additionally (the delay grows the
-		// longer a burst goes on, even below the 5-failure floor).
+		// Slow successive failures additionally. The full tier runs —
+		// the old min(delay, 10s) cap made the 15s/30s/60s tiers dead
+		// letters.
 		if delay > 0 && sinceLast < 2*time.Second {
-			time.Sleep(min(delay, 10*time.Second))
+			time.Sleep(delay)
 		}
 
-		var body struct {
-			Password string `json:"password"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
-			return
-		}
-
-		if bcrypt.CompareHashAndPassword(g.hash, []byte(body.Password)) != nil {
-			g.recordFailure()
-			http.Error(w, "wrong password", http.StatusUnauthorized)
-			return
-		}
-		g.recordSuccess()
-
-		// The unlock response carries the auth cookie — never cache it
-		// (reviewer finding).
-		w.Header().Set("Cache-Control", "no-store")
-		http.SetCookie(w, &http.Cookie{
-			Name:     gateCookie,
-			Value:    g.validToken(),
-			Path:     "/",
-			MaxAge:   30 * 24 * 60 * 60,
-			HttpOnly: true,
-			Secure:   secureForRequest(r),
-			SameSite: http.SameSiteLaxMode,
-		})
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		http.Error(w, "wrong password", http.StatusUnauthorized)
 	})
 }

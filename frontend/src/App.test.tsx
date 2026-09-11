@@ -1308,6 +1308,49 @@ describe("App", () => {
       expect(input.value).toBe("snow");
     });
 
+    it("opening a search page during a close animation keeps the new top layer alive", async () => {
+      // Regression: opening during the 260ms slide-out used to count the
+      // exiting layer when computing the new layer's key index — the
+      // key↔array identity desynced, topZ resolved an undefined entry,
+      // and the new top layer rendered black (images suppressed). The
+      // open must finalize the pending close first.
+      mockedApi.getStreet.mockResolvedValue(
+        makeFeed([
+          makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+          makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+          makeIllust({ id: 3, tags: [{ name: "storm" }] }),
+        ])
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      await tapChip(container, "rain");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+
+      // Close the top (#rain) and IMMEDIATELY open #storm — inside the
+      // slide-out window, before the 260ms removal timer fires.
+      const top = container.querySelectorAll(".search-screen")[1];
+      fireEvent.click(top.querySelector(".related-back")!);
+      await tapChip(container, "storm");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+
+      // Long after the close timeout, the TOP layer's images must be
+      // live (the /api/img proxy path), not the suppression pixel.
+      await new Promise((r) => setTimeout(r, 400));
+      const views = container.querySelectorAll(".search-screen");
+      const topImg = views[views.length - 1].querySelector("img");
+      expect(topImg?.getAttribute("src")).toContain("/api/img");
+    });
+
     it("caps search pages at MAX_SEARCH_DEPTH with a toast", async () => {
       const tags = Array.from({ length: 11 }, (_, i) => `tag${i}`);
       mockedApi.getStreet.mockResolvedValue(

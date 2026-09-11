@@ -404,6 +404,16 @@ func main() {
 		root.Handle("/api/", g.middleware(mux))
 		root.Handle("/ajax/", g.middleware(mux))
 		root.Handle("/health", g.middleware(mux))
+		// Login-flow continuation legs: pixiv's proxied SPA POSTs to
+		// ROOT-RELATIVE paths mid-login. They must reach the authproxy
+		// handlers on `mux` instead of the SPA fallback below (the old
+		// wiring made them unreachable in frontend-serve mode).
+		root.Handle("/account-selected", g.middleware(mux))
+		root.Handle("/account-selected/", g.middleware(mux))
+		root.Handle("/web/v1/login", g.middleware(mux))
+		root.Handle("/web/v1/login/", g.middleware(mux))
+		root.Handle("/web/v1/users/auth/pixiv/start", g.middleware(mux))
+		root.Handle("/web/v1/users/auth/pixiv/start/", g.middleware(mux))
 		root.Handle("/", staticHandler())
 		handler = root
 	} else {

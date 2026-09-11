@@ -443,6 +443,15 @@ export default function App() {
   }
 
   function openSearch() {
+    // An open during a close's slide-out window must finalize the
+    // pending close FIRST — otherwise the exiting layer is counted in
+    // searchStack().length when computing the new layer's key index, the
+    // key↔array identity desyncs (topZ resolves an undefined entry), the
+    // new top layer renders black, and the corruption survives reload.
+    const closing = closingSearchZ();
+    if (closing !== null) {
+      finalizeSearchClose(closing, searchStack().findIndex((s) => s.z === closing));
+    }
     if (searchStack().length >= MAX_SEARCH_DEPTH) {
       showToast(
         `Max search pages reached (${MAX_SEARCH_DEPTH}) — close one to open more`,
@@ -487,6 +496,11 @@ export default function App() {
    */
   function openTagPage(tag: string) {
     setTagsIllust(null);
+    // Same open-during-close flush as openSearch — see the comment there.
+    const closing = closingSearchZ();
+    if (closing !== null) {
+      finalizeSearchClose(closing, searchStack().findIndex((s) => s.z === closing));
+    }
     if (searchStack().some((s) => s.tag === tag)) {
       showToast("This tag is already open — tap Back to return to it", false);
       return;
@@ -525,11 +539,19 @@ export default function App() {
       searchTags: searchStack().filter((_, i) => i !== idx).map((e) => e.tag),
     });
     setTimeout(() => {
-      setSearchStack((prev) => prev.filter((s) => s.z !== z));
-      setSearchStates((prev) => prev.filter((_, i) => i !== idx));
-      setClosingSearchZ(null);
-      resetLayerZIfIdle();
+      // Superseded by an open-during-close flush: a new close for a
+      // different layer may already be animating — don't clear its flag.
+      if (closingSearchZ() !== z) return;
+      finalizeSearchClose(z, idx);
     }, CLOSE_TIMEOUT_MS);
+  }
+
+  /** Complete a pending search-layer close immediately (idempotent). */
+  function finalizeSearchClose(z: number, idx: number) {
+    setSearchStack((prev) => prev.filter((s) => s.z !== z));
+    setSearchStates((prev) => prev.filter((_, i) => i !== idx));
+    setClosingSearchZ(null);
+    resetLayerZIfIdle();
   }
 
   // ── Edge-back gesture ───────────────────────────────────────────────
@@ -912,6 +934,12 @@ export default function App() {
       // an empty feed, and saving it would strand the next unlock on
       // "Nothing here yet".
       if (gateLocked()) return;
+      // A close animation is in flight: its sync flush already wrote the
+      // post-close state, and a debounced read here sees the half-closed
+      // arrays (ordering key removed, entry still present) — writing it
+      // would resurrect the layer or restore it without its key. The
+      // close's finalize re-triggers this effect and saves cleanly.
+      if (closingDepth() !== null || closingSearchZ() !== null || artistClosing()) return;
       saveSnapshot(buildSnapshotState());
     }, 500);
   });
@@ -967,7 +995,11 @@ export default function App() {
     // callback fires immediately — an infinite 429 loop that rate-limits
     // pixiv. With the guard, a failure shows the retry button and STOPS
     // until the user taps it.
-    () => !!nextUrl() && !loading() && !loadError(),
+    // gateLocked() must be a tracked dependency of the sentinel effect:
+    // a mid-session re-lock disposes the sentinel div, and without the
+    // gate in canLoad the effect never re-runs on unlock — no observer
+    // re-binds and infinite scroll stays dead until a feed switch.
+    () => !!nextUrl() && !loading() && !loadError() && !gateLocked(),
     () => void loadMore(),
     // Prefetch distance depends on the renderer. The strip's 2400px is
     // ~2.7 100dvh cards. Grid cells are ~123px: the same absolute
