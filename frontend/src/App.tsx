@@ -287,9 +287,12 @@ export default function App() {
 
   // Bookmarks tab: switching the tag filter reloads the page from zero.
   function selectBookmarkTag(tag: string) {
-    if (tag === bookmarkTag()) return;
+    // Tag pills are toggles: tapping the ACTIVE folder clears the filter
+    // (no separate "All" pill — it duplicated the Public visibility
+    // pill and read as a second toggle for the same thing).
+    const next = tag === bookmarkTag() ? "" : tag;
     reqSeq++; // invalidate any in-flight load
-    setBookmarkTag(tag);
+    setBookmarkTag(next);
     resetFeedAndReload();
   }
 
@@ -1116,15 +1119,8 @@ export default function App() {
                   Private
                 </button>
               </div>
-              <Show when={bookmarkVis() === "public"}>
+              <Show when={bookmarkVis() === "public" && bookmarkTags().length > 0}>
                 <div class="mode-pill-row no-scrollbar fade-edges">
-                <button
-                  type="button"
-                  class={bookmarkTag() === "" ? "mode-pill active" : "mode-pill"}
-                  onClick={() => selectBookmarkTag("")}
-                >
-                  All
-                </button>
                 <For each={bookmarkTags()}>
                   {(tag) => (
                     <button
