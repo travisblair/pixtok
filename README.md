@@ -137,9 +137,10 @@ your Pixiv account. If you only want read-only browsing, you can skip
 them — everything else works the same.
 
 **Credential storage:** pixiv credentials (the refresh token, PHPSESSID,
-and CSRF token) are written as plaintext to `.env` (mode 0600). The
-refresh token is PERMANENT — pixiv never rotates it — so file read
-access is full account control. Keep the file on a machine you trust
+and CSRF token) are written as plaintext to `.env` (mode 0600). Pixiv
+can rotate the refresh token on any refresh — the new value is persisted
+to `.env` BEFORE it is committed to memory, so file read access is full
+account control. Keep the file on a machine you trust
 and don't commit it (`.env` is gitignored). The `.env` is resolved next
 to the backend binary (or `backend/../.env` in the dev layout), not the
 current working directory.

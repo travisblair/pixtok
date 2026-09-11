@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -136,7 +137,7 @@ func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte,
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
 	w.Header().Set("X-Cache", "MISS")
 	if _, err := w.Write(head); err != nil {
 		return nil, "", fmt.Errorf("%w: write image body: %v", ErrStreamCommitted, err)
@@ -147,6 +148,14 @@ func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte,
 	}
 	if _, err := io.Copy(w, io.LimitReader(resp.Body, remaining)); err != nil {
 		return nil, "", fmt.Errorf("%w: stream image body: %v", ErrStreamCommitted, err)
+	}
+	// Truncation detector: the cap is a bound, not a policy — a body
+	// past it would be delivered 200-truncated (the client can't tell).
+	// One extra byte read tells us when that happened so the journal
+	// can say so.
+	var extra [1]byte
+	if n, _ := resp.Body.Read(extra[:]); n > 0 {
+		log.Printf("WARN image proxy truncated an oversized body (cap %d bytes)", maxImageBody)
 	}
 	return nil, contentType, nil
 }

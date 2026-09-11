@@ -261,8 +261,12 @@ func (c *Client) fetchCsrfToken(phpsessid string) (string, error) {
 	// PHPSESSID is uid-prefixed (127480663_<hex>); the profile page for
 	// that uid serves the token bound to this session.
 	uid := strings.SplitN(phpsessid, "_", 2)[0]
-	if uid == "" {
-		return "", fmt.Errorf("invalid PHPSESSID format")
+	if !ValidID(uid) {
+		// The uid is interpolated into the profile-page URL — an
+		// unvalidated value with URL metacharacters would alter the
+		// request path/query (and contradicts the server-boundary
+		// validation invariant).
+		return "", fmt.Errorf("invalid PHPSESSID uid")
 	}
 	page := "https://www.pixiv.net/en/users/" + uid
 

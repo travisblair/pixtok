@@ -435,8 +435,10 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 	// ── Search (the site's search pages: tag/free-text artworks + users) ──
 
 	// Bookmarks tab feed: the user's bookmarked works (private by
-	// default — pixtok likes are private). Standard app-API passthrough;
-	// pagination rides the existing /api/next route.
+	// default — pixtok likes are private). WEB-AJAX passthrough — the
+	// page endpoint with tag filters + blind offset pagination (the
+	// app-API bookmarks feed is a different surface and is NOT this
+	// route's source).
 	mux.HandleFunc("GET /api/bookmarks", func(w http.ResponseWriter, r *http.Request) {
 		// The bookmarks PAGE experience (crawl-verified): tag filter +
 		// blind offset pagination + sort, via the web AJAX endpoint.
@@ -826,7 +828,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		// Check cache first
 		if data, ct, ok := cache.get(imgURL); ok {
 			w.Header().Set("Content-Type", ct)
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Header().Set("Cache-Control", "private, max-age=86400")
 			w.Header().Set("X-Cache", "HIT")
 			w.Write(data)
 			return
@@ -881,7 +883,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			// streamed to w (with their headers) by the client.
 			cache.set(imgURL, body, contentType)
 			w.Header().Set("Content-Type", contentType)
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Header().Set("Cache-Control", "private, max-age=86400")
 			w.Header().Set("X-Cache", "MISS")
 			w.Write(body)
 		}

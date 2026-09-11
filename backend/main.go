@@ -268,6 +268,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		if !strings.HasPrefix(p, "/api/auth/px/") && !strings.HasPrefix(p, "/ajax/") {
 			h.Set("Content-Security-Policy", appCSP)
 		}
+		// HSTS only when the request is actually secure (TLS or a
+		// trusted-proxy https) — never over plain HTTP, where it would
+		// poison the origin for later HTTPS visits.
+		if secureForRequest(r) {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -306,6 +312,25 @@ func cacheConfigFromEnv() (time.Duration, int, int64) {
 }
 
 func main() {
+	// The .env file holds permanent pixiv credentials — check its
+	// permissions BEFORE anything writes to it (the old order let a
+	// rotated token or a fresh gate hash land in a world-writable file
+	// before the fatal check refused boot). The atomic rewrite writes
+	// new files 0600, but a pre-existing file may not be. Group/world-
+	// WRITABLE is fatal (fail-closed): anyone who can write the file
+	// owns the pixiv credential. Merely readable keeps the warning.
+	for _, p := range envFileCandidates() {
+		if fi, err := os.Stat(p); err == nil {
+			if fi.Mode().Perm()&0o022 != 0 {
+				log.Fatalf("%s is group/world-writable (mode %04o) — refusing to boot: an attacker who can write this file owns the pixiv credential", p, fi.Mode().Perm())
+			}
+			if fi.Mode().Perm()&0o077 != 0 {
+				log.Printf("WARNING: %s is group/world-readable (mode %04o) — chmod 600 it, it holds pixiv credentials", p, fi.Mode().Perm())
+			}
+			break // same precedence as loadEnvKey — first existing file wins
+		}
+	}
+
 	client, err := pixiv.NewClient()
 	if err != nil {
 		log.Fatalf("pixiv client: %v", err)
@@ -368,22 +393,8 @@ func main() {
 	}
 
 	// The .env file holds permanent pixiv credentials — warn if its
-	// permissions are loose (reviewer finding). The atomic rewrite
-	// writes new files 0600, but a pre-existing file may not be.
-	// Group/world-WRITABLE is fatal (fail-closed): anyone who can write
-	// the file owns the pixiv credential. Merely readable keeps the
-	// warning — the accepted risk is a reader, not a writer.
-	for _, p := range envFileCandidates() {
-		if fi, err := os.Stat(p); err == nil {
-			if fi.Mode().Perm()&0o022 != 0 {
-				log.Fatalf("%s is group/world-writable (mode %04o) — refusing to boot: an attacker who can write this file owns the pixiv credential", p, fi.Mode().Perm())
-			}
-			if fi.Mode().Perm()&0o077 != 0 {
-				log.Printf("WARNING: %s is group/world-readable (mode %04o) — chmod 600 it, it holds pixiv credentials", p, fi.Mode().Perm())
-			}
-			break // same precedence as loadEnvKey — first existing file wins
-		}
-	}
+	// permissions are loose. Moved to the TOP of main() (before any
+	// credential write can land in the file).
 
 	// Prod serving: the Go binary serves the embedded frontend and the
 	// gate cookie is the sole /api credential — a browser can never hold

@@ -87,7 +87,16 @@ func (f *followStateCache) getOrStart(id string) (value bool, fresh bool, call *
 func (f *followStateCache) invalidate(id string) {
 	f.mu.Lock()
 	delete(f.items, id)
-	f.epochs[id]++
+	if _, inflight := f.inflight[id]; inflight {
+		// Supersede the in-flight call; finish() deletes the entry when
+		// it completes.
+		f.epochs[id]++
+	} else {
+		// Nothing in flight — a bumped epoch would never be cleaned up
+		// by a future finish(), so drop it now instead of leaking one
+		// uint64 per toggled-and-never-refetched artist.
+		delete(f.epochs, id)
+	}
 	f.mu.Unlock()
 }
 

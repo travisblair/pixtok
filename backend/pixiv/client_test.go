@@ -33,7 +33,7 @@ func (r *recTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newTestClient() (*Client, *recTransport) {
 	rt := &recTransport{}
-	return &Client{phpSessID: "test", http: &http.Client{Transport: rt}}, rt
+	return &Client{phpSessID: "123456_test", http: &http.Client{Transport: rt}}, rt
 }
 
 // contentTypeTransport answers with a fixed Content-Type — lets
@@ -65,7 +65,7 @@ type scriptTransport struct {
 func (r *scriptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// The profile-page GET (csrf token fetch after the retry clears the
 	// cache) always succeeds with HTML carrying a 32-hex token.
-	if req.URL.Path == "/en/users/test" {
+	if req.URL.Path == "/en/users/123456" {
 		return &http.Response{
 			StatusCode: 200,
 			Header:     http.Header{"Content-Type": []string{"text/html"}},
@@ -91,7 +91,7 @@ func (r *scriptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newStreetClient(rt http.RoundTripper) *Client {
 	return &Client{
-		phpSessID:      "test",
+		phpSessID:      "123456_test",
 		csrfTokenCache: "tok", // csrfToken() returns the cache, no profile fetch
 		http:           &http.Client{Transport: rt},
 	}
@@ -128,8 +128,8 @@ func TestStreetSendsCachedCsrfNotSession(t *testing.T) {
 	if rt.csrfToken != "tok" {
 		t.Fatalf("x-csrf-token = %q, want %q (the cached csrf)", rt.csrfToken, "tok")
 	}
-	if rt.cookie != "PHPSESSID=test" {
-		t.Fatalf("Cookie = %q, want %q (session rides the cookie only)", rt.cookie, "PHPSESSID=test")
+	if rt.cookie != "PHPSESSID=123456_test" {
+		t.Fatalf("Cookie = %q, want %q (session rides the cookie only)", rt.cookie, "PHPSESSID=123456_test")
 	}
 }
 
@@ -229,7 +229,7 @@ func TestProxyImageContentTypeAllowlist(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Client{
-				phpSessID: "test",
+				phpSessID: "123456_test",
 				http:      &http.Client{Transport: &contentTypeTransport{ct: tc.ct}},
 			}
 			_, got, err := c.ProxyImageStream("https://i.pximg.net/img-master/img/2024/01/01/00/00/00/1.jpg", httptest.NewRecorder())
@@ -789,7 +789,7 @@ func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // (expiresAt in the future) and whose upstream gate has the given size.
 func gatedTestClient(slots int, rt http.RoundTripper) *Client {
 	return &Client{
-		phpSessID:     "test",
+		phpSessID:     "123456_test",
 		http:          &http.Client{Transport: rt},
 		upstreamSlots: make(chan struct{}, slots),
 		expiresAt:     time.Now().Add(time.Hour),
@@ -844,7 +844,7 @@ func TestUpstreamSlotsNilGateSkipsAcquire(t *testing.T) {
 	// doWith must skip the acquire entirely, not panic or block.
 	rt := &countingTransport{}
 	c := &Client{
-		phpSessID: "test",
+		phpSessID: "123456_test",
 		http:      &http.Client{Transport: rt},
 		expiresAt: time.Now().Add(time.Hour),
 	}
@@ -881,7 +881,7 @@ func (t *statusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestFollowStateCooldownAfter429(t *testing.T) {
 	rt := &statusTransport{code: 429}
 	c := &Client{
-		phpSessID: "test",
+		phpSessID: "123456_test",
 		http:      &http.Client{Transport: rt},
 		expiresAt: time.Now().Add(time.Hour),
 	}
@@ -909,7 +909,7 @@ func TestFollowStateCooldownAfter429(t *testing.T) {
 func TestFollowStateCooldownExpiry(t *testing.T) {
 	rt := &statusTransport{code: 200}
 	c := &Client{
-		phpSessID: "test",
+		phpSessID: "123456_test",
 		http:      &http.Client{Transport: rt},
 		expiresAt: time.Now().Add(time.Hour),
 	}

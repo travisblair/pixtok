@@ -92,6 +92,15 @@ func (c *Client) refresh() error {
 		c.mu.Unlock()
 		return fmt.Errorf("parse auth response: %w", err)
 	}
+	if tr.AccessToken == "" {
+		// A 200 that omits access_token used to commit an empty bearer
+		// for the whole (future-dated) expiry window — every app-API
+		// call 401s and nothing self-heals until expiry.
+		c.mu.Lock()
+		c.expiresAt = time.Now().Add(tokenRetryBackoff)
+		c.mu.Unlock()
+		return fmt.Errorf("token response omitted access_token")
+	}
 
 	expiresIn := tr.ExpiresIn
 	if expiresIn <= 300 {
@@ -193,14 +202,21 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 	if expiresIn <= 300 {
 		expiresIn = 3600
 	}
+	// Persist BEFORE committing to memory — the same invariant as
+	// refresh(): memory must never get ahead of disk. On a failed write
+	// the running client keeps the old pair and the caller surfaces the
+	// error (the login callback 500s instead of pretending success).
+	if err := UpdateEnvFile(map[string]string{
+		"PIXIV_REFRESH_TOKEN": refreshToken,
+	}); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	c.refreshToken = refreshToken
 	c.accessToken = accessToken
 	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-tokenExpirySkew)
 	c.mu.Unlock()
-	return UpdateEnvFile(map[string]string{
-		"PIXIV_REFRESH_TOKEN": refreshToken,
-	})
+	return nil
 }
 
 // AuthHealth probes both auth surfaces: the app-API token (a refresh
