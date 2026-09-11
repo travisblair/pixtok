@@ -496,6 +496,15 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 				mp.ImageURLs.Large = strings.Replace(
 					large, "_p0_master1200.jpg", fmt.Sprintf("_p%d_master1200.jpg", i), 1,
 				)
+				// pageThumb and strings.Replace are silent no-ops when
+				// the pattern doesn't match (e.g. custom-thumb URLs):
+				// every synthetic page would then equal page 0 and the
+				// reader would show the same image on every page. Drop
+				// meta_pages instead — FeedCard falls back to image_urls.
+				if i > 0 && mp.ImageURLs.Large == large && mp.ImageURLs.SquareMedium == item.URL {
+					ill.MetaPages = nil
+					break
+				}
 				ill.MetaPages = append(ill.MetaPages, mp)
 			}
 		}

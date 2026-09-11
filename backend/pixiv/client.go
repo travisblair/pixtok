@@ -345,7 +345,15 @@ func UpdateEnvFile(kv map[string]string) error {
 	path := envFilePath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// The documented create-target contract: envFilePath() returns
+		// the first candidate as the create target when none exists, so a
+		// deployment bootstrapped from process env vars (no .env file)
+		// gets one created on the first rotation — instead of failing
+		// every rotation forever (the old behavior).
+		raw = nil
 	}
 	lines := strings.Split(string(raw), "\n")
 	seen := make(map[string]bool, len(kv))

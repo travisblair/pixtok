@@ -1059,3 +1059,86 @@ func TestFollowStateInvalidateDropsStaleInflight(t *testing.T) {
 		t.Fatal("stale in-flight value resurrected after invalidate")
 	}
 }
+
+// Regression: a 200 with a non-JSON token body used to skip the circuit
+// breaker — expiresAt stayed in the past and EVERY request re-hit the
+// token endpoint until the body cleared.
+func TestRefreshParseErrorArmsBackoff(t *testing.T) {
+	c := &Client{
+		http: &http.Client{Transport: &scriptTransport{codes: []int{200}}},
+	}
+	// Force a 200 with a non-JSON body: scriptTransport answers 200 with
+	// {"body":{"illusts":[]}} for non-200s... use a dedicated transport.
+	c.http = &http.Client{Transport: &tokenBodyTransport{body: "<html>cloudflare</html>"}}
+
+	err := c.refresh()
+	if err == nil {
+		t.Fatal("expected parse error from non-JSON token body")
+	}
+	c.mu.Lock()
+	backoff := c.expiresAt.After(time.Now())
+	c.mu.Unlock()
+	if !backoff {
+		t.Fatal("expiresAt was not armed — every request will re-hit the token endpoint")
+	}
+}
+
+// tokenBodyTransport answers 200 with a canned body for every request.
+type tokenBodyTransport struct {
+	body string
+}
+
+func (r *tokenBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader(r.body)),
+		Request:    req,
+	}, nil
+}
+
+// The create-target contract: envFilePath() returns a not-yet-existing
+// candidate as the create target, so a deployment bootstrapped from
+// process env vars (no .env) must get one created on first rotation.
+func TestUpdateEnvFileCreatesMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "fresh.env")
+	prev := os.Getenv("PIXTOK_ENV_FILE")
+	os.Setenv("PIXTOK_ENV_FILE", target)
+	defer os.Setenv("PIXTOK_ENV_FILE", prev)
+
+	if err := UpdateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "abc123"}); err != nil {
+		t.Fatalf("UpdateEnvFile on missing file: %v", err)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+	if !strings.Contains(string(raw), "PIXIV_REFRESH_TOKEN=abc123") {
+		t.Fatalf("created file missing key: %q", string(raw))
+	}
+}
+
+// A stale csrf fetch completing after a login capture must not resurrect
+// the old session: the commit is guarded by the session id read earlier.
+func TestSetWebCacheIfCurrent(t *testing.T) {
+	c := &Client{}
+	c.setWebCache("OLD", "tokOld")
+
+	// A login capture swaps in the new session mid-flight...
+	c.setWebCache("NEW", "tokNew")
+	// ...then the stale fetch commits its pre-fetch pair. It must lose.
+	c.setWebCacheIfCurrent("OLD", "tokStale")
+
+	sess, tok := c.webSession()
+	if sess != "NEW" || tok != "tokNew" {
+		t.Fatalf("stale fetch resurrected old session: sess=%q tok=%q", sess, tok)
+	}
+
+	// The non-stale path still commits normally.
+	c.setWebCacheIfCurrent("NEW", "tokFresh")
+	_, tok = c.webSession()
+	if tok != "tokFresh" {
+		t.Fatalf("current-session commit lost: tok=%q", tok)
+	}
+}

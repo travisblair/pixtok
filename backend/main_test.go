@@ -888,6 +888,35 @@ func TestTransformSearchToleratesEmptyArrayTagTranslation(t *testing.T) {
 	}
 }
 
+// Regression: multi-page works whose thumbnail uses a URL pattern the
+// page-synthesis can't rewrite (custom-thumb) used to emit meta_pages
+// where EVERY page equalled page 0 — the reader showed the same tiny
+// image on every page. The transform must drop the synthetic pages
+// instead (FeedCard falls back to image_urls).
+func TestTransformDropsMetaPagesForUnrewritableThumb(t *testing.T) {
+	raw := `{"error":false,"body":{"illusts":[
+		{"id":"777","title":"Custom","illustType":0,"pageCount":2,"url":"https://i.pximg.net/c/360x360_70/custom-thumb/img/2026/09/11/00/00/00/777_custom1200.jpg","userId":"9","userName":"Alice","tags":["オリジナル"],"profileImageUrl":"https://i.pximg.net/p1","createDate":"2026-09-01T00:00:00+09:00","xRestrict":0,"aiType":0}
+	]}}`
+	out, err := transformNewest([]byte(raw), false)
+	if err != nil {
+		t.Fatalf("transformNewest: %v", err)
+	}
+	var resp struct {
+		Illusts []struct {
+			MetaPages []json.RawMessage `json:"meta_pages"`
+		} `json:"illusts"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if len(resp.Illusts) != 1 {
+		t.Fatalf("expected 1 illust, got %d", len(resp.Illusts))
+	}
+	if len(resp.Illusts[0].MetaPages) != 0 {
+		t.Fatalf("expected no meta_pages for unrewritable thumb, got %d", len(resp.Illusts[0].MetaPages))
+	}
+}
+
 func TestTransformStreetNoNext(t *testing.T) {
 	raw := `{"error":false,"body":{"contents":[],"nextParams":null}}`
 	out, err := transformStreet([]byte(raw))

@@ -83,6 +83,13 @@ func (c *Client) refresh() error {
 
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil {
+		// Arm the circuit breaker like every other refresh failure: a 200
+		// with a non-JSON body (Cloudflare interstitial, maintenance
+		// page) used to leave expiresAt in the past, so EVERY subsequent
+		// request re-hit the token endpoint until the body cleared.
+		c.mu.Lock()
+		c.expiresAt = time.Now().Add(tokenRetryBackoff)
+		c.mu.Unlock()
 		return fmt.Errorf("parse auth response: %w", err)
 	}
 

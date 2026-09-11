@@ -201,6 +201,19 @@ func (c *Client) setWebCache(phpsessid, csrfToken string) {
 	c.csrfTokenCache = csrfToken
 }
 
+// setWebCacheIfCurrent commits the csrf token only if phpsessid is still
+// the live session id. A concurrent SetWebSession between the session
+// read and this commit (a login capture during an in-flight csrf fetch)
+// must win — the stale fetch must not resurrect the old session.
+func (c *Client) setWebCacheIfCurrent(phpsessid, csrfToken string) {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	if c.phpSessID != phpsessid {
+		return
+	}
+	c.csrfTokenCache = csrfToken
+}
+
 // invalidateCsrf drops the cached csrf token (a 400/401 retry path).
 func (c *Client) invalidateCsrf() {
 	c.sessionMu.Lock()
@@ -228,7 +241,11 @@ func (c *Client) csrfToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	c.setWebCache(sessID, tok)
+	// Guard against a lost update: a login capture completing while this
+	// fetch was in flight already swapped in the NEW session — committing
+	// the pre-fetch pair would silently resurrect the old one in memory
+	// (disk holds the new session; the next restart would flip back).
+	c.setWebCacheIfCurrent(sessID, tok)
 	return tok, nil
 }
 
