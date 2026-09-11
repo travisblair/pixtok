@@ -73,6 +73,52 @@ type tagTranslationMap map[string]struct {
 	En string `json:"en"`
 }
 
+// UnmarshalJSON tolerates pixiv's empty-array form: some endpoints serve
+// [] instead of {} when no translations exist (the Sept 2026 search 502).
+// A non-empty array or any other malformed shape still errors loudly.
+func (m *tagTranslationMap) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "[]" || trimmed == "null" {
+		*m = nil
+		return nil
+	}
+	type plain map[string]struct {
+		En string `json:"en"`
+	}
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*m = tagTranslationMap(p)
+	return nil
+}
+
+// flexID accepts pixiv's inconsistent id encodings: web AJAX endpoints
+// usually serve string ids, but the bookmarks works[] switched to bare
+// numbers (Sept 2026), which hard-failed strict string fields and 502'd
+// the whole page. Both forms normalize to a string.
+type flexID string
+
+func (f *flexID) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("flexID: empty value")
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*f = flexID(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*f = flexID(n.String())
+	return nil
+}
+
 // applyTagTranslations fills TranslatedName on works' tags from a
 // response-level tagTranslation map. Works without a mapping keep their
 // raw name (the FE chip just renders no translation line).
@@ -189,9 +235,9 @@ func transformStreet(raw []byte) ([]byte, error) {
 					Type        string `json:"type"`
 					IllustType  int    `json:"illustType"`
 					PageCount   int    `json:"pageCount"`
-					ID          string `json:"id"`
+					ID          flexID `json:"id"`
 					Title       string `json:"title"`
-					UserID      string `json:"userId"`
+					UserID      flexID `json:"userId"`
 					UserName    string `json:"userName"`
 					ProfileImg  string `json:"profileImageUrl"`
 					Description string `json:"description"`
@@ -249,7 +295,7 @@ func transformStreet(raw []byte) ([]byte, error) {
 		}
 
 		ill := illust{
-			ID:             thumb.ID,
+			ID:             string(thumb.ID),
 			Title:          thumb.Title,
 			Type:           typ,
 			PageCount:      thumb.PageCount,
@@ -265,7 +311,7 @@ func transformStreet(raw []byte) ([]byte, error) {
 		if ill.Type == "" {
 			ill.Type = "illust"
 		}
-		ill.User.ID = thumb.UserID
+		ill.User.ID = string(thumb.UserID)
 		ill.User.Name = thumb.UserName
 		ill.User.Account = thumb.UserName
 		ill.User.ProfileImageURLs.Medium = thumb.ProfileImg
@@ -357,11 +403,11 @@ func pageThumb(thumb string, i int) string {
 // string ids, a square `url` thumbnail, string tags, userName (no
 // account field), profileImageUrl, pageCount, aiType.
 type webIllust struct {
-	ID           string   `json:"id"`
+	ID           flexID   `json:"id"`
 	Title        string   `json:"title"`
 	Type         string   `json:"type"`
 	IllustType   int      `json:"illustType"`
-	UserID       string   `json:"userId"`
+	UserID       flexID   `json:"userId"`
 	UserName     string   `json:"userName"`
 	ProfileImg   string   `json:"profileImageUrl"`
 	URL          string   `json:"url"`
@@ -374,7 +420,7 @@ type webIllust struct {
 	XRestrict    int      `json:"xRestrict"`
 	AIType       int      `json:"aiType"`
 	BookmarkData *struct {
-		ID string `json:"id"`
+		ID flexID `json:"id"`
 	} `json:"bookmarkData"`
 }
 
@@ -407,7 +453,7 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 		large, ok := deriveLarge(item.URL)
 
 		ill := illust{
-			ID:             item.ID,
+			ID:             string(item.ID),
 			Title:          item.Title,
 			Type:           typ,
 			PageCount:      item.PageCount,
@@ -424,7 +470,7 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 				"large":         large,
 			},
 		}
-		ill.User.ID = item.UserID
+		ill.User.ID = string(item.UserID)
 		ill.User.Name = item.UserName
 		ill.User.Account = item.UserName
 		ill.User.ProfileImageURLs.Medium = item.ProfileImg
@@ -621,7 +667,7 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 			} `json:"thumbnails"`
 			Page struct {
 				WorkIDs map[string][]struct {
-					ID   string `json:"id"`
+					ID   flexID `json:"id"`
 					Type string `json:"type"`
 				} `json:"workIds"`
 				Total int `json:"total"`
@@ -638,7 +684,7 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 
 	byID := make(map[string]webIllust, len(src.Body.Thumbnails.Illust))
 	for _, work := range src.Body.Thumbnails.Illust {
-		byID[work.ID] = work
+		byID[string(work.ID)] = work
 	}
 
 	out := searchUsersResponse{Total: src.Body.Page.Total}
@@ -647,7 +693,7 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 		if ids, ok := src.Body.Page.WorkIDs[user.UserID]; ok {
 			previews := make([]webIllust, 0, 3)
 			for _, wid := range ids {
-				if w, ok := byID[wid.ID]; ok {
+				if w, ok := byID[string(wid.ID)]; ok {
 					previews = append(previews, w)
 				}
 				if len(previews) >= 3 {

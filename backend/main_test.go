@@ -833,6 +833,61 @@ func TestTransformTagTranslationsApplied(t *testing.T) {
 	})
 }
 
+// Regression: pixiv's web-AJAX ids are inconsistently encoded — the
+// bookmarks works[] started serving NUMERIC ids (Sept 2026), which
+// hard-failed the strict string field and 502'd the whole page. The
+// transform must accept both encodings and normalize to string.
+func TestTransformBookmarkPageToleratesNumericIDs(t *testing.T) {
+	raw := `{"error":false,"body":{"works":[
+		{"id":12345,"title":"NumID","illustType":0,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/x/12345_p0_square1200.jpg","userId":9,"userName":"Alice","tags":["オリジナル"],"profileImageUrl":"https://i.pximg.net/p1","createDate":"2026-09-01T00:00:00+09:00","xRestrict":0,"aiType":0,"bookmarkData":{"id":"999"}}
+	],"total":1}}`
+	out, err := transformBookmarkPage([]byte(raw), "", 0, 48, "desc")
+	if err != nil {
+		t.Fatalf("transformBookmarkPage: %v", err)
+	}
+	var resp struct {
+		Illusts []struct {
+			ID   string `json:"id"`
+			User struct {
+				ID string `json:"id"`
+			} `json:"user"`
+		} `json:"illusts"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if len(resp.Illusts) != 1 {
+		t.Fatalf("expected 1 illust, got %d", len(resp.Illusts))
+	}
+	if resp.Illusts[0].ID != "12345" {
+		t.Fatalf("numeric id not normalized: %q", resp.Illusts[0].ID)
+	}
+	if resp.Illusts[0].User.ID != "9" {
+		t.Fatalf("numeric userId not normalized: %q", resp.Illusts[0].User.ID)
+	}
+}
+
+// Regression: search responses carry an EMPTY ARRAY for tagTranslation
+// when no translations exist (Sept 2026) — the strict map field 502'd
+// every search. Both {} and [] must decode.
+func TestTransformSearchToleratesEmptyArrayTagTranslation(t *testing.T) {
+	raw := `{"error":false,"body":{
+		"illustManga":{"data":[
+			{"id":"111","title":"T1","illustType":0,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/x/111_p0_square1200.jpg","userId":"9","userName":"Alice","tags":["水着"]}
+		],"total":1,"lastPage":1},
+		"popular":{"recent":[],"permanent":[]},
+		"tagTranslation":[],
+		"relatedTags":[]
+	}}`
+	resp, err := transformSearchArtworks([]byte(raw))
+	if err != nil {
+		t.Fatalf("transformSearchArtworks with empty-array tagTranslation: %v", err)
+	}
+	if len(resp.Illusts) != 1 {
+		t.Fatalf("expected 1 illust, got %d", len(resp.Illusts))
+	}
+}
+
 func TestTransformStreetNoNext(t *testing.T) {
 	raw := `{"error":false,"body":{"contents":[],"nextParams":null}}`
 	out, err := transformStreet([]byte(raw))
