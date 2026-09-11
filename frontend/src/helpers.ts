@@ -125,16 +125,6 @@ export function sliderWindowBounds(
   return [lo, hi];
 }
 
-export function shouldLoadPage(args: {
-  active: boolean;
-  currentPage: number;
-  pageIndex: number;
-  windowSize?: number;
-}): boolean {
-  const w = args.windowSize ?? PRELOAD_PAGES;
-  return args.active && Math.abs(args.pageIndex - args.currentPage) <= w;
-}
-
 /**
  * Distance-prioritized activation delay: visible cards load immediately,
  * cards deeper in the N-viewport window wait proportionally (up to

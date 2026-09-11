@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  shouldLoadPage,
   computeLoadDelay,
   dedupeSeen,
   normalizeTags,
@@ -114,32 +113,6 @@ describe("dedupeSeen", () => {
     const seen = new Set<number>();
     expect(dedupeSeen(seen, [])).toEqual([]);
     expect(seen.size).toBe(0);
-  });
-});
-
-describe("shouldLoadPage", () => {
-  it("loads nothing when inactive", () => {
-    expect(
-      shouldLoadPage({ active: false, currentPage: 0, pageIndex: 0 })
-    ).toBe(false);
-  });
-
-  it("loads the current page and ±window neighbours", () => {
-    const base = { active: true, currentPage: 5 };
-    expect(shouldLoadPage({ ...base, pageIndex: 5 })).toBe(true);
-    expect(shouldLoadPage({ ...base, pageIndex: 3 })).toBe(true);
-    expect(shouldLoadPage({ ...base, pageIndex: 7 })).toBe(true);
-    expect(shouldLoadPage({ ...base, pageIndex: 2 })).toBe(false);
-    expect(shouldLoadPage({ ...base, pageIndex: 8 })).toBe(false);
-  });
-
-  it("honours a custom window size", () => {
-    expect(
-      shouldLoadPage({ active: true, currentPage: 10, pageIndex: 10, windowSize: 0 })
-    ).toBe(true);
-    expect(
-      shouldLoadPage({ active: true, currentPage: 10, pageIndex: 11, windowSize: 0 })
-    ).toBe(false);
   });
 });
 

@@ -204,8 +204,17 @@ function GridCell(props: {
               alt={props.illust.title}
               loading="lazy"
               class={loaded() ? "grid-cell-image loaded" : "grid-cell-image"}
-              onLoad={() => setLoaded(true)}
-              onError={() => setError(true)}
+              onLoad={() => {
+                // The shared placeholder pixel's load event can fire
+                // AFTER the deactivation reset while the cell is
+                // offscreen — guard like FeedCard, or re-entry skips the
+                // spinner and shows an empty cell until the real image
+                // arrives.
+                if (active()) setLoaded(true);
+              }}
+              onError={() => {
+                if (active()) setError(true);
+              }}
             />
           </>
         }

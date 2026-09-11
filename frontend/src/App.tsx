@@ -1,4 +1,4 @@
-import { createSignal, createEffect, createMemo, For, Show, onCleanup, onMount } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { logEvent, reportApiError, setOnGateLocked, setOnRequestError } from "./api/client";
 import { getStreet, getNewest, getNewestNext, getNextPage, getTop, getTopIllust, getRecommended } from "./api/feeds";
 import { getBookmarkIds, getBookmarkTags, getBookmarks, getBookmarksNext } from "./api/bookmarks";
@@ -244,8 +244,11 @@ export default function App() {
       setNextUrl(data.next_url);
       setLoadError(false);
     } catch (err) {
-      reportApiError(err);
       if (seq === reqSeq) {
+        // Report only the CURRENT load's failure — a superseded load
+        // (tab switch / reqSeq bump) used to toast for a feed the user
+        // already left.
+        reportApiError(err);
         console.error("Failed to load feed:", err);
         // Surface the failure at the sentinel — the observer won't
         // re-fire on its own (nextUrl unchanged, no geometry change),
@@ -409,16 +412,20 @@ export default function App() {
 
   function openArtist(illust: PixivIllust) {
     layerZ++;
-    setArtist({ id: illust.user.id, name: illust.user.name || illust.user.account, z: layerZ });
-    setLayerSeq([...layerSeq(), "artist"]);
+    batch(() => {
+      setArtist({ id: illust.user.id, name: illust.user.name || illust.user.account, z: layerZ });
+      setLayerSeq([...layerSeq(), "artist"]);
+    });
   }
 
   // Search's artist rows carry a bare user identity (no illust object) —
   // same artist overlay, different entry shape.
   function openArtistUser(user: { id: number; name: string }) {
     layerZ++;
-    setArtist({ id: user.id, name: user.name, z: layerZ });
-    setLayerSeq([...layerSeq(), "artist"]);
+    batch(() => {
+      setArtist({ id: user.id, name: user.name, z: layerZ });
+      setLayerSeq([...layerSeq(), "artist"]);
+    });
   }
 
   function closeArtist() {
@@ -461,9 +468,13 @@ export default function App() {
     }
     layerZ++;
     const idx = searchStack().length;
-    setSearchStates([...searchStates(), makeInitialSearchState("")]);
-    setSearchStack([...searchStack(), { tag: null, z: layerZ }]);
-    setLayerSeq([...layerSeq(), `search${idx}`]);
+    // Batched: the dev invariant (and topZ) must never observe the
+    // intermediate state where the layer exists but its key does not.
+    batch(() => {
+      setSearchStates([...searchStates(), makeInitialSearchState("")]);
+      setSearchStack([...searchStack(), { tag: null, z: layerZ }]);
+      setLayerSeq([...layerSeq(), `search${idx}`]);
+    });
   }
 
   /** Fresh search-layer state seeded with a tag (the tag's works page). */
@@ -514,9 +525,11 @@ export default function App() {
     }
     layerZ++;
     const idx = searchStack().length;
-    setSearchStates([...searchStates(), makeInitialSearchState(tag)]);
-    setSearchStack([...searchStack(), { tag, z: layerZ }]);
-    setLayerSeq([...layerSeq(), `search${idx}`]);
+    batch(() => {
+      setSearchStates([...searchStates(), makeInitialSearchState(tag)]);
+      setSearchStack([...searchStack(), { tag, z: layerZ }]);
+      setLayerSeq([...layerSeq(), `search${idx}`]);
+    });
   }
 
   /** Report state for one search layer (index in the stack). */
@@ -819,25 +832,27 @@ export default function App() {
 
       // States land FIRST: the For rows mount on the searchStack write,
       // and each row reads its initial state at mount time.
-      setSearchStates(snap.searchStack);
-      setSearchStack(
-        snap.searchTags.map((tag, i) => ({ tag, z: restoredSearchZs[i] }))
-      );
-      setStack(snap.stack.map((ill, i) => ({ illust: ill, z: restoredZs[i] })));
-      if (snap.artist) {
-        setArtist({ id: snap.artist.id, name: snap.artist.name, z: restoredArtistZ });
-      }
-      setLayerSeq(
-        order.filter((k) => {
-          if (k.startsWith("search")) {
-            const idx = Number(k.slice(6));
-            return Number.isInteger(idx) && idx >= 0 && idx < snap.searchStack.length;
-          }
-          if (k === "artist") return !!snap.artist;
-          const idx = Number(k.slice(1));
-          return Number.isInteger(idx) && idx >= 0 && idx < snap.stack.length;
-        })
-      );
+      batch(() => {
+        setSearchStates(snap.searchStack);
+        setSearchStack(
+          snap.searchTags.map((tag, i) => ({ tag, z: restoredSearchZs[i] }))
+        );
+        setStack(snap.stack.map((ill, i) => ({ illust: ill, z: restoredZs[i] })));
+        if (snap.artist) {
+          setArtist({ id: snap.artist.id, name: snap.artist.name, z: restoredArtistZ });
+        }
+        setLayerSeq(
+          order.filter((k) => {
+            if (k.startsWith("search")) {
+              const idx = Number(k.slice(6));
+              return Number.isInteger(idx) && idx >= 0 && idx < snap.searchStack.length;
+            }
+            if (k === "artist") return !!snap.artist;
+            const idx = Number(k.slice(1));
+            return Number.isInteger(idx) && idx >= 0 && idx < snap.stack.length;
+          })
+        );
+      });
 
       // topZ is DERIVED from the restored open order + layer state —
       // no assignment here (see the topZ memo). The modal's obscured

@@ -1,6 +1,11 @@
 import type { PixivIllust } from "./types";
 import type { SearchState } from "./components/SearchScreen";
 
+// Feed-tab membership for snapshot validation (mirrors the FeedType
+// union in App.tsx — a hand-edited or future-schema snapshot must not
+// load an unknown tab silently).
+const FEED_TYPES = ["home", "newest", "illustrations", "top", "recommended", "bookmarks"];
+
 /**
  * Reload-safe LAYER state: survives iOS jetsam kills (localStorage, not
  * sessionStorage). Snapshot shape is versioned — old or corrupt payloads
@@ -112,19 +117,25 @@ export function loadSnapshot(): AppSnapshot | null {
     }
     return {
       v: 1,
-      feedType: parsed.feedType,
+      feedType: FEED_TYPES.includes(parsed.feedType) ? parsed.feedType : "home",
       rankContent: parsed.rankContent ?? "all",
       rankMode: parsed.rankMode ?? "day",
       newestR18: !!parsed.newestR18,
       topMode: parsed.topMode ?? "all",
-      stack: parsed.stack,
+      stack: (parsed.stack as unknown[]).filter(
+        (s): s is PixivIllust =>
+          !!s && typeof s === "object" && typeof (s as { id?: unknown }).id === "number"
+      ),
       artist:
         parsed.artist &&
         typeof parsed.artist.id === "number" &&
         typeof parsed.artist.name === "string"
           ? { id: parsed.artist.id, name: parsed.artist.name }
           : null,
-      recs: parsed.recs,
+      recs: (parsed.recs as unknown[]).filter(
+        (s): s is PixivIllust =>
+          !!s && typeof s === "object" && typeof (s as { id?: unknown }).id === "number"
+      ),
       recsSource: parsed.recsSource ?? "",
       modalOpen: !!parsed.modalOpen,
       searchStack: Array.isArray(parsed.searchStack)

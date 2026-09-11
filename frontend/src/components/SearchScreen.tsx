@@ -1,4 +1,4 @@
-import { createSignal, createEffect, on, onMount, For, Show } from "solid-js";
+import { createSignal, createEffect, onMount, For, Show } from "solid-js";
 import { searchArtworks, searchUsers } from "../api/search";
 import { reportApiError } from "../api/client";
 import type { PixivIllust, SearchUserResult } from "../types";
@@ -60,9 +60,6 @@ export default function SearchScreen(props: {
   closing?: boolean;
   obscured?: boolean;
   initial?: SearchState;
-  // When set, re-runs the search in place with this tag (used by App
-  // to re-seed an ALREADY-OPEN search layer from a tag tap).
-  seedTag?: string;
   onState?: (s: SearchState) => void;
   onClose: () => void;
   onImageTap: (illust: PixivIllust) => void;
@@ -257,17 +254,10 @@ export default function SearchScreen(props: {
     void runSearch(true);
   }
 
-  // Re-seed from App: a tag tap while this layer is already open.
-  createEffect(
-    on(
-      () => props.seedTag,
-      (t) => {
-        if (t) searchRelatedTag(t);
-      },
-      { defer: true }
-    )
-  );
-
+  // (seedTag removed — the pre-multi-search re-seed path was dead: App
+  // never passes it, and the multi-search contract is "a tag already
+  // open re-opens nothing". Tag taps from the popup still re-seed via
+  // searchRelatedTag.)
   function loadMore() {
     if (hasMore() && !loading()) void runSearch(false);
   }
