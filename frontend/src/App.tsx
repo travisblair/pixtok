@@ -659,7 +659,19 @@ export default function App() {
     const dt = performance.now() - edgePan.t;
     const popped = edgePan.active;
     edgePan = null;
-    if (!popped) return;
+    if (!popped) {
+      // An armed edge-touch that lifts BEFORE claiming (a stray tap at
+      // the edge, or the touch stolen mid-drag) used to vanish from the
+      // breadcrumbs — indistinguishable from an interrupted gesture.
+      // Log it so the next "swipe felt weird" report has evidence
+      // either way.
+      logEvent("gesture", "end-no-pop", {
+        dx: Math.round(dx),
+        dt: Math.round(dt),
+        claimed: false,
+      });
+      return;
+    }
     const now = performance.now();
     const inCooldown = now - lastEdgePop < EDGE_BACK_POP_COOLDOWN;
     if (dx >= EDGE_BACK_POP_DX || (dx >= EDGE_BACK_FLING_DX && dx / dt > EDGE_BACK_FLING_V)) {
