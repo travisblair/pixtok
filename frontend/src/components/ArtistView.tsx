@@ -3,7 +3,7 @@ import { getNextPage } from "../api/feeds";
 import { getUserIllusts } from "../api/follow";
 import { reportApiError } from "../api/client";
 import type { PixivIllust } from "../types";
-import FeedCard from "./FeedCard";
+import FeedCard from "./FeedCard/FeedCard";
 import GridFeed from "./GridFeed";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
 import { blockedTags, artistViewMode } from "../store";

@@ -1,24 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent } from "@solidjs/testing-library";
 import FeedCard from "./FeedCard";
-import { makeIllust, makeMultiPageIllust } from "../test-fixtures";
+import { makeIllust, makeMultiPageIllust } from "../../test-fixtures";
 
-vi.mock("../api/illust", () => ({
+vi.mock("../../api/illust", () => ({
   like: vi.fn(async () => {}),
   unlike: vi.fn(async () => {}),
 }));
-vi.mock("../api/follow", () => ({
+vi.mock("../../api/follow", () => ({
   follow: vi.fn(async () => {}),
   unfollow: vi.fn(async () => {}),
   getFollowed: vi.fn(),
 }));
-vi.mock("../api/client", async () => {
-  const actual = await vi.importActual("../api/client");
+vi.mock("../../api/client", async () => {
+  const actual = await vi.importActual("../../api/client");
   return { logEvent: vi.fn(), reportApiError: vi.fn(), ApiError: actual.ApiError };
 });
 
-import * as illust from "../api/illust";
-import * as follow from "../api/follow";
+import * as illust from "../../api/illust";
+import * as follow from "../../api/follow";
 const mockedApi = {
   ...illust,
   ...follow,
