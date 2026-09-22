@@ -5,7 +5,7 @@
 // record the Pi journal gets of a client-side crash. Deliberately tiny
 // and inert: nothing here may ever throw or depend on app state.
 
-import { logEvent } from "./api";
+import { logEvent } from "./api/client";
 
 const KEY = "pixtok_crash_ring";
 const MAX = 6;

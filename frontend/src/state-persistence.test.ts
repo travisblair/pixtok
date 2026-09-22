@@ -6,9 +6,34 @@ import {
   MAX_STACK_DEPTH,
   type SnapshotInput,
 } from "./state-persistence";
+import type { SearchState } from "./components/SearchScreen";
 import { makeIllust } from "./test-fixtures";
 
 const KEY = "pixtok_state_v2";
+
+/** Full-shaped SearchState for raw-payload fixtures (honest typing —
+ *  the loader's filter only needs word/works/users, but a real
+ *  snapshot page carries every field). */
+function makeSearchState(word: string): SearchState {
+  return {
+    word,
+    mode: "works",
+    order: "date_d",
+    contentMode: "all",
+    workType: "all",
+    sMode: "s_tag_full",
+    aiType: "0",
+    dateMode: "all",
+    scd: "",
+    sce: "",
+    works: [],
+    popular: [],
+    related: [],
+    users: [],
+    page: 0,
+    hasMore: false,
+  };
+}
 
 function baseSnapshot(): SnapshotInput {
   return {
@@ -154,6 +179,107 @@ describe("saveSnapshot/loadSnapshot", () => {
     saveSnapshot(snap);
     const loaded = loadSnapshot()!;
     expect(loaded.stack.length).toBe(MAX_STACK_DEPTH);
+  });
+
+  it("drops stack/recs entries that only carry a numeric id", () => {
+    // Review finding: the old id-only guard let {"id":5} through, it
+    // reached FeedCard, and props.illust.user.name threw — the throw
+    // escaped boot() and masqueraded as gate:unreachable (boot died,
+    // GateScreen stayed up forever). A restored entry must carry the
+    // render shape FeedCard reads unconditionally.
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [{ id: 5 }],
+        recs: [{ id: 6 }],
+        artist: null,
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.stack).toEqual([]);
+    expect(loaded.recs).toEqual([]);
+  });
+
+  it("drops entries with an incomplete user/image_urls shape and keeps well-formed ones", () => {
+    const good = makeIllust({ id: 7 });
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [
+          { id: 6, user: { id: 1 } }, // user.name missing → would throw
+          { id: 8, user: { id: 1, name: "A" }, image_urls: { medium: "m" } }, // image_urls.large missing
+          good,
+        ],
+        recs: [],
+        artist: null,
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.stack.map((i) => i.id)).toEqual([7]);
+  });
+
+  it("pads searchTags to the validated searchStack length", () => {
+    // App.tsx restores `searchStack: snap.searchTags.map((tag, i) => ...)`
+    // — a tags array shorter than the validated stack must not silently
+    // drop layers (or index z-values out of range); the loader pads.
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [],
+        recs: [],
+        artist: null,
+        searchStack: [makeSearchState("snow"), makeSearchState("rain")],
+        searchTags: ["snow"],
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.searchStack.length).toBe(2);
+    expect(loaded.searchTags).toEqual(["snow", null]);
+  });
+
+  it("truncates searchTags to the validated searchStack length", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [],
+        recs: [],
+        artist: null,
+        searchStack: [makeSearchState("snow")],
+        searchTags: ["snow", "rain", "wind"],
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.searchTags).toEqual(["snow"]);
+  });
+
+  it("aligns searchTags to the stack length AFTER invalid entries are dropped", () => {
+    // The saved tags array matched the raw array; the validated stack is
+    // one shorter because {word} alone lacks works/users. The trailing
+    // tag must not survive (the restore indexes tags[i] over the
+    // VALIDATED stack).
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [],
+        recs: [],
+        artist: null,
+        searchStack: [makeSearchState("snow"), { word: "dropped" }],
+        searchTags: ["snow", "dropped-tag"],
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.searchStack.length).toBe(1);
+    expect(loaded.searchTags).toEqual(["snow"]);
   });
 
   it("returns null for corrupt JSON", () => {

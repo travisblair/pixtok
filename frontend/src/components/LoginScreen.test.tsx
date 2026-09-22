@@ -1,21 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { http, HttpResponse } from "msw";
 import LoginScreen from "./LoginScreen";
+import { server } from "../test/msw/server";
 
-vi.mock("../api", () => ({
-  api: {
-    getAuthStatus: vi.fn(),
-  },
-}));
-
-import { api } from "../api";
-const mockedApi = api as unknown as { getAuthStatus: ReturnType<typeof vi.fn> };
-
-beforeEach(() => {
-  mockedApi.getAuthStatus
-    .mockReset()
-    .mockResolvedValue({ app_api: true, web_session: true });
-});
+// Real api/auth.getAuthStatus -> request() -> MSW. The default handler
+// reports both surfaces healthy; per-test variations override the wire
+// response instead of a module mock.
 
 describe("LoginScreen", () => {
   it("shows the connected banner plus both auth surfaces when authed", async () => {
@@ -33,10 +24,11 @@ describe("LoginScreen", () => {
   });
 
   it("marks a surface red when unhealthy", async () => {
-    mockedApi.getAuthStatus.mockResolvedValue({
-      app_api: true,
-      web_session: false,
-    });
+    server.use(
+      http.get("/api/auth/status", () =>
+        HttpResponse.json({ app_api: true, web_session: false })
+      )
+    );
     const { container } = render(() => <LoginScreen onClose={() => {}} />);
     await waitFor(() =>
       expect(container.querySelectorAll(".auth-status.ok").length).toBe(2)
@@ -45,7 +37,11 @@ describe("LoginScreen", () => {
   });
 
   it("shows backend-unreachable when the status call fails", async () => {
-    mockedApi.getAuthStatus.mockRejectedValue(new Error("down"));
+    server.use(
+      http.get("/api/auth/status", () =>
+        new HttpResponse("upstream error\n", { status: 502 })
+      )
+    );
     const { container } = render(() => <LoginScreen onClose={() => {}} />);
     await waitFor(() =>
       expect(container.textContent).toContain("Backend unreachable")
@@ -53,14 +49,23 @@ describe("LoginScreen", () => {
   });
 
   it("refreshes the status on demand", async () => {
+    // First load: fully authed. After the Refresh tap: both surfaces
+    // report down — the screen must re-read the endpoint, not a cache.
+    let calls = 0;
+    server.use(
+      http.get("/api/auth/status", () => {
+        calls++;
+        return HttpResponse.json(
+          calls === 1
+            ? { app_api: true, web_session: true }
+            : { app_api: false, web_session: false }
+        );
+      })
+    );
     const { container } = render(() => <LoginScreen onClose={() => {}} />);
     await waitFor(() =>
       expect(container.querySelectorAll(".auth-status.ok").length).toBe(3)
     );
-    mockedApi.getAuthStatus.mockResolvedValue({
-      app_api: false,
-      web_session: false,
-    });
     const refreshBtn = [...container.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("Refresh")
     )!;
@@ -71,10 +76,11 @@ describe("LoginScreen", () => {
   });
 
   it("shows the sign-in guidance and the proxied Sign-in link when logged out", async () => {
-    mockedApi.getAuthStatus.mockResolvedValue({
-      app_api: false,
-      web_session: false,
-    });
+    server.use(
+      http.get("/api/auth/status", () =>
+        HttpResponse.json({ app_api: false, web_session: false })
+      )
+    );
     const { container } = render(() => <LoginScreen onClose={() => {}} />);
     await waitFor(() =>
       expect(container.textContent).toContain("Sign in to Pixiv once")

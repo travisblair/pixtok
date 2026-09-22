@@ -11,9 +11,8 @@ test.describe("Bookmarks page", () => {
     await switchFeedViaDrawer(page, "Bookmarks");
     await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
 
-    // Pills: All active, tag-one from the tags endpoint.
-    const allPill = page.locator(".mode-pill", { hasText: "All" });
-    await expect(allPill).toHaveClass(/active/);
+    // Tag pill (tag-one from the tags endpoint) is a TOGGLE: no
+    // separate All pill — tapping the active folder clears the filter.
     const tagPill = page.locator(".mode-pill", { hasText: "tag-one" });
     await expect(tagPill).toBeVisible();
 
@@ -27,8 +26,29 @@ test.describe("Bookmarks page", () => {
     await expect(page.locator(".feed-card")).toHaveCount(5, { timeout: 15000 });
     expect(mocks.unlikeCalls.length).toBeGreaterThan(0);
 
-    // Back to All: offset 0 with no tag.
-    await allPill.click();
+    // Clear the filter: re-tap the active tag.
+    await tagPill.click();
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
+    expect(mocks.bookmarkCalls.at(-1)).toEqual({ tag: "", offset: 0 });
+  });
+
+  test("Private pill switches to the app-API private pile (pixtok likes)", async ({ page }) => {
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    await switchFeedViaDrawer(page, "Bookmarks");
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
+
+    // Switch to Private: the app-API passthrough feed loads, and the
+    // web-page tag pills (public-only folders) disappear.
+    await page.locator(".mode-pill", { hasText: "Private" }).click();
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
+    expect(mocks.bookmarkPrivateCalls).toHaveLength(1);
+    await expect(page.locator(".mode-pill", { hasText: "tag-one" })).toHaveCount(0);
+
+    // Back to Public reloads the web-page feed (offset 0, no tag).
+    await page.locator(".mode-pill", { hasText: "Public" }).click();
     await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15000 });
     expect(mocks.bookmarkCalls.at(-1)).toEqual({ tag: "", offset: 0 });
   });

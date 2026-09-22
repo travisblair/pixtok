@@ -33,7 +33,7 @@ func (r *recTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newTestClient() (*Client, *recTransport) {
 	rt := &recTransport{}
-	return &Client{phpSessID: "test", http: &http.Client{Transport: rt}}, rt
+	return &Client{phpSessID: "123456_test", http: &http.Client{Transport: rt}}, rt
 }
 
 // contentTypeTransport answers with a fixed Content-Type — lets
@@ -65,7 +65,7 @@ type scriptTransport struct {
 func (r *scriptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// The profile-page GET (csrf token fetch after the retry clears the
 	// cache) always succeeds with HTML carrying a 32-hex token.
-	if req.URL.Path == "/en/users/test" {
+	if req.URL.Path == "/en/users/123456" {
 		return &http.Response{
 			StatusCode: 200,
 			Header:     http.Header{"Content-Type": []string{"text/html"}},
@@ -91,7 +91,7 @@ func (r *scriptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newStreetClient(rt http.RoundTripper) *Client {
 	return &Client{
-		phpSessID:      "test",
+		phpSessID:      "123456_test",
 		csrfTokenCache: "tok", // csrfToken() returns the cache, no profile fetch
 		http:           &http.Client{Transport: rt},
 	}
@@ -128,8 +128,8 @@ func TestStreetSendsCachedCsrfNotSession(t *testing.T) {
 	if rt.csrfToken != "tok" {
 		t.Fatalf("x-csrf-token = %q, want %q (the cached csrf)", rt.csrfToken, "tok")
 	}
-	if rt.cookie != "PHPSESSID=test" {
-		t.Fatalf("Cookie = %q, want %q (session rides the cookie only)", rt.cookie, "PHPSESSID=test")
+	if rt.cookie != "PHPSESSID=123456_test" {
+		t.Fatalf("Cookie = %q, want %q (session rides the cookie only)", rt.cookie, "PHPSESSID=123456_test")
 	}
 }
 
@@ -229,7 +229,7 @@ func TestProxyImageContentTypeAllowlist(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Client{
-				phpSessID: "test",
+				phpSessID: "123456_test",
 				http:      &http.Client{Transport: &contentTypeTransport{ct: tc.ct}},
 			}
 			_, got, err := c.ProxyImageStream("https://i.pximg.net/img-master/img/2024/01/01/00/00/00/1.jpg", httptest.NewRecorder())
@@ -789,7 +789,7 @@ func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // (expiresAt in the future) and whose upstream gate has the given size.
 func gatedTestClient(slots int, rt http.RoundTripper) *Client {
 	return &Client{
-		phpSessID:     "test",
+		phpSessID:     "123456_test",
 		http:          &http.Client{Transport: rt},
 		upstreamSlots: make(chan struct{}, slots),
 		expiresAt:     time.Now().Add(time.Hour),
@@ -844,7 +844,7 @@ func TestUpstreamSlotsNilGateSkipsAcquire(t *testing.T) {
 	// doWith must skip the acquire entirely, not panic or block.
 	rt := &countingTransport{}
 	c := &Client{
-		phpSessID: "test",
+		phpSessID: "123456_test",
 		http:      &http.Client{Transport: rt},
 		expiresAt: time.Now().Add(time.Hour),
 	}
@@ -881,7 +881,7 @@ func (t *statusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestFollowStateCooldownAfter429(t *testing.T) {
 	rt := &statusTransport{code: 429}
 	c := &Client{
-		phpSessID: "test",
+		phpSessID: "123456_test",
 		http:      &http.Client{Transport: rt},
 		expiresAt: time.Now().Add(time.Hour),
 	}
@@ -909,7 +909,7 @@ func TestFollowStateCooldownAfter429(t *testing.T) {
 func TestFollowStateCooldownExpiry(t *testing.T) {
 	rt := &statusTransport{code: 200}
 	c := &Client{
-		phpSessID: "test",
+		phpSessID: "123456_test",
 		http:      &http.Client{Transport: rt},
 		expiresAt: time.Now().Add(time.Hour),
 	}
@@ -1057,5 +1057,168 @@ func TestFollowStateInvalidateDropsStaleInflight(t *testing.T) {
 	// stored (its epoch was bumped).
 	if _, ok := c.followState.items["12345"]; ok {
 		t.Fatal("stale in-flight value resurrected after invalidate")
+	}
+}
+
+// Regression: a 200 with a non-JSON token body used to skip the circuit
+// breaker — expiresAt stayed in the past and EVERY request re-hit the
+// token endpoint until the body cleared.
+func TestRefreshParseErrorArmsBackoff(t *testing.T) {
+	c := &Client{
+		http: &http.Client{Transport: &scriptTransport{codes: []int{200}}},
+	}
+	// Force a 200 with a non-JSON body: scriptTransport answers 200 with
+	// {"body":{"illusts":[]}} for non-200s... use a dedicated transport.
+	c.http = &http.Client{Transport: &tokenBodyTransport{body: "<html>cloudflare</html>"}}
+
+	err := c.refresh()
+	if err == nil {
+		t.Fatal("expected parse error from non-JSON token body")
+	}
+	c.mu.Lock()
+	backoff := c.expiresAt.After(time.Now())
+	c.mu.Unlock()
+	if !backoff {
+		t.Fatal("expiresAt was not armed — every request will re-hit the token endpoint")
+	}
+}
+
+// tokenBodyTransport answers 200 with a canned body for every request.
+type tokenBodyTransport struct {
+	body string
+}
+
+func (r *tokenBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader(r.body)),
+		Request:    req,
+	}, nil
+}
+
+// The create-target contract: envFilePath() returns a not-yet-existing
+// candidate as the create target, so a deployment bootstrapped from
+// process env vars (no .env) must get one created on first rotation.
+func TestUpdateEnvFileCreatesMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "fresh.env")
+	prev := os.Getenv("PIXTOK_ENV_FILE")
+	os.Setenv("PIXTOK_ENV_FILE", target)
+	defer os.Setenv("PIXTOK_ENV_FILE", prev)
+
+	if err := UpdateEnvFile(map[string]string{"PIXIV_REFRESH_TOKEN": "abc123"}); err != nil {
+		t.Fatalf("UpdateEnvFile on missing file: %v", err)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+	if !strings.Contains(string(raw), "PIXIV_REFRESH_TOKEN=abc123") {
+		t.Fatalf("created file missing key: %q", string(raw))
+	}
+}
+
+// A stale csrf fetch completing after a login capture must not resurrect
+// the old session: the commit is guarded by the session id read earlier.
+func TestSetWebCacheIfCurrent(t *testing.T) {
+	c := &Client{}
+	c.setWebCache("OLD", "tokOld")
+
+	// A login capture swaps in the new session mid-flight...
+	c.setWebCache("NEW", "tokNew")
+	// ...then the stale fetch commits its pre-fetch pair. It must lose.
+	c.setWebCacheIfCurrent("OLD", "tokStale")
+
+	sess, tok := c.webSession()
+	if sess != "NEW" || tok != "tokNew" {
+		t.Fatalf("stale fetch resurrected old session: sess=%q tok=%q", sess, tok)
+	}
+
+	// The non-stale path still commits normally.
+	c.setWebCacheIfCurrent("NEW", "tokFresh")
+	_, tok = c.webSession()
+	if tok != "tokFresh" {
+		t.Fatalf("current-session commit lost: tok=%q", tok)
+	}
+}
+
+// ── Refresh body-read failure arms the breaker ─────────────────────────
+
+// failingReader errors on every Read — simulates the connection being
+// reset mid-body after the token endpoint's response headers arrived.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+func (failingReader) Close() error             { return nil }
+
+// failingReadTransport answers every request with a 200 whose Body
+// errors on the first Read.
+type failingReadTransport struct{}
+
+func (r *failingReadTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       failingReader{},
+		Request:    req,
+	}, nil
+}
+
+// Regression: a body-READ failure (connection reset mid-body) returned
+// without arming the circuit breaker — expiresAt stayed in the past and
+// every request re-hit the token endpoint. The read-failure path must
+// arm the backoff like the parse-error and empty-token paths.
+func TestRefreshBodyReadErrorArmsBackoff(t *testing.T) {
+	c := &Client{
+		http: &http.Client{Transport: &failingReadTransport{}},
+	}
+	if err := c.refresh(); err == nil {
+		t.Fatal("expected error from mid-body read failure")
+	}
+	c.mu.Lock()
+	backoff := time.Until(c.expiresAt)
+	c.mu.Unlock()
+	if backoff <= 0 {
+		t.Fatal("expiresAt was not armed — every request will re-hit the token endpoint")
+	}
+	if backoff < 25*time.Second || backoff > 31*time.Second {
+		t.Fatalf("circuit breaker backoff = %v, want ~30s (tokenRetryBackoff)", backoff)
+	}
+}
+
+// ── Invalidate/finish epoch cleanup ────────────────────────────────────
+
+// Regression: invalidate() bumps the epoch while a call is in flight;
+// that call's finish() correctly dropped the stale value, but its
+// CONDITIONAL epoch delete skipped (epochs[id] != call.epoch) — the
+// bumped marker leaked forever. The marker exists only to supersede
+// that call; finish() must delete it unconditionally.
+func TestFollowStateInvalidateCleansEpochAfterInflightFinishes(t *testing.T) {
+	bt := &blockingTransport{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		respBody: `{"user":{"is_followed":true}}`,
+	}
+	c := newFollowClient(bt)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.IsFollowed("12345")
+		close(done)
+	}()
+	<-bt.started
+	// User toggles while the detail fetch is in flight: the epoch is
+	// bumped to supersede the call.
+	c.followState.invalidate("12345")
+	close(bt.release)
+	<-done
+
+	// The superseded call has finished; its marker must not outlive it.
+	c.followState.mu.Lock()
+	_, leaked := c.followState.epochs["12345"]
+	c.followState.mu.Unlock()
+	if leaked {
+		t.Fatal("epoch marker leaked after the superseded in-flight call finished")
 	}
 }

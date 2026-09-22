@@ -56,7 +56,7 @@ export async function setupApiMocks(page, options = {}) {
   const relatedBatch = toResponse(
     options.relatedBatch ?? makeFeedOf(8, 3001, null)
   );
-  const userBatch = toResponse(options.userBatch ?? makeFeedOf(6, 4001, null));
+  const userBatchOverride = options.userBatch ?? null;
   const nextBatch = toResponse(options.nextBatch ?? makeFeedOf(10, 4001, null));
   const newestBatch = toResponse(
     options.newestBatch ?? makeFeedOf(20, 6001, "/api/newest?r18=false&lastId=5000")
@@ -131,6 +131,7 @@ export async function setupApiMocks(page, options = {}) {
     searchCalls: [], // [{ word, order, r18, p }]
     searchUsersCalls: [], // [{ nick, p }]
     bookmarkCalls: [], // [{ tag, offset }]
+    bookmarkPrivateCalls: [],
     followedCalls: [], // [{ id }]
     followCalls: [], // [{ id }]
     unfollowCalls: [], // [{ id }]
@@ -147,8 +148,11 @@ export async function setupApiMocks(page, options = {}) {
   // ── HERMETICITY GUARD: any /api route a spec forgets to mock dies ─────
   // loudly here instead of leaking to the real Vite proxy → Go backend →
   // Pixiv. Playwright matches routes LIFO, so the specific routes below
-  // (registered after this catch-all) always win.
-  await page.route(/\api\//, (route) => {
+  // (registered after this catch-all) always win. The ^https?://[^/]+
+  // anchor keeps frontend SOURCE paths (…/src/api/*.ts) from matching —
+  // an unanchored /\api\// once 500'd every module request after the
+  // api.ts domain split and the app never booted in e2e.
+  await page.route(/^https?:\/\/[^/]+\/api\//, (route) => {
     route.fulfill(
       json({ error: "UNMOCKED /api route — add it to setupApiMocks" }, 500)
     );
@@ -207,6 +211,19 @@ export async function setupApiMocks(page, options = {}) {
   });
   // The (?<!\/api) lookbehind mirrors the newest route: a double-prefixed
   // URL must fall through to the hermeticity guard.
+  // Private pile: app-API passthrough (absolute next_url rides /api/next).
+  await page.route(/(?<!\/api)\/api\/bookmarks\/private$/, (route) => {
+    mocks.bookmarkPrivateCalls.push({});
+    route.fulfill(
+      json(
+        toResponse(
+          options.privateBatch ??
+            makeFeedOf(6, 9801, "https://app-api.pixiv.net/v1/user/bookmarks/illust?offset=0")
+        )
+      )
+    );
+  });
+
   await page.route(/(?<!\/api)\/api\/bookmarks\/tags$/, (route) => {
     route.fulfill(
       json({
@@ -233,7 +250,7 @@ export async function setupApiMocks(page, options = {}) {
     route.fulfill(
       json(
         offset === 0
-          ? { illusts: makeFeedOf(6, 9501, null).illusts, next_url: "/api/bookmarks?tag=" + tag + "&offset=48" }
+          ? { illusts: makeFeedOf(6, 9501, null).illusts, next_url: "/api/bookmarks?tag=" + tag + "&offset=48&order=desc" }
           : { illusts: [], next_url: null }
       )
     );
@@ -379,7 +396,13 @@ export async function setupApiMocks(page, options = {}) {
   await page.route(/\/api\/user\/(\d+)\/illusts$/, (route) => {
     const id = Number(route.request().url().match(/\/user\/(\d+)\/illusts$/)[1]);
     mocks.userCalls.push({ id });
-    route.fulfill(json(userBatch));
+    // Id-derived by default: the artist-swap spec must be able to tell
+    // artist A's works from artist B's — a shared batch made "previous
+    // artist's works under the new name" undetectable (the old mock).
+    const batch = userBatchOverride
+      ? toResponse(userBatchOverride)
+      : toResponse(makeFeedOf(6, id * 1000, null));
+    route.fulfill(json(batch));
   });
 
   // ── GET /api/illust/:id/ugoira_meta (animation metadata) ──────────────
@@ -422,9 +445,17 @@ export async function setupApiMocks(page, options = {}) {
     // count even when the continuation 429s (the bounded-requests
     // assertion needs to see failed attempts too).
     const url = new URL(route.request().url());
-    mocks.nextCalls.push({ url: url.searchParams.get("url") });
+    const target = url.searchParams.get("url");
+    mocks.nextCalls.push({ url: target });
     if (nextFails) {
       route.fulfill(json({ error: "rate limited" }, 429));
+      return;
+    }
+    // Mirror the backend's validation: /api/next only forwards ABSOLUTE
+    // app-api URLs — anything else 502s. A mock that serves arbitrary
+    // shapes would keep a frontend URL-mangling regression green.
+    if (!target || !target.startsWith("https://app-api.pixiv.net/")) {
+      route.fulfill(json({ error: "invalid next url" }, 502));
       return;
     }
     route.fulfill(json(nextBatch));

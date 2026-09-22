@@ -1,24 +1,28 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { http, HttpResponse } from "msw";
 import SearchScreen from "./SearchScreen";
 import { makeFeedOf } from "../test-fixtures";
+import {
+  requestCount,
+  requestParams,
+  server,
+} from "../test/msw/server";
 
-vi.mock("../api", () => ({
-  api: {
-    searchArtworks: vi.fn(),
-    searchUsers: vi.fn(),
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    follow: vi.fn(async () => {}),
-    unfollow: vi.fn(async () => {}),
-    getFollowed: vi.fn(),
-    getUgoiraMeta: vi.fn(async () => ({ error: false, body: { src: "z", frames: [] } })),
-  },
-  logEvent: vi.fn(),
-}));
+// Real api/search.searchArtworks + searchUsers -> request() -> MSW.
+//
+// The module-mock era asserted `searchArtworks called with {...}`; at
+// the wire level the same contract is the QUERY STRING the request
+// carries (word/order/mode/s_mode/type/ai_type/scd/sce/p) — re-expressed
+// against the real request() path, so a wrong param name or a dropped
+// default now fails here instead of being papered over by a mock.
+// Call counts are the request counts for that path.
 
-import { api } from "../api";
-const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+/** The most recent /api/search/artworks request's query params. */
+function lastArtworkParams(): Record<string, string> {
+  const all = requestParams("/api/search/artworks");
+  return all[all.length - 1] ?? {};
+}
 
 function artworksResp(page: number, lastPage: number) {
   return {
@@ -53,12 +57,6 @@ function usersResp() {
   };
 }
 
-beforeEach(() => {
-  mockedApi.searchArtworks.mockReset().mockResolvedValue(artworksResp(1, 1));
-  mockedApi.searchUsers.mockReset().mockResolvedValue(usersResp());
-  mockedApi.getFollowed.mockReset().mockResolvedValue({ followed: false });
-});
-
 const baseProps = {
   zIndex: 50,
   onClose: () => {},
@@ -68,6 +66,13 @@ const baseProps = {
   onTagsTap: () => {},
 };
 
+/** Type a query and submit — the shared preamble of nearly every test. */
+async function search(container: HTMLElement, word: string) {
+  const input = container.querySelector(".search-input") as HTMLInputElement;
+  await fireEvent.input(input, { target: { value: word } });
+  await fireEvent.submit(input.closest("form")!);
+}
+
 describe("SearchScreen", () => {
   it("shows the empty prompt before any search", () => {
     const { container } = render(() => <SearchScreen {...baseProps} />);
@@ -76,20 +81,17 @@ describe("SearchScreen", () => {
 
   it("searches works on submit and renders results", async () => {
     const { container } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "fantasy");
+    // The wire carries every search parameter the results depend on.
     await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenCalledWith({
+      expect(lastArtworkParams()).toEqual({
         word: "fantasy",
         order: "date_d",
-        contentMode: "all",
-        workType: "all",
-        sMode: "s_tag_full",
-        aiType: "0",
-        scd: "",
-        sce: "",
-        p: 1,
+        mode: "all",
+        s_mode: "s_tag_full",
+        type: "all",
+        ai_type: "0",
+        p: "1",
       })
     );
     await waitFor(() =>
@@ -98,10 +100,13 @@ describe("SearchScreen", () => {
   });
 
   it("shows the popular strip and related tag pills on page 1", async () => {
+    server.use(
+      http.get("/api/search/artworks", () =>
+        HttpResponse.json(artworksResp(1, 1))
+      )
+    );
     const { container } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "fantasy");
     await waitFor(() =>
       expect(container.querySelector(".search-popular-strip")).not.toBeNull()
     );
@@ -110,10 +115,13 @@ describe("SearchScreen", () => {
   });
 
   it("tapping a related tag re-searches that tag", async () => {
+    server.use(
+      http.get("/api/search/artworks", () =>
+        HttpResponse.json(artworksResp(1, 1))
+      )
+    );
     const { container } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "fantasy");
     await waitFor(() =>
       expect(container.querySelectorAll(".search-related-pill").length).toBe(2)
     );
@@ -121,33 +129,28 @@ describe("SearchScreen", () => {
       container.querySelectorAll(".search-related-pill")[0]
     );
     await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenLastCalledWith({
-        word: "幻想",
-        order: "date_d",
-        contentMode: "all",
-        workType: "all",
-        sMode: "s_tag_full",
-        aiType: "0",
-        scd: "",
-        sce: "",
-        p: 1,
-      })
+      expect(lastArtworkParams().word).toBe("幻想")
     );
   });
 
   it("switches to artists mode and renders user rows with previews", async () => {
+    server.use(
+      http.get("/api/search/users", () => HttpResponse.json(usersResp()))
+    );
     const { container, getByText } = render(() => (
       <SearchScreen {...baseProps} />
     ));
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "fantasy");
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(3)
     );
     await fireEvent.click(getByText("Artists"));
     await waitFor(() =>
-      expect(mockedApi.searchUsers).toHaveBeenCalledWith("fantasy", 1)
+      expect(requestParams("/api/search/users")).toContainEqual({
+        nick: "fantasy",
+        s_mode: "s_usr",
+        p: "1",
+      })
     );
     await waitFor(() =>
       expect(container.querySelector(".search-user-row")).not.toBeNull()
@@ -159,16 +162,15 @@ describe("SearchScreen", () => {
   });
 
   it("paginates works via the sentinel", async () => {
-    mockedApi.searchArtworks
-      .mockResolvedValueOnce(artworksResp(1, 2))
-      .mockResolvedValueOnce(artworksResp(2, 2));
-    const { container } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
-    await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(2)
+    server.use(
+      http.get("/api/search/artworks", ({ request }) => {
+        const p = Number(new URL(request.url).searchParams.get("p") ?? "1");
+        return HttpResponse.json(artworksResp(p, 2));
+      })
     );
+    const { container } = render(() => <SearchScreen {...baseProps} />);
+    await search(container, "fantasy");
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(2));
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(6)
     );
@@ -178,17 +180,23 @@ describe("SearchScreen", () => {
     // The old code stranded loading=true forever when a mode pill was
     // tapped during an in-flight search (stale run's finally skipped
     // setLoading, new run blocked by the loading guard).
-    mockedApi.searchArtworks.mockImplementation(
-      () => new Promise((res) => setTimeout(() => res(artworksResp(1, 1)), 50))
+    server.use(
+      http.get("/api/search/artworks", async () => {
+        await new Promise((r) => setTimeout(r, 50));
+        return HttpResponse.json(artworksResp(1, 1));
+      }),
+      http.get("/api/search/users", () => HttpResponse.json(usersResp()))
     );
     const { container, getByText } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "fantasy");
     // Tap Artists while the works search is still in flight.
     await fireEvent.click(getByText("Artists"));
     await waitFor(() =>
-      expect(mockedApi.searchUsers).toHaveBeenCalledWith("fantasy", 1)
+      expect(requestParams("/api/search/users")).toContainEqual({
+        nick: "fantasy",
+        s_mode: "s_usr",
+        p: "1",
+      })
     );
     await waitFor(() =>
       expect(container.querySelector(".search-user-row")).not.toBeNull()
@@ -199,18 +207,17 @@ describe("SearchScreen", () => {
   it("fresh searches don't dedupe against the previous search's works", async () => {
     // Both searches return the same id range (100..) — the second must
     // still render them; the seen-set must reset per fresh search.
-    mockedApi.searchArtworks
-      .mockResolvedValueOnce(artworksResp(1, 1))
-      .mockResolvedValueOnce(artworksResp(1, 1));
+    server.use(
+      http.get("/api/search/artworks", () =>
+        HttpResponse.json(artworksResp(1, 1))
+      )
+    );
     const { container } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "goku" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "goku");
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(3)
     );
-    await fireEvent.input(input, { target: { value: "vegeta" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "vegeta");
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(3)
     );
@@ -223,50 +230,50 @@ describe("SearchScreen", () => {
     // NEW query and appended it to the OLD query's results (the
     // mixed-results bug). Route by word so sentinel timing can't
     // desync the mock queue.
-    mockedApi.searchArtworks.mockImplementation((params: { word: string; p?: number }) => {
-      if (params.word === "broken") {
-        return Promise.reject(new Error("upstream down"));
-      }
-      return Promise.resolve(artworksResp(params.p ?? 1, 3));
-    });
+    server.use(
+      http.get("/api/search/artworks", ({ request }) => {
+        const url = new URL(request.url);
+        const word = url.searchParams.get("word") ?? "";
+        if (word === "broken") {
+          return new HttpResponse("upstream error\n", { status: 502 });
+        }
+        const p = Number(url.searchParams.get("p") ?? "1");
+        return HttpResponse.json(artworksResp(p, 3));
+      })
+    );
     const { container } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "fantasy");
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBeGreaterThanOrEqual(3)
     );
-    await fireEvent.input(input, { target: { value: "broken" } });
-    await fireEvent.submit(input.closest("form")!);
+    await search(container, "broken");
     // The failed fresh run must flag the error.
     await waitFor(() => expect(container.textContent).toContain("Couldn't search"));
     // No continuation of the OLD result set may fire afterwards.
     await new Promise((r) => setTimeout(r, 100));
-    expect(mockedApi.searchArtworks.mock.calls.filter((c) => c[0].word === "broken").length).toBe(1);
+    expect(
+      requestParams("/api/search/artworks").filter((p) => p.word === "broken")
+    ).toHaveLength(1);
   });
 
   it("opening Filters and picking a content mode refetches with the new mode", async () => {
     const { container, getByText } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await search(container, "fantasy");
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
 
     await fireEvent.click(getByText("Filters"));
     await fireEvent.click(getByText("All ages"));
     await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenLastCalledWith(
-        expect.objectContaining({ word: "fantasy", contentMode: "safe", p: 1 })
+      expect(lastArtworkParams()).toEqual(
+        expect.objectContaining({ word: "fantasy", mode: "safe", p: "1" })
       )
     );
   });
 
   it("the Filters button shows a badge when filters are active and Reset clears it", async () => {
     const { container, getByText } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await search(container, "fantasy");
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
 
     expect(container.querySelector(".filter-badge")).toBeNull();
     await fireEvent.click(getByText("Filters"));
@@ -278,50 +285,44 @@ describe("SearchScreen", () => {
     await fireEvent.click(getByText("Reset"));
     await waitFor(() => expect(container.querySelector(".filter-badge")).toBeNull());
     await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenLastCalledWith(
-        expect.objectContaining({ order: "date_d", aiType: "0" })
+      expect(lastArtworkParams()).toEqual(
+        expect.objectContaining({ order: "date_d", ai_type: "0" })
       )
     );
   });
 
   it("picking Illustrations only passes workType=illust", async () => {
     const { container, getByText } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await search(container, "fantasy");
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
 
     await fireEvent.click(getByText("Filters"));
     await fireEvent.click(getByText("Illustrations only"));
     await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenLastCalledWith(
-        expect.objectContaining({ workType: "illust" })
+      expect(lastArtworkParams()).toEqual(
+        expect.objectContaining({ type: "illust" })
       )
     );
   });
 
   it("picking Ugoira only passes workType=ugoira", async () => {
     const { container, getByText } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await search(container, "fantasy");
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
 
     await fireEvent.click(getByText("Filters"));
     await fireEvent.click(getByText("Ugoira only"));
     await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenLastCalledWith(
-        expect.objectContaining({ workType: "ugoira" })
+      expect(lastArtworkParams()).toEqual(
+        expect.objectContaining({ type: "ugoira" })
       )
     );
   });
 
   it("Custom posting date reveals date inputs and applies scd/sce", async () => {
     const { container, getByText } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await search(container, "fantasy");
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
 
     await fireEvent.click(getByText("Filters"));
     await fireEvent.click(getByText("Custom"));
@@ -335,7 +336,7 @@ describe("SearchScreen", () => {
       { target: { value: "2026-06-30" } }
     );
     await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenLastCalledWith(
+      expect(lastArtworkParams()).toEqual(
         expect.objectContaining({ scd: "2026-06-01", sce: "2026-06-30" })
       )
     );
@@ -346,23 +347,19 @@ describe("SearchScreen", () => {
     // The auto-run effect used to refire every time loading() flipped
     // false — a zero-result search looped indefinitely (constant
     // "reloading"). It must attempt exactly once and stop.
-    mockedApi.searchArtworks.mockImplementation(
-      () =>
-        new Promise((res) =>
-          setTimeout(
-            () =>
-              res({
-                illusts: [],
-                total: 0,
-                last_page: 0,
-                page: 1,
-                next_url: null,
-                popular: [],
-                related_tags: [],
-              }),
-            10
-          )
-        )
+    server.use(
+      http.get("/api/search/artworks", async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return HttpResponse.json({
+          illusts: [],
+          total: 0,
+          last_page: 0,
+          page: 1,
+          next_url: null,
+          popular: [],
+          related_tags: [],
+        });
+      })
     );
     const { container } = render(() => (
       <SearchScreen
@@ -387,15 +384,19 @@ describe("SearchScreen", () => {
         }}
       />
     ));
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
     // Give any runaway loop time to fire extra calls, then assert one.
     await new Promise((r) => setTimeout(r, 120));
-    expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(1);
+    expect(requestCount("/api/search/artworks")).toBe(1);
     expect(container.textContent).toContain("No results");
   });
 
   it("a restored search that FAILS does not retry in an infinite loop", async () => {
-    mockedApi.searchArtworks.mockRejectedValue(new Error("boom"));
+    server.use(
+      http.get("/api/search/artworks", () =>
+        new HttpResponse("boom\n", { status: 502 })
+      )
+    );
     const { container } = render(() => (
       <SearchScreen
         {...baseProps}
@@ -419,30 +420,33 @@ describe("SearchScreen", () => {
         }}
       />
     ));
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
     await new Promise((r) => setTimeout(r, 120));
-    expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(1);
+    expect(requestCount("/api/search/artworks")).toBe(1);
     expect(container.textContent).toContain("Couldn't search");
   });
 });
-
 
 describe("SearchScreen pagination failure", () => {
   it("a failed next page stops auto-pagination; the retry button recovers", async () => {
     // Page 1 (last_page 2) succeeds → hasMore true → the sentinel
     // auto-fires page 2, which fails → must NOT storm.
-    mockedApi.searchArtworks
-      .mockResolvedValueOnce(artworksResp(1, 2))
-      .mockRejectedValueOnce(new Error("429: rate limited"))
-      .mockResolvedValueOnce(artworksResp(2, 2));
-    const { container } = render(() => <SearchScreen {...baseProps} />);
-    const input = container.querySelector(".search-input") as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: "fantasy" } });
-    await fireEvent.submit(input.closest("form")!);
-
-    await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(2)
+    let page2Calls = 0;
+    server.use(
+      http.get("/api/search/artworks", ({ request }) => {
+        const p = Number(new URL(request.url).searchParams.get("p") ?? "1");
+        if (p === 1) return HttpResponse.json(artworksResp(1, 2));
+        page2Calls++;
+        if (page2Calls === 1) {
+          return new HttpResponse("rate limited\n", { status: 429 });
+        }
+        return HttpResponse.json(artworksResp(2, 2));
+      })
     );
+    const { container } = render(() => <SearchScreen {...baseProps} />);
+    await search(container, "fantasy");
+
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(2));
     await waitFor(() =>
       expect(
         container.querySelector(".feed-sentinel .mode-pill")?.textContent
@@ -451,20 +455,18 @@ describe("SearchScreen pagination failure", () => {
 
     // No storm: still exactly 2 after a long settle.
     await new Promise((r) => setTimeout(r, 400));
-    expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(2);
+    expect(requestCount("/api/search/artworks")).toBe(2);
 
     // Retry recovers: page 2 lands, 6 works total.
     await fireEvent.click(
       container.querySelector(".feed-sentinel .mode-pill")!
     );
-    await waitFor(() =>
-      expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(3)
-    );
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(3));
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(6)
     );
     // hasMore false (p=2 = last_page) → no further fires.
     await new Promise((r) => setTimeout(r, 400));
-    expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(3);
+    expect(requestCount("/api/search/artworks")).toBe(3);
   });
 });

@@ -12,46 +12,78 @@ function topRelatedCards(container: HTMLElement) {
 
 import { makeFeedOf, makeFeed, makeIllust } from "./test-fixtures";
 
-vi.mock("./api", () => ({
-  api: {
-    getStreet: vi.fn(),
-    getTop: vi.fn(),
-    getRecommended: vi.fn(),
-    getWorkRecs: vi.fn(),
-    getNextPage: vi.fn(),
-    getRelated: vi.fn(),
-    getUserIllusts: vi.fn(),
-    getUgoiraMeta: vi.fn(),
-    getAuthStatus: vi.fn(),
-    getBookmarkIds: vi.fn(),
-    getBlockedTags: vi.fn(),
-    setBlockedTags: vi.fn(async () => {}),
-    getImageSize: vi.fn(),
-    setImageSize: vi.fn(async () => {}),
-    getFeedViewMode: vi.fn(),
-    setFeedViewMode: vi.fn(async () => {}),
-    getArtistViewMode: vi.fn(),
-    setArtistViewMode: vi.fn(async () => {}),
-    gateStatus: vi.fn(),
-    gateUnlock: vi.fn(async () => {}),
-    getBookmarks: vi.fn(),
-    getBookmarksNext: vi.fn(),
-    getBookmarkTags: vi.fn(),
-    searchArtworks: vi.fn(),
-    searchUsers: vi.fn(),
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    follow: vi.fn(async () => {}),
-    unfollow: vi.fn(async () => {}),
-    getFollowed: vi.fn(),
-  },
-  setOnGateLocked: vi.fn(),
-  setOnRequestError: vi.fn(),
-  logEvent: vi.fn(),
+vi.mock("./api/client", async () => {
+  const actual = await vi.importActual("./api/client");
+  return {
+    logEvent: vi.fn(),
+    reportApiError: vi.fn(),
+    ApiError: actual.ApiError,
+    setOnGateLocked: vi.fn(),
+    setOnRequestError: vi.fn(),
+  };
+});
+vi.mock("./api/feeds", () => ({
+  getStreet: vi.fn(),
+  getTop: vi.fn(),
+  getRecommended: vi.fn(),
+  getNextPage: vi.fn(),
+}));
+vi.mock("./api/illust", () => ({
+  getWorkRecs: vi.fn(),
+  getRelated: vi.fn(),
+  like: vi.fn(async () => {}),
+  unlike: vi.fn(async () => {}),
+}));
+vi.mock("./api/follow", () => ({
+  getUserIllusts: vi.fn(),
+  follow: vi.fn(async () => {}),
+  unfollow: vi.fn(async () => {}),
+  getFollowed: vi.fn(),
+}));
+vi.mock("./api/search", () => ({
+  getUgoiraMeta: vi.fn(),
+  searchArtworks: vi.fn(),
+  searchUsers: vi.fn(),
+}));
+vi.mock("./api/bookmarks", () => ({
+  getBookmarkIds: vi.fn(),
+  getBookmarks: vi.fn(),
+  getBookmarksNext: vi.fn(),
+  getBookmarkTags: vi.fn(),
+}));
+vi.mock("./api/prefs", () => ({
+  getBlockedTags: vi.fn(),
+  setBlockedTags: vi.fn(async () => {}),
+  getImageSize: vi.fn(),
+  setImageSize: vi.fn(async () => {}),
+  getFeedViewMode: vi.fn(),
+  setFeedViewMode: vi.fn(async () => {}),
+  getArtistViewMode: vi.fn(),
+  setArtistViewMode: vi.fn(async () => {}),
+}));
+vi.mock("./api/auth", () => ({
+  gateStatus: vi.fn(),
+  gateUnlock: vi.fn(async () => {}),
+  getAuthStatus: vi.fn(),
 }));
 
-import { api, setOnGateLocked, setOnRequestError } from "./api";
-const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+import { setOnGateLocked, setOnRequestError } from "./api/client";
+import * as feeds from "./api/feeds";
+import * as illust from "./api/illust";
+import * as follow from "./api/follow";
+import * as search from "./api/search";
+import * as bookmarks from "./api/bookmarks";
+import * as prefs from "./api/prefs";
+import * as auth from "./api/auth";
+const mockedApi = {
+  ...feeds,
+  ...illust,
+  ...follow,
+  ...search,
+  ...bookmarks,
+  ...prefs,
+  ...auth,
+} as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 beforeEach(() => {
   // Session snapshots must not leak between tests (a leftover
@@ -312,7 +344,7 @@ describe("App", () => {
     const reg = vi.mocked(setOnRequestError);
     expect(reg).toHaveBeenCalledTimes(1);
     // Simulate a request() failure firing mid-session (the detection
-    // itself is pinned in api.test.ts and the e2e spec).
+    // itself is pinned in api/client.test.ts and the e2e spec).
     (reg.mock.calls[0][0] as (message: string) => void)("Request failed (502)");
     const toastEl = container.querySelector(".error-toast");
     expect(toastEl).not.toBeNull();
@@ -330,7 +362,7 @@ describe("App", () => {
     expect(reg).toHaveBeenCalledTimes(1);
     // The live trigger is a 403 "gate locked" inside request() — this
     // simulates that firing mid-session (unit-testable wiring; the 403
-    // detection itself is pinned in api.test.ts and the e2e spec).
+    // detection itself is pinned in api/client.test.ts and the e2e spec).
     (reg.mock.calls[0][0] as () => void)();
     expect(container.querySelector(".gate-screen")).not.toBeNull();
     expect(container.querySelectorAll(".feed-card").length).toBe(0);
@@ -1274,6 +1306,49 @@ describe("App", () => {
         ".search-screen .search-input"
       ) as HTMLInputElement;
       expect(input.value).toBe("snow");
+    });
+
+    it("opening a search page during a close animation keeps the new top layer alive", async () => {
+      // Regression: opening during the 260ms slide-out used to count the
+      // exiting layer when computing the new layer's key index — the
+      // key↔array identity desynced, topZ resolved an undefined entry,
+      // and the new top layer rendered black (images suppressed). The
+      // open must finalize the pending close first.
+      mockedApi.getStreet.mockResolvedValue(
+        makeFeed([
+          makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+          makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+          makeIllust({ id: 3, tags: [{ name: "storm" }] }),
+        ])
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      await tapChip(container, "rain");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+
+      // Close the top (#rain) and IMMEDIATELY open #storm — inside the
+      // slide-out window, before the 260ms removal timer fires.
+      const top = container.querySelectorAll(".search-screen")[1];
+      fireEvent.click(top.querySelector(".related-back")!);
+      await tapChip(container, "storm");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+
+      // Long after the close timeout, the TOP layer's images must be
+      // live (the /api/img proxy path), not the suppression pixel.
+      await new Promise((r) => setTimeout(r, 400));
+      const views = container.querySelectorAll(".search-screen");
+      const topImg = views[views.length - 1].querySelector("img");
+      expect(topImg?.getAttribute("src")).toContain("/api/img");
     });
 
     it("caps search pages at MAX_SEARCH_DEPTH with a toast", async () => {

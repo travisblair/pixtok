@@ -1,14 +1,15 @@
 import { For } from "solid-js";
+import type { ContentMode } from "../types";
 
 /**
  * All | R18 content pills — shared by the Ranking (top row), Newest, and
  * Illustrations (top page) feeds.
  */
 export default function ContentPills(props: {
-  content: string; // "all" | "r18"
-  onChange: (content: string) => void;
+  content: ContentMode;
+  onChange: (content: ContentMode) => void;
 }) {
-  const modes = [
+  const modes: { value: ContentMode; label: string }[] = [
     { value: "all", label: "All" },
     { value: "r18", label: "R18" },
   ];

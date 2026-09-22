@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// followStateTTL is the follow-state cache window (see newFollowStateCache).
+const followStateTTL = 30 * time.Minute
+
 // followStateCache — TTL cache + per-user-id single-flight for
 // IsFollowed.
 //
@@ -32,7 +35,8 @@ type followStateEntry struct {
 // followStateCall is a single-flight ticket. The leader performs the
 // upstream fetch and calls finish(); followers block on done and read
 // value/err after it closes. epoch is the id's epoch when the call
-// started — finish() stores only if it still matches.
+// started — finish() stores only if it still matches, then clears the
+// marker unconditionally.
 type followStateCall struct {
 	done  chan struct{}
 	value bool
@@ -79,18 +83,32 @@ func (f *followStateCache) getOrStart(id string) (value bool, fresh bool, call *
 
 // invalidate drops the cached value for id and bumps the id's epoch so
 // an in-flight call (started before this invalidation) is discarded by
-// finish() instead of resurrecting the stale value. Bounded: epochs are
-// deleted by finish() once the last call for an id completes.
+// finish() instead of resurrecting the stale value. The marker exists
+// only to supersede that call: finish() deletes it unconditionally when
+// the call completes, so epochs can never accumulate dead entries.
 func (f *followStateCache) invalidate(id string) {
 	f.mu.Lock()
 	delete(f.items, id)
-	f.epochs[id]++
+	if _, inflight := f.inflight[id]; inflight {
+		// Supersede the in-flight call; its finish() sees the bumped
+		// epoch, drops the value, and deletes the marker when it
+		// completes.
+		f.epochs[id]++
+	} else {
+		// Nothing in flight — no call predates this invalidation, so
+		// there is nothing to supersede. Drop any marker now instead
+		// of leaving it for a future finish() (possibly never) to
+		// clean up.
+		delete(f.epochs, id)
+	}
 	f.mu.Unlock()
 }
 
 // finish stores a successful result (errors are NEVER cached) and wakes
 // the followers. A result whose epoch was bumped by invalidate() is
-// dropped — it predates the user's own toggle.
+// dropped — it predates the user's own toggle. Either way the id's
+// epoch marker is then deleted: its only job was superseding THIS
+// call, and once the call is done no later call needs it.
 func (f *followStateCache) finish(id string, call *followStateCall, value bool, err error) {
 	f.mu.Lock()
 	delete(f.inflight, id)
@@ -109,9 +127,12 @@ func (f *followStateCache) finish(id string, call *followStateCall, value bool, 
 			}
 		}
 	}
-	if f.epochs[id] == call.epoch {
-		delete(f.epochs, id)
-	}
+	// Delete the marker unconditionally: it exists only to supersede
+	// THIS call, and once the call is finished no later call needs
+	// it. (The old epoch-matched condition leaked a bumped marker
+	// forever whenever invalidate() landed while the call was in
+	// flight.)
+	delete(f.epochs, id)
 	f.mu.Unlock()
 	call.value = value
 	call.err = err

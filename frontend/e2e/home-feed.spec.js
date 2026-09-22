@@ -98,7 +98,7 @@ test.describe("Home feed (street)", () => {
 
   test("Discover feed infinite-scrolls: appends nextBatch when sentinel visible", async ({ page }) => {
     const mocks = await setupApiMocks(page, {
-      recsBatch: makeFeedOf(5, 2001, "/api/next?cursor=mock1"),
+      recsBatch: makeFeedOf(5, 2001, "https://app-api.pixiv.net/v1/illust/recommended?offset=0"),
       nextBatch: makeFeedOf(10, 4001, null),
     });
     await gotoApp(page);
@@ -114,7 +114,7 @@ test.describe("Home feed (street)", () => {
     await scrollFeedToBottom(page);
     await expectMainFeedCount(page, 15);
     await expect.poll(() => mocks.nextCalls.length).toBe(1);
-    expect(mocks.nextCalls[0].url).toContain("cursor=mock1");
+    expect(mocks.nextCalls[0].url).toContain("recommended");
   });
 });
 

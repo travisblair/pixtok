@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("./api", () => ({ logEvent: vi.fn() }));
+vi.mock("./api/client", () => ({ logEvent: vi.fn() }));
 
-import { logEvent } from "./api";
+import { logEvent } from "./api/client";
 import { installCrashTrap, uploadCrashBuffer } from "./crash-trap";
 
 const KEY = "pixtok_crash_ring";

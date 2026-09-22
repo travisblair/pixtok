@@ -45,6 +45,11 @@ type gate struct {
 	failures     int
 	lastFailTime time.Time
 	slots        chan struct{}
+	// hashSlots bounds CONCURRENT bcrypt compares: the sleep slot above
+	// is only taken after the compare, so it can never bound the compare
+	// itself. Without this budget a wrong-password flood runs unbounded
+	// concurrent bcrypt.
+	hashSlots chan struct{}
 }
 
 // newGate builds the gate from the configured password. Fail-closed
@@ -54,7 +59,7 @@ type gate struct {
 // fails loudly. Security-sensitive configuration must never silently
 // degrade.
 func newGate(passwordHash string, allowPlaintext bool) (*gate, error) {
-	g := &gate{slots: make(chan struct{}, 10)}
+	g := &gate{slots: make(chan struct{}, 10), hashSlots: make(chan struct{}, 8)}
 	if passwordHash == "" {
 		return g, nil // no password configured — gate disabled
 	}
@@ -115,19 +120,51 @@ func (g *gate) failureDelay() time.Duration {
 	}
 }
 
+// tarpitMaxSleep caps a single tarpit sleep: the sleep runs BEFORE the
+// 401 is written, and the server kills a handler cycle that outlives
+// the connection's write deadline — an uncapped 30s/60s sleep could
+// only ever write its 401 to a dead connection (exactly what the
+// reorder that dropped the old 10s cap reintroduced). 25s keeps the
+// 401 under the WriteTimeout with margin for the write itself; the
+// longer tiers collapse onto the cap.
+const tarpitMaxSleep = 25 * time.Second
+
+// tarpitSleep returns the effective sleep before a failed attempt's
+// 401: zero when the spacing guard skips the tarpit (the previous
+// failure was ≥2s ago — a slow human retry is not a burst) or when no
+// delay tier applies, otherwise the tier delay capped at
+// tarpitMaxSleep so the 401 stays under the WriteTimeout.
+func tarpitSleep(delay time.Duration, sinceLast time.Duration) time.Duration {
+	if delay <= 0 || sinceLast >= 2*time.Second {
+		return 0
+	}
+	return min(delay, tarpitMaxSleep)
+}
+
 // gateFailureDecay: failures older than this stop counting against the
 // owner (reviewer finding): the counter never decayed, so a single old
 // attack left the sole user facing 60s tarpits indefinitely.
 const gateFailureDecay = 10 * time.Minute
 
-func (g *gate) recordFailure() {
+// recordFailure registers a failed attempt and returns the time since
+// the previous failure (zero when there was none). The gap is captured
+// under the same lock as the increment: the reorder measured
+// time.Since(lastFailTime) AFTER calling this, and since this stamps
+// lastFailTime = now, the spacing guard always read ~0 — even
+// deliberately spaced retries slept the full tier.
+func (g *gate) recordFailure() time.Duration {
 	g.mu.Lock()
-	if g.failures > 0 && time.Since(g.lastFailTime) > gateFailureDecay {
+	defer g.mu.Unlock()
+	var sinceLast time.Duration
+	if !g.lastFailTime.IsZero() {
+		sinceLast = time.Since(g.lastFailTime)
+	}
+	if g.failures > 0 && sinceLast > gateFailureDecay {
 		g.failures = 0 // stale attack — start a fresh streak
 	}
 	g.failures++
 	g.lastFailTime = time.Now()
-	g.mu.Unlock()
+	return sinceLast
 }
 
 func (g *gate) recordSuccess() {
@@ -140,9 +177,17 @@ func (g *gate) recordSuccess() {
 // endpoints (status + unlock) and /health. Everything else — feeds,
 // images, the proxied login, prefs — is gated.
 func gatePathAllowed(path string) bool {
-	return path == "/api/gate/status" ||
+	if path == "/api/gate/status" ||
 		path == "/api/gate" ||
-		path == "/health"
+		path == "/health" {
+		return true
+	}
+	// Login-flow continuation legs (root-relative POSTs from pixiv's
+	// proxied SPA): they arrive mid-login, when the gate is by definition
+	// still locked. Flow-cookie gated inside serveProxy.
+	return path == "/account-selected" || path == "/account-selected/" ||
+		path == "/web/v1/login" || path == "/web/v1/login/" ||
+		path == "/web/v1/users/auth/pixiv/start" || path == "/web/v1/users/auth/pixiv/start/"
 }
 
 // middleware wraps the mux: gated routes 403 without a valid cookie.
@@ -197,7 +242,62 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 			_, _ = w.Write([]byte(`{"ok":true}`))
 			return
 		}
-		// Concurrency cap: when the tarpit is saturated, fall back to 429.
+		// Concurrency cap moved BELOW the password check: the slot now
+		// bounds concurrent wrong-password SLEEPERS only. The owner's
+		// correct unlock never contends with them (the old order 429'd
+		// the owner during a flood).
+
+		var body struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+
+		// Bound the bcrypt compare itself — the sleep slot below is
+		// taken only AFTER the compare, so it never bounded this: a
+		// wrong-password flood would otherwise run unbounded concurrent
+		// bcrypt. Non-blocking: at most 8 compares in flight; when all
+		// are busy the attempt is refused up front (429). The owner can
+		// hit that refusal mid-flood too, but only briefly — hash slots
+		// free in bcrypt time (tens of ms), and the correct password
+		// never queues behind a SLEEPER.
+		select {
+		case g.hashSlots <- struct{}{}:
+		default:
+			http.Error(w, "too many attempts", http.StatusTooManyRequests)
+			return
+		}
+		correct := bcrypt.CompareHashAndPassword(g.hash, []byte(body.Password)) == nil
+		<-g.hashSlots // release before the sleep phase — a sleeper must not hold a hash slot
+
+		if correct {
+			g.recordSuccess()
+			// The unlock response carries the auth cookie — never cache
+			// it (reviewer finding).
+			w.Header().Set("Cache-Control", "no-store")
+			http.SetCookie(w, &http.Cookie{
+				Name:     gateCookie,
+				Value:    g.validToken(),
+				Path:     "/",
+				MaxAge:   30 * 24 * 60 * 60,
+				HttpOnly: true,
+				Secure:   secureForRequest(r),
+				SameSite: http.SameSiteLaxMode,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+
+		// Spacing-guard input: the gap to the PREVIOUS failure, from
+		// recordFailure() before it stamps lastFailTime = now. Measuring
+		// time.Since(lastFailTime) after the stamp always read ~0, so
+		// even spaced-out attempts slept the full tier.
+		sinceLast := g.recordFailure()
+
+		// The slot bounds CONCURRENT SLEEPERS only (the check is done).
 		select {
 		case g.slots <- struct{}{}:
 			defer func() { <-g.slots }()
@@ -208,42 +308,15 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 
 		g.mu.Lock()
 		delay := g.failureDelay()
-		sinceLast := time.Since(g.lastFailTime)
 		g.mu.Unlock()
-		// Slow successive failures additionally (the delay grows the
-		// longer a burst goes on, even below the 5-failure floor).
-		if delay > 0 && sinceLast < 2*time.Second {
-			time.Sleep(min(delay, 10*time.Second))
+
+		// Slow successive failures additionally, capped so the 401 stays
+		// deliverable (see tarpitMaxSleep). Spaced-out retries skip the
+		// sleep entirely.
+		if sleep := tarpitSleep(delay, sinceLast); sleep > 0 {
+			time.Sleep(sleep)
 		}
 
-		var body struct {
-			Password string `json:"password"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
-			return
-		}
-
-		if bcrypt.CompareHashAndPassword(g.hash, []byte(body.Password)) != nil {
-			g.recordFailure()
-			http.Error(w, "wrong password", http.StatusUnauthorized)
-			return
-		}
-		g.recordSuccess()
-
-		// The unlock response carries the auth cookie — never cache it
-		// (reviewer finding).
-		w.Header().Set("Cache-Control", "no-store")
-		http.SetCookie(w, &http.Cookie{
-			Name:     gateCookie,
-			Value:    g.validToken(),
-			Path:     "/",
-			MaxAge:   30 * 24 * 60 * 60,
-			HttpOnly: true,
-			Secure:   secureForRequest(r),
-			SameSite: http.SameSiteLaxMode,
-		})
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		http.Error(w, "wrong password", http.StatusUnauthorized)
 	})
 }

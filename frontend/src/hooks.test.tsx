@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createSignal } from "solid-js";
 import { render } from "@solidjs/testing-library";
-import { useFeedSentinel } from "./hooks";
+import { useFeedSentinel } from "./hooks/useFeedSentinel";
 
 /**
  * useFeedSentinel wiring tests.

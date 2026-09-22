@@ -1,31 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent } from "@solidjs/testing-library";
+import { describe, it, expect, vi } from "vitest";
+import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { http, HttpResponse } from "msw";
 import FeedCard from "./FeedCard";
-import { makeIllust, makeMultiPageIllust } from "../test-fixtures";
+import { makeIllust, makeMultiPageIllust } from "../../test-fixtures";
+import { requestCount, requestsTo, server } from "../../test/msw/server";
 
-vi.mock("../api", () => ({
-  api: {
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    follow: vi.fn(async () => {}),
-    unfollow: vi.fn(async () => {}),
-    getFollowed: vi.fn(),
-  },
-  logEvent: vi.fn(),
-}));
-
-import { api } from "../api";
-const mockedApi = api as unknown as {
-  like: ReturnType<typeof vi.fn>;
-  unlike: ReturnType<typeof vi.fn>;
-  getFollowed: ReturnType<typeof vi.fn>;
-};
-
-beforeEach(() => {
-  mockedApi.like.mockReset().mockResolvedValue(undefined);
-  mockedApi.unlike.mockReset().mockResolvedValue(undefined);
-  mockedApi.getFollowed.mockReset().mockResolvedValue({ followed: false });
-});
+// Real api/illust + api/follow -> request() -> MSW. Heart clicks assert
+// the wire POSTs (/api/illust/:id/like|unlike) instead of a module mock;
+// FollowButton's getFollowed answers from the shared default handler.
 
 describe("FeedCard", () => {
   it("renders title, artist, and stats", () => {
@@ -42,28 +24,41 @@ describe("FeedCard", () => {
     expect(btn.textContent).toBe("🤍");
 
     await fireEvent.click(btn);
-    expect(mockedApi.like).toHaveBeenCalledWith(1);
+    expect(requestsTo("/api/illust/1/like")).toHaveLength(1);
     expect(btn.textContent).toBe("❤️");
 
+    // The in-flight lock releases when the POST settles (MSW resolves
+    // over microtasks) — flush a macrotask before the unlike tap.
+    await new Promise((r) => setTimeout(r, 0));
     await fireEvent.click(btn);
-    expect(mockedApi.unlike).toHaveBeenCalledWith(1);
+    expect(requestsTo("/api/illust/1/unlike")).toHaveLength(1);
     expect(btn.textContent).toBe("🤍");
   });
 
   it("reverts the heart when the API rejects", async () => {
-    mockedApi.like.mockRejectedValue(new Error("like failed: 401"));
+    server.use(
+      http.post("/api/illust/:id/like", () =>
+        new HttpResponse("upstream error\n", { status: 502 })
+      )
+    );
     const illust = makeIllust({ id: 1 });
     const { container } = render(() => <FeedCard illust={illust} />);
     const btn = container.querySelector(".like-btn") as HTMLButtonElement;
 
     await fireEvent.click(btn);
-    expect(btn.textContent).toBe("🤍"); // reverted
+    await waitFor(() => expect(btn.textContent).toBe("🤍")); // reverted
   });
 
   it("ignores double-taps while a request is in flight", async () => {
-    let resolveLike!: () => void;
-    mockedApi.like.mockImplementation(
-      () => new Promise<void>((res) => { resolveLike = res; })
+    let releaseLike!: () => void;
+    const pending = new Promise<void>((res) => {
+      releaseLike = res;
+    });
+    server.use(
+      http.post("/api/illust/:id/like", async () => {
+        await pending;
+        return HttpResponse.json({ ok: true });
+      })
     );
     const illust = makeIllust({ id: 1 });
     const { container } = render(() => <FeedCard illust={illust} />);
@@ -71,9 +66,9 @@ describe("FeedCard", () => {
 
     await fireEvent.click(btn);
     await fireEvent.click(btn); // busy — ignored
-    expect(mockedApi.like).toHaveBeenCalledTimes(1);
+    expect(requestCount("/api/illust/1/like")).toBe(1);
 
-    resolveLike();
+    releaseLike();
   });
 
   it("calls onLike after a successful like", async () => {
@@ -83,7 +78,7 @@ describe("FeedCard", () => {
       <FeedCard illust={illust} onLike={onLike} />
     ));
     await fireEvent.click(container.querySelector(".like-btn")!);
-    expect(onLike).toHaveBeenCalledWith(illust);
+    await waitFor(() => expect(onLike).toHaveBeenCalledWith(illust));
   });
 
   it("onTap fires for card body but not for like button or artist link", async () => {

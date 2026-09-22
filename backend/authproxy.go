@@ -217,6 +217,10 @@ func isURLBoundary(b byte) bool {
 // login-flow cookie set at /api/auth/pkce/start (only someone who
 // started a flow through the key-gated start route gets proxy access;
 // and the flow cookie expires in 10 minutes).
+// authProxyClientTimeout: login-flow proxy responses are relayed to the
+// browser, never followed server-side, so 30s is ample for a navigation.
+const authProxyClientTimeout = 30 * time.Second
+
 func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// CRITICAL: never follow redirects server-side. Each upstream
 	// response (including 302s) must go back to the BROWSER so it
@@ -225,7 +229,7 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// our origin. With default redirect-following the client would hop
 	// to real pixiv hosts directly, bypassing every rewrite.
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: authProxyClientTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

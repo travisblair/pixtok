@@ -1,11 +1,13 @@
 import { createSignal, createEffect, For, Show } from "solid-js";
-import { api } from "../api";
+import { getNextPage } from "../api/feeds";
+import { getUserIllusts } from "../api/follow";
+import { reportApiError } from "../api/client";
 import type { PixivIllust } from "../types";
-import FeedCard from "./FeedCard";
+import FeedCard from "./FeedCard/FeedCard";
 import GridFeed from "./GridFeed";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
 import { blockedTags, artistViewMode } from "../store";
-import { useFeedSentinel } from "../hooks";
+import { useFeedSentinel } from "../hooks/useFeedSentinel";
 import FollowButton from "./FollowButton";
 
 /**
@@ -63,8 +65,8 @@ export default function ArtistView(props: {
     setLoadMoreError(false);
     try {
       const data = nextUrl()
-        ? await api.getNextPage(nextUrl()!)
-        : await api.getUserIllusts(props.userId);
+        ? await getNextPage(nextUrl()!)
+        : await getUserIllusts(props.userId);
       if (seq !== reqSeq) return;
       const fresh = dedupeSeen(
         seen,
@@ -74,6 +76,7 @@ export default function ArtistView(props: {
       setNextUrl(data.next_url);
       setError(false);
     } catch (err) {
+      reportApiError(err);
       if (seq === reqSeq) {
         console.error("Failed to load artist works:", err);
         setLoadMoreError(true);

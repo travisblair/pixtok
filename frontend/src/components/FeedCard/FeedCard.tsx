@@ -6,17 +6,21 @@ import {
   Show,
   onCleanup,
 } from "solid-js";
-import type { PixivIllust } from "../types";
-import { api } from "../api";
+import type { PixivIllust } from "../../types";
+import { like as likeWork, unlike as unlikeWork } from "../../api/illust";
+import { reportApiError } from "../../api/client";
 import {
   sliderWindowBounds,
   computeLoadDelay,
   sliderWindowSize,
   normalizeTagPairs,
-} from "../helpers";
-import { getLikeState, imageSize } from "../store";
-import UgoiraPlayer from "./UgoiraPlayer";
-import FollowButton from "./FollowButton";
+  type TagPair,
+} from "../../helpers";
+import { getLikeState, imageSize } from "../../store";
+import UgoiraPlayer from "../UgoiraPlayer";
+import FollowButton from "../FollowButton";
+import { createSettleDetector } from "./settle";
+import { computeTagLines, type TagLines } from "./tagLayout";
 
 const PIXEL =
   "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
@@ -67,9 +71,18 @@ export default function FeedCard(props: {
   let rootRef: HTMLDivElement | undefined;
   let unloadTimer: ReturnType<typeof setTimeout> | undefined;
   let loadTimer: ReturnType<typeof setTimeout> | undefined;
-  let settleTimer: ReturnType<typeof setTimeout> | undefined;
-  let settleRead: number | undefined;
-  let scrollRaf = 0; // rAF handle for the onScroll throttle
+
+  // Slider settle detector (settle.ts): polls scrollLeft until the snap
+  // rests, then commits the true page — the load window follows the
+  // settled page, not the mid-snap index iOS rounds to.
+  const settle = createSettleDetector({
+    getElement: () => pagesRef,
+    onPage: setCurrentPage,
+    onSettle: (idx) => {
+      setSettledPage(idx);
+      setCurrentPage(idx); // the counter catches up to reality
+    },
+  });
 
   const pages = props.illust.meta_pages?.length
     ? props.illust.meta_pages
@@ -86,12 +99,8 @@ export default function FeedCard(props: {
   // horizontally — overflow rows interleave onto the two lines
   // (rows 1,3,5→top; 2,4,6→bottom) so reading order stays row-major.
   // Measurement: render the natural wrap once, bucket chips into rows by
-  // offsetTop, then re-pack if there are more than 2 rows.
-  type TagPair = { name: string; translated?: string };
-  const [tagLines, setTagLines] = createSignal<{
-    top: TagPair[];
-    bottom: TagPair[];
-  } | null>(null);
+  // offsetTop, then re-pack if there are more than 2 rows (tagLayout.ts).
+  const [tagLines, setTagLines] = createSignal<TagLines | null>(null);
   let tagRowRef: HTMLDivElement | undefined;
 
   function measureTagRow() {
@@ -100,36 +109,7 @@ export default function FeedCard(props: {
     const chips = Array.from(
       el.querySelectorAll<HTMLElement>(".card-tag-chip")
     );
-    if (chips.length === 0) {
-      setTagLines(null);
-      return;
-    }
-    let prevTop: number | null = null;
-    const rows: number[][] = [];
-    let cur: number[] = [];
-    for (let i = 0; i < chips.length; i++) {
-      const t = chips[i].offsetTop;
-      if (prevTop === null || t === prevTop) {
-        cur.push(i);
-      } else {
-        rows.push(cur);
-        cur = [i];
-      }
-      prevTop = t;
-    }
-    rows.push(cur);
-    if (rows.length <= 2) {
-      setTagLines(null); // natural wrap already correct
-      return;
-    }
-    const pairs = normalizeTagPairs(props.illust);
-    const top: TagPair[] = [];
-    const bottom: TagPair[] = [];
-    rows.forEach((row, ri) => {
-      const target = ri % 2 === 0 ? top : bottom;
-      for (const i of row) target.push(pairs[i]);
-    });
-    setTagLines({ top, bottom });
+    setTagLines(computeTagLines(chips, normalizeTagPairs(props.illust)));
   }
 
   // Re-measure whenever the row mounts/updates (Solid effects run after
@@ -185,11 +165,11 @@ export default function FeedCard(props: {
         clearTimeout(unloadTimer);
         if (!active()) {
           clearTimeout(loadTimer);
-          const r = entry.boundingClientRect;
+          const rect = entry.boundingClientRect;
           const rb = entry.rootBounds;
           const vh = rb?.height || window.innerHeight;
           const dist = rb
-            ? Math.max(rb.top - r.bottom, r.top - rb.bottom, 0)
+            ? Math.max(rb.top - rect.bottom, rect.top - rb.bottom, 0)
             : 0;
           const delay = computeLoadDelay({ distPx: dist, viewportPx: vh });
           loadTimer = setTimeout(() => setActive(true), delay);
@@ -209,7 +189,7 @@ export default function FeedCard(props: {
       clearTimeout(unloadTimer);
       clearTimeout(loadTimer);
     });
-    onCleanup(() => clearTimeout(settleTimer));
+    onCleanup(() => settle.dispose());
   });
 
   // When the card deactivates, reset per-page state so re-activation
@@ -222,12 +202,14 @@ export default function FeedCard(props: {
     }
   });
 
+  // Load-window span for the slider — one source for both the page-load
+  // predicate and the render virtualization (spans live AND settled).
+  const loadWindow = createMemo(() =>
+    sliderWindowBounds(currentPage(), settledPage(), windowSize)
+  );
+
   function shouldLoad(i: number) {
-    const [lo, hi] = sliderWindowBounds(
-      currentPage(),
-      settledPage(),
-      windowSize
-    );
+    const [lo, hi] = loadWindow();
     return active() && i >= lo && i <= hi;
   }
 
@@ -259,13 +241,14 @@ export default function FeedCard(props: {
     setLiked(newLiked);
     try {
       if (newLiked) {
-        await api.like(props.illust.id);
+        await likeWork(props.illust.id);
         props.onLike?.(props.illust);
       } else {
-        await api.unlike(props.illust.id);
+        await unlikeWork(props.illust.id);
         props.onUnlike?.(props.illust); // bookmarks tab removes the card
       }
-    } catch {
+    } catch (err) {
+      reportApiError(err);
       setLiked(!newLiked); // revert on failure
     } finally {
       setBusy(false);
@@ -292,41 +275,6 @@ export default function FeedCard(props: {
     setAttempts(prev => ({ ...prev, [index]: (prev[index] ?? 0) + 1 }));
   }
 
-  function onScroll() {
-    if (!pagesRef) return;
-    // Re-arm the settle detector. While the snap/momentum animation is
-    // still moving scrollLeft, keep polling; when two reads agree, the
-    // slider is at rest and THAT page owns the load window.
-    clearTimeout(settleTimer);
-    settleRead = undefined;
-    settleTimer = setTimeout(checkSettle, 120);
-    // rAF-throttle the counter update: scroll events can fire several
-    // times per frame mid-gesture, and each one used to re-render the
-    // whole slider. One update per frame is all the eye can see.
-    if (scrollRaf) return;
-    scrollRaf = requestAnimationFrame(() => {
-      scrollRaf = 0;
-      if (!pagesRef) return;
-      const idx = Math.round(pagesRef.scrollLeft / pagesRef.clientWidth);
-      setCurrentPage(idx);
-    });
-  }
-
-  function checkSettle() {
-    if (!pagesRef) return;
-    const left = pagesRef.scrollLeft;
-    const idx = Math.round(left / pagesRef.clientWidth);
-    if (settleRead !== undefined && Math.abs(left - settleRead) < 2) {
-      // At rest (or the snap finished): commit the true resting page.
-      setSettledPage(idx);
-      setCurrentPage(idx); // the counter catches up to reality
-      settleRead = undefined;
-      return;
-    }
-    settleRead = left;
-    settleTimer = setTimeout(checkSettle, 120);
-  }
-
   // DOM virtualization for big sliders: a 120-page work renders only
   // the pages near the load window (+RENDER_MARGIN) as real elements —
   // off-window pages cost nothing: no img elements, no reactive churn,
@@ -336,11 +284,7 @@ export default function FeedCard(props: {
   // stutter every swipe.)
   const RENDER_MARGIN = 2;
   const visiblePageRange = createMemo(() => {
-    const [lo, hi] = sliderWindowBounds(
-      currentPage(),
-      settledPage(),
-      windowSize
-    );
+    const [lo, hi] = loadWindow();
     return [
       Math.max(0, lo - RENDER_MARGIN),
       Math.min(pages.length - 1, hi + RENDER_MARGIN),
@@ -410,11 +354,11 @@ export default function FeedCard(props: {
 
   function handleTap(e: MouseEvent) {
     if (!props.onTap) return;
-    const t = e.target as HTMLElement;
+    const target = e.target as HTMLElement;
     // ignore taps on interactive children (like button, tags button,
     // artist link, page counter, tag chips); slider swipes don't fire
     // click so no conflict there
-    if (t.closest(".like-btn, .tags-btn, a, .page-counter, .card-tag-row")) return;
+    if (target.closest(".like-btn, .tags-btn, a, .page-counter, .card-tag-row")) return;
     props.onTap(props.illust);
   }
 
@@ -429,7 +373,7 @@ export default function FeedCard(props: {
         fallback={renderPage(pages[0], 0)}
       >
         {/* Multi-page slider */}
-        <div class="card-pages" ref={pagesRef} onScroll={onScroll}>
+        <div class="card-pages" ref={pagesRef} onScroll={settle.onScroll}>
           {/* Spacer: keeps the native scroll width = pages.length × 100% */}
           <div
             class="card-pages-spacer"

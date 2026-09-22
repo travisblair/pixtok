@@ -1,24 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { http, HttpResponse } from "msw";
 import RelatedView from "./RelatedView";
 import { makeFeedOf } from "../test-fixtures";
+import { server } from "../test/msw/server";
 
-vi.mock("../api", () => ({
-  api: {
-    getRelated: vi.fn(),
-    getNextPage: vi.fn(),
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    follow: vi.fn(async () => {}),
-    unfollow: vi.fn(async () => {}),
-    getFollowed: vi.fn(async () => ({ followed: false })),
-    getUgoiraMeta: vi.fn(async () => ({ error: false, body: { src: "z", frames: [] } })),
-  },
-  logEvent: vi.fn(),
-}));
-
-import { api } from "../api";
-const mockedApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
+// Real api/illust.getRelated -> request() -> MSW. The initial-load
+// failure is a real 502 from a real request(), then the retry hits the
+// endpoint again and succeeds — the same discrimination the module mock
+// provided (reject once, resolve once), at the wire level.
 
 const anchor = makeFeedOf(1, 900).illusts[0];
 
@@ -34,19 +24,16 @@ const baseProps = {
   onTagsTap: () => {},
 };
 
-beforeEach(() => {
-  mockedApi.getRelated.mockReset();
-  mockedApi.getNextPage.mockReset().mockResolvedValue({ illusts: [], next_url: null });
-});
-
 describe("RelatedView initial-load failure", () => {
   it("a failed initial load offers a retry button that recovers", async () => {
-    mockedApi.getRelated
-      .mockRejectedValueOnce(new Error("upstream down"))
-      .mockResolvedValueOnce({
-        illusts: makeFeedOf(3, 100).illusts,
-        next_url: null,
-      });
+    let calls = 0;
+    server.use(
+      http.get("/api/illust/:id/related", () => {
+        calls++;
+        if (calls === 1) return new HttpResponse("upstream error\n", { status: 502 });
+        return HttpResponse.json(makeFeedOf(3, 100));
+      })
+    );
     const { container } = render(() => <RelatedView {...baseProps} />);
     // The anchor renders immediately; the initial fetch fails.
     await waitFor(() =>

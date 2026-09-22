@@ -30,14 +30,14 @@ export type SearchFilterGetters = {
 
 /** Number of filters currently off their defaults — the Filters badge. */
 export function activeFilterCount(v: SearchFilterValues): number {
-  let n = 0;
-  if (v.order !== DEFAULT_FILTERS.order) n++;
-  if (v.contentMode !== DEFAULT_FILTERS.contentMode) n++;
-  if (v.workType !== DEFAULT_FILTERS.workType) n++;
-  if (v.sMode !== DEFAULT_FILTERS.sMode) n++;
-  if (v.aiType !== DEFAULT_FILTERS.aiType) n++;
-  if (v.dateMode !== "all" || v.scd || v.sce) n++;
-  return n;
+  let count = 0;
+  if (v.order !== DEFAULT_FILTERS.order) count++;
+  if (v.contentMode !== DEFAULT_FILTERS.contentMode) count++;
+  if (v.workType !== DEFAULT_FILTERS.workType) count++;
+  if (v.sMode !== DEFAULT_FILTERS.sMode) count++;
+  if (v.aiType !== DEFAULT_FILTERS.aiType) count++;
+  if (v.dateMode !== "all" || v.scd || v.sce) count++;
+  return count;
 }
 
 function Pills<T extends string>(props: {
@@ -88,7 +88,7 @@ export default function SearchFilters(props: {
   onReset: () => void;
   onClose: () => void;
 }) {
-  const v = props.values;
+  const values = props.values;
   const pick = props.onPick;
 
   return (
@@ -114,7 +114,7 @@ export default function SearchFilters(props: {
             { value: "date_d", label: "Newest" },
             { value: "date", label: "Oldest" },
           ]}
-          current={v.order}
+          current={values.order}
           onPick={(order) => pick({ order })}
         />
       </Section>
@@ -126,7 +126,7 @@ export default function SearchFilters(props: {
             { value: "safe", label: "All ages" },
             { value: "r18", label: "R18" },
           ]}
-          current={v.contentMode}
+          current={values.contentMode}
           onPick={(contentMode) => pick({ contentMode })}
         />
       </Section>
@@ -138,7 +138,7 @@ export default function SearchFilters(props: {
             { value: "illust", label: "Illustrations only" },
             { value: "ugoira", label: "Ugoira only" },
           ]}
-          current={v.workType}
+          current={values.workType}
           onPick={(workType) => pick({ workType })}
         />
       </Section>
@@ -150,7 +150,7 @@ export default function SearchFilters(props: {
             { value: "s_tag_full", label: "Tags (exact)" },
             { value: "s_tc", label: "Title & caption" },
           ]}
-          current={v.sMode}
+          current={values.sMode}
           onPick={(sMode) => pick({ sMode })}
         />
       </Section>
@@ -161,7 +161,7 @@ export default function SearchFilters(props: {
             { value: "0", label: "Display" },
             { value: "1", label: "Hide" },
           ]}
-          current={v.aiType}
+          current={values.aiType}
           onPick={(aiType) => pick({ aiType })}
         />
       </Section>
@@ -172,18 +172,18 @@ export default function SearchFilters(props: {
             { value: "all", label: "All periods" },
             { value: "custom", label: "Custom" },
           ]}
-          current={v.dateMode}
+          current={values.dateMode}
           onPick={(sel) => {
             if (sel === "all") pick({ dateMode: "all", scd: "", sce: "" });
             else pick({ dateMode: "custom" });
           }}
         />
-        <Show when={v.dateMode() === "custom"}>
+        <Show when={values.dateMode() === "custom"}>
           <div class="filter-dates">
             <input
               type="date"
               class="filter-date-input"
-              value={v.scd()}
+              value={values.scd()}
               aria-label="From date"
               onInput={(e) => pick({ scd: (e.currentTarget as HTMLInputElement).value })}
             />
@@ -191,7 +191,7 @@ export default function SearchFilters(props: {
             <input
               type="date"
               class="filter-date-input"
-              value={v.sce()}
+              value={values.sce()}
               aria-label="To date"
               onInput={(e) => pick({ sce: (e.currentTarget as HTMLInputElement).value })}
             />

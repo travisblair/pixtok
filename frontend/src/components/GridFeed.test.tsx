@@ -1,32 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent } from "@solidjs/testing-library";
+import { describe, it, expect, vi } from "vitest";
+import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { http, HttpResponse } from "msw";
 import GridFeed from "./GridFeed";
 import { makeIllust, makeFeedOf } from "../test-fixtures";
 import { getLikeState } from "../store";
+import { requestsTo, server } from "../test/msw/server";
 
-vi.mock("../api", () => ({
-  api: {
-    like: vi.fn(async () => {}),
-    unlike: vi.fn(async () => {}),
-    getUgoiraMeta: vi.fn(),
-  },
-  logEvent: vi.fn(),
-}));
-
-import { api } from "../api";
-const mockedApi = api as unknown as {
-  like: ReturnType<typeof vi.fn>;
-  unlike: ReturnType<typeof vi.fn>;
-  getUgoiraMeta: ReturnType<typeof vi.fn>;
-};
-
-beforeEach(() => {
-  mockedApi.like.mockReset().mockResolvedValue(undefined);
-  mockedApi.unlike.mockReset().mockResolvedValue(undefined);
-  mockedApi.getUgoiraMeta
-    .mockReset()
-    .mockResolvedValue({ error: false, body: { src: "z", frames: [] } });
-});
+// Real api/illust + api/search + api/client -> request() -> MSW. The
+// heart assertions are network-level now: the POST must reach
+// /api/illust/:id/like (the module-mock era asserted like(id); the wire
+// path carries the same id).
 
 describe("GridFeed", () => {
   it("renders one cell per illust with square_medium through the proxy", () => {
@@ -74,25 +57,38 @@ describe("GridFeed", () => {
     expect(btn.textContent).toBe("🤍");
 
     await fireEvent.click(btn);
-    expect(mockedApi.like).toHaveBeenCalledWith(illusts[0].id);
+    expect(
+      requestsTo(`/api/illust/${illusts[0].id}/like`)
+    ).toHaveLength(1);
     expect(btn.textContent).toBe("❤️");
     // A strip card mounted elsewhere for the same illust sees the like.
     expect(getLikeState(illusts[0].id, false).liked()).toBe(true);
 
+    // The component's in-flight lock releases when the POST settles —
+    // MSW's mocked round-trip resolves over microtasks, so a macrotask
+    // flush guarantees the heart is unlocked before the unlike tap.
+    await new Promise((r) => setTimeout(r, 0));
     await fireEvent.click(btn);
-    expect(mockedApi.unlike).toHaveBeenCalledWith(illusts[0].id);
+    expect(
+      requestsTo(`/api/illust/${illusts[0].id}/unlike`)
+    ).toHaveLength(1);
     expect(btn.textContent).toBe("🤍");
   });
 
   it("reverts the heart when the like POST fails", async () => {
-    mockedApi.like.mockRejectedValue(new Error("like failed: 401"));
+    server.use(
+      http.post("/api/illust/:id/like", () =>
+        new HttpResponse("upstream error\n", { status: 502 })
+      )
+    );
     const illusts = makeFeedOf(1, 1).illusts;
     const { container } = render(() => <GridFeed illusts={illusts} />);
     const btn = container.querySelector(
       ".grid-cell-heart"
     ) as HTMLButtonElement;
     await fireEvent.click(btn);
-    expect(btn.textContent).toBe("🤍"); // reverted
+    // Optimistic ❤️ first, then the failed POST reverts it.
+    await waitFor(() => expect(btn.textContent).toBe("🤍")); // reverted
   });
 
   it("ugoira cells render a play badge that does NOT open the stack", async () => {

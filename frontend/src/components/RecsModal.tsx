@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import type { PixivIllust } from "../types";
-import FeedCard from "./FeedCard";
+import FeedCard from "./FeedCard/FeedCard";
 
 export default function RecsModal(props: {
   recs: PixivIllust[];

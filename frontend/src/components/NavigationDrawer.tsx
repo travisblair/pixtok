@@ -1,6 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
-
-type FeedType = "home" | "newest" | "illustrations" | "top" | "recommended" | "bookmarks";
+import type { FeedType } from "../types";
 
 const NAV_ITEMS: { value: FeedType; label: string }[] = [
   { value: "home", label: "Home" },

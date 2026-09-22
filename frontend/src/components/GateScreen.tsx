@@ -1,5 +1,6 @@
 import { createSignal, Show } from "solid-js";
-import { api } from "../api";
+import { gateUnlock } from "../api/auth";
+import { reportApiError } from "../api/client";
 
 /**
  * App-owned password gate: the Funnel URL is public, so everything sits
@@ -18,9 +19,10 @@ export default function GateScreen(props: { onUnlocked: () => void }) {
     setBusy(true);
     setError(false);
     try {
-      await api.gateUnlock(password());
+      await gateUnlock(password());
       props.onUnlocked();
-    } catch {
+    } catch (err) {
+      reportApiError(err);
       setError(true);
       setPassword("");
     } finally {

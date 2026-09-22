@@ -108,6 +108,13 @@ func newPkceStore() *pkceStore {
 }
 
 const pkceTTL = 10 * time.Minute
+
+// Per-response write deadlines for the slow relay routes — the tarpit
+// pattern: the global 15s WriteTimeout covers the whole handler cycle,
+// which multi-MB image relays outlive on the Pi. Ugoira meta rides the
+// same slow path as the zip it describes.
+const ugoiraMetaWriteDeadline = 60 * time.Second
+const imageWriteDeadline = 120 * time.Second
 const pkceMaxEntries = 32
 
 func (s *pkceStore) put(state, verifier string) {
@@ -428,8 +435,10 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 	// ── Search (the site's search pages: tag/free-text artworks + users) ──
 
 	// Bookmarks tab feed: the user's bookmarked works (private by
-	// default — pixtok likes are private). Standard app-API passthrough;
-	// pagination rides the existing /api/next route.
+	// default — pixtok likes are private). WEB-AJAX passthrough — the
+	// page endpoint with tag filters + blind offset pagination (the
+	// app-API bookmarks feed is a different surface and is NOT this
+	// route's source).
 	mux.HandleFunc("GET /api/bookmarks", func(w http.ResponseWriter, r *http.Request) {
 		// The bookmarks PAGE experience (crawl-verified): tag filter +
 		// blind offset pagination + sort, via the web AJAX endpoint.
@@ -472,6 +481,27 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(out)
+	})
+
+	// Private bookmarks: the app-API feed (restrict=private). Pixtok
+	// likes are PRIVATE by design, so this is the pile that mirrors
+	// them — the web page above only lists PUBLIC bookmarks.
+	// Passthrough: the app-API response is already the FeedResponse
+	// shape (illusts + ABSOLUTE app-api next_url). Continuations ride
+	// /api/next, where the allowlist re-validates the URL.
+	mux.HandleFunc("GET /api/bookmarks/private", func(w http.ResponseWriter, r *http.Request) {
+		body, err := api.GetBookmarkIllusts("private")
+		if err != nil {
+			log.Printf("ERROR private bookmarks: %v", err)
+			if errors.Is(err, pixiv.ErrInvalidParam) {
+				http.Error(w, "invalid parameter", http.StatusBadRequest)
+				return
+			}
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
 	})
 
 	mux.HandleFunc("GET /api/bookmarks/tags", func(w http.ResponseWriter, r *http.Request) {
@@ -738,7 +768,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			// the server's global 15s WriteTimeout killed the whole
 			// handler cycle first — the client's longer wait was
 			// illusory. Same override as the image route.
-			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(60 * time.Second)); err != nil {
+			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(ugoiraMetaWriteDeadline)); err != nil {
 				log.Printf("WARNING ugoira meta write deadline: %v", err)
 			}
 			body, err := api.GetUgoiraMeta(id)
@@ -812,14 +842,14 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		// Set here for the CACHE-HIT path, and again after the slot
 		// acquire for misses: time spent QUEUED must not eat the 120s
 		// transfer budget.
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second)); err != nil {
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(imageWriteDeadline)); err != nil {
 			log.Printf("WARNING img write deadline: %v", err)
 		}
 
 		// Check cache first
 		if data, ct, ok := cache.get(imgURL); ok {
 			w.Header().Set("Content-Type", ct)
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Header().Set("Cache-Control", "private, max-age=86400")
 			w.Header().Set("X-Cache", "HIT")
 			w.Write(data)
 			return
@@ -852,7 +882,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 		}
 		defer func() { <-imgFetchSlots }()
 
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second)); err != nil {
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(imageWriteDeadline)); err != nil {
 			log.Printf("WARNING img write deadline: %v", err)
 		}
 
@@ -874,7 +904,7 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			// streamed to w (with their headers) by the client.
 			cache.set(imgURL, body, contentType)
 			w.Header().Set("Content-Type", contentType)
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Header().Set("Cache-Control", "private, max-age=86400")
 			w.Header().Set("X-Cache", "MISS")
 			w.Write(body)
 		}

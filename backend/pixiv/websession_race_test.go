@@ -65,7 +65,7 @@ func TestWebSessionSwapRace(t *testing.T) {
 				}
 				_ = c.webSessionID()
 				_, _ = c.webSession()
-				_, _ = c.GetBookmarkIllusts("public") // uid parse + cookie header read
+				_, _ = c.GetBookmarkIDs("public", 1) // uid parse + cookie header read
 				_, _ = c.webGet(ts.URL + "/x")
 				_, _ = c.GetUgoiraMeta("123")
 			}

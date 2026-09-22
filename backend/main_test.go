@@ -833,6 +833,90 @@ func TestTransformTagTranslationsApplied(t *testing.T) {
 	})
 }
 
+// Regression: pixiv's web-AJAX ids are inconsistently encoded — the
+// bookmarks works[] started serving NUMERIC ids (Sept 2026), which
+// hard-failed the strict string field and 502'd the whole page. The
+// transform must accept both encodings and normalize to string.
+func TestTransformBookmarkPageToleratesNumericIDs(t *testing.T) {
+	raw := `{"error":false,"body":{"works":[
+		{"id":12345,"title":"NumID","illustType":0,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/x/12345_p0_square1200.jpg","userId":9,"userName":"Alice","tags":["オリジナル"],"profileImageUrl":"https://i.pximg.net/p1","createDate":"2026-09-01T00:00:00+09:00","xRestrict":0,"aiType":0,"bookmarkData":{"id":"999"}}
+	],"total":1}}`
+	out, err := transformBookmarkPage([]byte(raw), "", 0, 48, "desc")
+	if err != nil {
+		t.Fatalf("transformBookmarkPage: %v", err)
+	}
+	var resp struct {
+		Illusts []struct {
+			ID   string `json:"id"`
+			User struct {
+				ID string `json:"id"`
+			} `json:"user"`
+		} `json:"illusts"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if len(resp.Illusts) != 1 {
+		t.Fatalf("expected 1 illust, got %d", len(resp.Illusts))
+	}
+	if resp.Illusts[0].ID != "12345" {
+		t.Fatalf("numeric id not normalized: %q", resp.Illusts[0].ID)
+	}
+	if resp.Illusts[0].User.ID != "9" {
+		t.Fatalf("numeric userId not normalized: %q", resp.Illusts[0].User.ID)
+	}
+}
+
+// Regression: search responses carry an EMPTY ARRAY for tagTranslation
+// when no translations exist (Sept 2026) — the strict map field 502'd
+// every search. Both {} and [] must decode.
+func TestTransformSearchToleratesEmptyArrayTagTranslation(t *testing.T) {
+	raw := `{"error":false,"body":{
+		"illustManga":{"data":[
+			{"id":"111","title":"T1","illustType":0,"pageCount":1,"url":"https://i.pximg.net/c/360x360_70/img-master/img/x/111_p0_square1200.jpg","userId":"9","userName":"Alice","tags":["水着"]}
+		],"total":1,"lastPage":1},
+		"popular":{"recent":[],"permanent":[]},
+		"tagTranslation":[],
+		"relatedTags":[]
+	}}`
+	resp, err := transformSearchArtworks([]byte(raw))
+	if err != nil {
+		t.Fatalf("transformSearchArtworks with empty-array tagTranslation: %v", err)
+	}
+	if len(resp.Illusts) != 1 {
+		t.Fatalf("expected 1 illust, got %d", len(resp.Illusts))
+	}
+}
+
+// Regression: multi-page works whose thumbnail uses a URL pattern the
+// page-synthesis can't rewrite (custom-thumb) used to emit meta_pages
+// where EVERY page equalled page 0 — the reader showed the same tiny
+// image on every page. The transform must drop the synthetic pages
+// instead (FeedCard falls back to image_urls).
+func TestTransformDropsMetaPagesForUnrewritableThumb(t *testing.T) {
+	raw := `{"error":false,"body":{"illusts":[
+		{"id":"777","title":"Custom","illustType":0,"pageCount":2,"url":"https://i.pximg.net/c/360x360_70/custom-thumb/img/2026/09/11/00/00/00/777_custom1200.jpg","userId":"9","userName":"Alice","tags":["オリジナル"],"profileImageUrl":"https://i.pximg.net/p1","createDate":"2026-09-01T00:00:00+09:00","xRestrict":0,"aiType":0}
+	]}}`
+	out, err := transformNewest([]byte(raw), false)
+	if err != nil {
+		t.Fatalf("transformNewest: %v", err)
+	}
+	var resp struct {
+		Illusts []struct {
+			MetaPages []json.RawMessage `json:"meta_pages"`
+		} `json:"illusts"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if len(resp.Illusts) != 1 {
+		t.Fatalf("expected 1 illust, got %d", len(resp.Illusts))
+	}
+	if len(resp.Illusts[0].MetaPages) != 0 {
+		t.Fatalf("expected no meta_pages for unrewritable thumb, got %d", len(resp.Illusts[0].MetaPages))
+	}
+}
+
 func TestTransformStreetNoNext(t *testing.T) {
 	raw := `{"error":false,"body":{"contents":[],"nextParams":null}}`
 	out, err := transformStreet([]byte(raw))
@@ -2309,6 +2393,81 @@ func TestSecureForRequest(t *testing.T) {
 // tailnet URL). Browsers store a Secure cookie but never send it over
 // HTTP, so the login "succeeded" and every follow-up request 403'd —
 // the whole app dead for HTTP origins.
+func TestGateOwnerUnlocksDuringSaturatedSlots(t *testing.T) {
+	g, err := newGate("correct horse battery staple", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerGateRoutes(mux, g)
+	h := apiKeyGate("secret", g.middleware(mux))
+
+	// Saturate every slot, simulating a wrong-password flood.
+	for i := 0; i < 10; i++ {
+		g.slots <- struct{}{}
+	}
+
+	// The owner's CORRECT password must not 429 behind the flood — the
+	// check runs before slot acquisition (regression: the old order held
+	// slots during the tarpit sleep and locked the owner out).
+	req := httptest.NewRequest(http.MethodPost, "/api/gate",
+		strings.NewReader(`{"password":"correct horse battery staple"}`))
+	req.Header.Set("X-Api-Key", "secret")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("correct unlock during saturated slots = %d, want 200", rr.Code)
+	}
+
+	// Drain (the correct path took no slot), re-saturate: a WRONG
+	// password during saturation still 429s (bounded sleepers).
+	for i := 0; i < 10; i++ {
+		<-g.slots
+	}
+	for i := 0; i < 10; i++ {
+		g.slots <- struct{}{}
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/api/gate",
+		strings.NewReader(`{"password":"wrong"}`))
+	req2.Header.Set("X-Api-Key", "secret")
+	req2.Header.Set("Content-Type", "application/json")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusTooManyRequests {
+		t.Fatalf("wrong password during saturated slots = %d, want 429", rr2.Code)
+	}
+	for i := 0; i < 10; i++ {
+		<-g.slots
+	}
+}
+
+func TestPrivateBookmarksPassthrough(t *testing.T) {
+	fake := &fakeAPI{
+		bookmarkIllustsFn: func(restrict string) ([]byte, error) {
+			if restrict != "private" {
+				t.Fatalf("restrict = %q, want private", restrict)
+			}
+			return []byte(
+				`{"illusts":[{"id":"9","title":"P"}],"next_url":"https://app-api.pixiv.net/v1/next"}`,
+			), nil
+		},
+	}
+	mux := newServerBase(fake, newImageCache(time.Hour, 10, 512<<20))
+	h := apiKeyGate("secret", mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/bookmarks/private", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"id":"9"`) {
+		t.Fatalf("body not passthrough: %s", rr.Body.String())
+	}
+}
+
 func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
 	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
 	h := newGatedServer(t, "correct horse battery staple")
@@ -2413,6 +2572,85 @@ func TestGateFailureDecay(t *testing.T) {
 	}
 	if d := g.failureDelay(); d != 0 {
 		t.Fatalf("delay after decay = %v, want 0", d)
+	}
+}
+
+// Fix 1 companion (review): the sleep-slot cap sits BELOW the password
+// check, so it can never bound the check itself — a wrong-password
+// flood would run unbounded concurrent bcrypt. The dedicated hash
+// semaphore must refuse up front (429) once its 8 slots are busy, and
+// the owner's correct password must unlock as soon as one frees.
+func TestGateHashSemaphoreBoundsBcrypt(t *testing.T) {
+	g, err := newGate("correct horse battery staple", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	if got := cap(g.hashSlots); got != 8 {
+		t.Fatalf("hash semaphore cap = %d, want 8", got)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerGateRoutes(mux, g)
+	h := apiKeyGate("secret", g.middleware(mux))
+
+	unlock := func(password string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/gate",
+			strings.NewReader(`{"password":"`+password+`"}`))
+		req.Header.Set("X-Api-Key", "secret")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// Saturate every hash slot: a wrong password must now be refused
+	// before any bcrypt work starts.
+	for i := 0; i < cap(g.hashSlots); i++ {
+		g.hashSlots <- struct{}{}
+	}
+	if rr := unlock("wrong"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("wrong password with saturated hash slots = %d, want 429", rr.Code)
+	}
+
+	// The correct password meets the same bounded refusal while the
+	// slots are busy (the documented tradeoff) — then unlocks for real
+	// once one frees, proving the semaphore bounds without breaking the
+	// owner's path.
+	if rr := unlock("correct horse battery staple"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password with saturated hash slots = %d, want 429 (bounded refusal)", rr.Code)
+	}
+	for i := 0; i < cap(g.hashSlots); i++ {
+		<-g.hashSlots
+	}
+	if rr := unlock("correct horse battery staple"); rr.Code != http.StatusOK {
+		t.Fatalf("correct password after hash slots release = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+// Fix 3 companion (review): the sleep runs BEFORE the 401 is written,
+// and the server kills a handler cycle that outlives the connection's
+// write deadline — so an uncapped 30s/60s sleep could only ever write
+// its 401 to a dead connection. tarpitSleep is the pure policy split
+// out so skip/cap behavior is pinned with no real sleeps.
+func TestTarpitSleep(t *testing.T) {
+	cases := []struct {
+		name      string
+		delay     time.Duration
+		sinceLast time.Duration
+		want      time.Duration
+	}{
+		{"spaced-out attempt skips the sleep", 60 * time.Second, 3 * time.Second, 0},
+		{"exactly 2s apart still counts as spaced", 15 * time.Second, 2 * time.Second, 0},
+		{"burst at the 5s tier sleeps 5s", 5 * time.Second, time.Second, 5 * time.Second},
+		{"burst at the 15s tier stays 15s", 15 * time.Second, 100 * time.Millisecond, 15 * time.Second},
+		{"60s tier is capped to 25s", 60 * time.Second, 500 * time.Millisecond, 25 * time.Second},
+		{"below the failure floor never sleeps", 0, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tarpitSleep(tc.delay, tc.sinceLast); got != tc.want {
+				t.Fatalf("tarpitSleep(%v, %v) = %v, want %v", tc.delay, tc.sinceLast, got, tc.want)
+			}
+		})
 	}
 }
 
