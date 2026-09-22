@@ -5,7 +5,7 @@ import type { PixivIllust, SearchUserResult } from "../types";
 import FeedCard from "./FeedCard/FeedCard";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
 import { blockedTags } from "../store";
-import { useFeedSentinel } from "../hooks";
+import { useFeedSentinel } from "../hooks/useFeedSentinel";
 import SearchFilters, {
   DEFAULT_FILTERS,
   activeFilterCount,

@@ -36,7 +36,8 @@ import {
   MAX_STACK_DEPTH,
 } from "./state-persistence";
 import type { SnapshotInput } from "./state-persistence";
-import { useFeedSentinel, useToast } from "./hooks";
+import { useFeedSentinel } from "./hooks/useFeedSentinel";
+import { useToast } from "./hooks/useToast";
 import { useEdgeBackGesture } from "./hooks/useEdgeBackGesture";
 import { useLayers } from "./hooks/useLayers";
 import "./App.css";

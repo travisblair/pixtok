@@ -7,7 +7,7 @@ import FeedCard from "./FeedCard/FeedCard";
 import GridFeed from "./GridFeed";
 import { dedupeSeen, filterBlockedTags } from "../helpers";
 import { blockedTags, artistViewMode } from "../store";
-import { useFeedSentinel } from "../hooks";
+import { useFeedSentinel } from "../hooks/useFeedSentinel";
 import FollowButton from "./FollowButton";
 
 /**

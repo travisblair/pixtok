@@ -6,7 +6,7 @@ import type { PixivIllust } from "../types";
 import FeedCard from "./FeedCard/FeedCard";
 import { filterBlockedTags, dedupeSeen } from "../helpers";
 import { blockedTags, stackHintDismissed, dismissStackHint } from "../store";
-import { useFeedSentinel } from "../hooks";
+import { useFeedSentinel } from "../hooks/useFeedSentinel";
 
 export default function RelatedView(props: {
   anchor: PixivIllust;

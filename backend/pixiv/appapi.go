@@ -140,6 +140,8 @@ func (c *Client) GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
 	if maxPages < 1 || maxPages > 25 {
 		return nil, fmt.Errorf("%w: invalid maxPages", ErrInvalidParam)
 	}
+	// Deliberate app-API ↔ web-session coupling: the app-API bearer token
+	// carries no uid, so the account uid comes from the PHPSESSID prefix.
 	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
 	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
@@ -197,6 +199,8 @@ func (c *Client) GetBookmarkIllusts(restrict string) ([]byte, error) {
 	if restrict != "public" && restrict != "private" {
 		return nil, fmt.Errorf("%w: invalid restrict", ErrInvalidParam)
 	}
+	// Deliberate app-API ↔ web-session coupling: the app-API bearer token
+	// carries no uid, so the account uid comes from the PHPSESSID prefix.
 	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
 	if !ValidID(uid) {
 		return nil, fmt.Errorf("cannot resolve user id from web session")
