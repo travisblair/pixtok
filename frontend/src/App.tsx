@@ -18,11 +18,6 @@ import {
   setFeedViewModeFromServer,
   setArtistViewModeFromServer,
 } from "./store";
-import FeedCard from "./components/FeedCard/FeedCard";
-import GridFeed from "./components/GridFeed";
-import RankingSelector from "./components/RankingSelector";
-import ContentPills from "./components/ContentPills";
-import NavigationDrawer from "./components/NavigationDrawer";
 import RecsModal from "./components/RecsModal";
 import RelatedView from "./components/RelatedView";
 import ArtistView from "./components/ArtistView";
@@ -33,6 +28,10 @@ import GateScreen from "./components/GateScreen";
 import ConfigModal from "./components/ConfigModal";
 import TagPopup from "./components/TagPopup";
 import LoginScreen from "./components/LoginScreen";
+import FeedHeader from "./components/FeedHeader";
+import FeedArea from "./components/FeedArea";
+import FeedToast from "./components/FeedToast";
+import ErrorToast from "./components/ErrorToast";
 import {
   loadSnapshot,
   saveSnapshot,
@@ -40,6 +39,7 @@ import {
   MAX_SEARCH_DEPTH,
 } from "./state-persistence";
 import { useFeedSentinel, useToast } from "./hooks";
+import { useEdgeBackGesture } from "./hooks/useEdgeBackGesture";
 import "./App.css";
 
 type FeedType = "home" | "newest" | "illustrations" | "top" | "recommended" | "bookmarks";
@@ -56,24 +56,6 @@ const CLOSE_TIMEOUT_MS = SLIDE_OUT_MS + 10;
 // reset whenever every overlay closes so a long session can never
 // climb past them.
 const LAYER_Z_BASE = 40;
-
-// Edge-back gesture (iOS push-navigation convention): touch down within
-// the left edge zone and drag right to pop the top layer — the same
-// action as the Back pill. The gesture claims the touch only after
-// clearly horizontal travel, so vertical layer scrolls and the native
-// multi-page sliders are never stolen; multi-page sliders win the edge
-// zone outright (an edge start on a card with horizontal overflow arms
-// nothing).
-const EDGE_BACK_ZONE = 24; // px from the left edge where the gesture arms
-const EDGE_BACK_ARM_DX = 8; // horizontal travel before it claims the touch
-const EDGE_BACK_POP_DX = 72; // release displacement that pops
-const EDGE_BACK_FLING_DX = 36; // min displacement for the velocity path
-const EDGE_BACK_FLING_V = 0.55; // px/ms
-// One pop per gesture, and never two within one close animation: iOS
-// can emit duplicate/canceled touch sequences from a single physical
-// swipe, and a stray second touchend after the layer is gone would pop
-// the NEXT level too ("swiped from layer 3, landed on layer 1").
-const EDGE_BACK_POP_COOLDOWN = 350; // ms ≈ close animation + margin
 
 export default function App() {
   const [feedType, setFeedType] = createSignal<FeedType>("home");
@@ -591,110 +573,6 @@ export default function App() {
     resetLayerZIfIdle();
   }
 
-  // ── Edge-back gesture ───────────────────────────────────────────────
-  // See the constants above for thresholds. Armed on a left-edge touch
-  // when layers are open; claims the touch once horizontal; pops the
-  // top layer on a long drag or a fast fling. Every interesting state
-  // transition leaves a breadcrumb (POST /api/log) so the server
-  // journal can replay what the phone believed happened.
-  let edgePan: { x: number; y: number; t: number; active: boolean } | null = null;
-  let lastEdgePop = 0; // performance.now() of the last gesture pop
-
-  function edgeBackStart(e: TouchEvent) {
-    edgePan = null;
-    if (gateLocked() || e.touches.length !== 1 || layerSeq().length === 0) return;
-    const touch = e.touches[0];
-    if (touch.clientX > EDGE_BACK_ZONE) return;
-    const target = e.target as Element | null;
-    // Native multi-page sliders own horizontal drags that start on
-    // them — an edge start there must not arm the gesture. Single-page
-    // cards (no horizontal overflow) fall through and arm normally.
-    const pages = target?.closest?.(".card-pages");
-    if (pages && pages.scrollWidth > pages.clientWidth + 1) {
-      logEvent("gesture", "ignored-slider-owns-edge", { x: Math.round(touch.clientX) });
-      return;
-    }
-    if (
-      target?.closest?.(
-        "button, a, input, textarea, .drawer, .modal-dialog, .modal-backdrop, .tag-popup, .toast, .gate-screen"
-      )
-    )
-      return;
-    edgePan = { x: touch.clientX, y: touch.clientY, t: performance.now(), active: false };
-    logEvent("gesture", "armed", {
-      x: Math.round(touch.clientX),
-      layers: layerSeq().length,
-    });
-  }
-
-  function edgeBackMove(e: TouchEvent) {
-    if (!edgePan || e.touches.length !== 1) return;
-    // A touch that starts in the edge zone with layers open belongs to
-    // US from the very first move: preventDefault immediately, before
-    // iOS Safari's native edge-back history gesture can win the race.
-    // (When Safari's wins, the page navigates back via bfcache and
-    // restores an older frozen state with fewer layers — the reported
-    // "one swipe closed two layers", with zero gesture breadcrumbs.)
-    // Tradeoff: an edge-zone-start vertical scroll inside a layer is
-    // blocked too — the zone is 24px, layers only, acceptable.
-    e.preventDefault();
-    const touch = e.touches[0];
-    const dx = touch.clientX - edgePan.x;
-    const dy = touch.clientY - edgePan.y;
-    if (!edgePan.active && dx > EDGE_BACK_ARM_DX && Math.abs(dx) > Math.abs(dy) * 1.2) {
-      edgePan.active = true;
-      logEvent("gesture", "claimed", { dx: Math.round(dx), dy: Math.round(dy) });
-    }
-  }
-
-  function edgeBackCancel() {
-    if (edgePan) logEvent("gesture", "canceled", { active: edgePan.active });
-    edgePan = null;
-  }
-
-  function edgeBackEnd(e: TouchEvent) {
-    if (!edgePan) return;
-    const touch = e.changedTouches[0];
-    const dx = touch ? touch.clientX - edgePan.x : 0;
-    const dt = performance.now() - edgePan.t;
-    const popped = edgePan.active;
-    edgePan = null;
-    if (!popped) {
-      // An armed edge-touch that lifts BEFORE claiming (a stray tap at
-      // the edge, or the touch stolen mid-drag) used to vanish from the
-      // breadcrumbs — indistinguishable from an interrupted gesture.
-      // Log it so the next "swipe felt weird" report has evidence
-      // either way.
-      logEvent("gesture", "end-no-pop", {
-        dx: Math.round(dx),
-        dt: Math.round(dt),
-        claimed: false,
-      });
-      return;
-    }
-    const now = performance.now();
-    const inCooldown = now - lastEdgePop < EDGE_BACK_POP_COOLDOWN;
-    if (dx >= EDGE_BACK_POP_DX || (dx >= EDGE_BACK_FLING_DX && dx / dt > EDGE_BACK_FLING_V)) {
-      if (inCooldown) {
-        logEvent("gesture", "pop-suppressed", {
-          dx: Math.round(dx),
-          dt: Math.round(dt),
-          reason: "cooldown",
-        });
-        return;
-      }
-      lastEdgePop = now;
-      logEvent("gesture", "pop", {
-        dx: Math.round(dx),
-        dt: Math.round(dt),
-        top: layerSeq().at(-1),
-      });
-      popTopLayer();
-    } else {
-      logEvent("gesture", "end-no-pop", { dx: Math.round(dx), dt: Math.round(dt) });
-    }
-  }
-
   /** Pop whichever layer is topmost in the open order. */
   function popTopLayer() {
     const top = layerSeq().at(-1);
@@ -917,6 +795,11 @@ export default function App() {
     void loadMore(true);
   }
 
+  // Edge-back gesture: thresholds, handlers, and the document-level
+  // listeners live in hooks/useEdgeBackGesture.ts. The pop action itself
+  // stays here — it belongs to the layer machine.
+  useEdgeBackGesture({ gateLocked, layerSeq, popTopLayer, logEvent });
+
   onMount(() => {
     // Mid-session gate re-lock: any later request() that hits a 403
     // "gate locked" re-shows the GateScreen (the status check below
@@ -928,13 +811,6 @@ export default function App() {
       setGateLocked(true);
     });
     setOnRequestError(raiseErrorToast);
-    // Edge-back gesture: document-level so it works over every layer;
-    // touchmove is non-passive because the gesture preventDefaults
-    // once it claims a horizontal drag.
-    document.addEventListener("touchstart", edgeBackStart, { passive: true });
-    document.addEventListener("touchmove", edgeBackMove, { passive: false });
-    document.addEventListener("touchend", edgeBackEnd);
-    document.addEventListener("touchcancel", edgeBackCancel);
     // bfcache resurrection guard: iOS Safari restores back/forward
     // navigations from a frozen heap — an older page state (fewer
     // layers, stale signals) can reappear with no boot, no breadcrumbs.
@@ -1033,10 +909,6 @@ export default function App() {
     setOnGateLocked(null);
     setOnRequestError(null);
     clearTimeout(errorToastTimer);
-    document.removeEventListener("touchstart", edgeBackStart);
-    document.removeEventListener("touchmove", edgeBackMove);
-    document.removeEventListener("touchend", edgeBackEnd);
-    document.removeEventListener("touchcancel", edgeBackCancel);
     window.removeEventListener("pageshow", handlePageShow);
   });
   useFeedSentinel(
@@ -1084,164 +956,54 @@ export default function App() {
             : "feed-container"
         }
       >
-        {/* Header area: row 1 = burger + content pills, row 2 = the
-            ranking mode pills (below the burger). */}
-        <div class="header-bar">
-          <div class="header-row">
-            <NavigationDrawer
-              feedType={feedType()}
-              onChange={changeFeedType}
-              onSearch={openSearch}
-              onSettings={() => setConfigOpen(true)}
-              onLogin={() => setLoginOpen(true)}
-            />
-            <Show when={feedType() === "illustrations"}>
-              <ContentPills
-                content={rankContent()}
-                onChange={changeRankingContent}
-              />
-            </Show>
-            <Show when={feedType() === "newest"}>
-              <ContentPills
-                content={newestR18() ? "r18" : "all"}
-                onChange={changeNewestR18}
-              />
-            </Show>
-            <Show when={feedType() === "top"}>
-              <ContentPills content={topMode()} onChange={changeTopMode} />
-            </Show>
-            <Show when={feedType() === "bookmarks"}>
-              <div class="mode-pill-row no-scrollbar fade-edges">
-                <button
-                  type="button"
-                  class={
-                    bookmarkVis() === "public" ? "mode-pill active" : "mode-pill"
-                  }
-                  onClick={() => changeBookmarkVis("public")}
-                >
-                  Public
-                </button>
-                <button
-                  type="button"
-                  class={
-                    bookmarkVis() === "private" ? "mode-pill active" : "mode-pill"
-                  }
-                  onClick={() => changeBookmarkVis("private")}
-                >
-                  Private
-                </button>
-              </div>
-              <Show when={bookmarkVis() === "public" && bookmarkTags().length > 0}>
-                <div class="mode-pill-row no-scrollbar fade-edges">
-                <For each={bookmarkTags()}>
-                  {(tag) => (
-                    <button
-                      type="button"
-                      class={
-                        bookmarkTag() === tag.name
-                          ? "mode-pill active"
-                          : "mode-pill"
-                      }
-                      onClick={() => selectBookmarkTag(tag.name)}
-                    >
-                      {tag.name}
-                    </button>
-                  )}
-                </For>
-                </div>
-              </Show>
-            </Show>
-          </div>
-          <Show when={feedType() === "illustrations"}>
-            <RankingSelector
-              content={rankContent()}
-              mode={rankMode()}
-              onChange={changeRankingMode}
-            />
-          </Show>
-        </div>
+        <FeedHeader
+          feedType={feedType}
+          rankContent={rankContent}
+          rankMode={rankMode}
+          newestR18={newestR18}
+          topMode={topMode}
+          bookmarkVis={bookmarkVis}
+          bookmarkTags={bookmarkTags}
+          bookmarkTag={bookmarkTag}
+          changeFeedType={changeFeedType}
+          changeRankingContent={changeRankingContent}
+          changeRankingMode={changeRankingMode}
+          changeNewestR18={changeNewestR18}
+          changeTopMode={changeTopMode}
+          changeBookmarkVis={changeBookmarkVis}
+          selectBookmarkTag={selectBookmarkTag}
+          openSearch={openSearch}
+          setConfigOpen={setConfigOpen}
+          setLoginOpen={setLoginOpen}
+        />
 
-        <Show
-          when={illusts().length > 0 || loading()}
-          fallback={
-            <div class="empty-feed">
-              <span>Nothing here yet</span>
-              <button
-                type="button"
-                class="mode-pill"
-                onClick={() => void loadMore()}
-              >
-                Retry
-              </button>
-            </div>
-          }
-        >
-          <Show
-            when={feedViewMode() === "strip"}
-            fallback={
-              <GridFeed
-                illusts={illusts()}
-                onLike={handleLike}
-                onUnlike={handleUnlike}
-                onTap={pushRelated}
-              />
-            }
-          >
-            <For each={illusts()}>
-              {(illust) => (
-                <FeedCard
-                  illust={illust}
-                  onLike={handleLike}
-                  onUnlike={handleUnlike}
-                  onTap={pushRelated}
-                  onArtistTap={openArtist}
-                  onTagsTap={setTagsIllust}
-                  onTagOpen={openTagPage}
-                />
-              )}
-            </For>
-          </Show>
-        </Show>
-
-        {/* Sentinel for infinite scroll — full-height while the feed is
-            empty so the initial-load spinner sits centered on screen. */}
-        <div
-          ref={sentinelRef}
-          class={
-            loading() && illusts().length === 0
-              ? "feed-sentinel feed-sentinel-full"
-              : "feed-sentinel"
-          }
-        >
-          {loading() && <div class="spinner" />}
-          {loadError() && !loading() && (
-            <button type="button" class="mode-pill" onClick={() => void loadMore()}>
-              Couldn't load — tap to retry
-            </button>
-          )}
-          {!loading() && !loadError() && feedType() === "illustrations" && !nextUrl() && (
-            <span>End of feed</span>
-          )}
-        </div>
+        <FeedArea
+          illusts={illusts}
+          loading={loading}
+          loadError={loadError}
+          nextUrl={nextUrl}
+          feedType={feedType}
+          feedViewMode={feedViewMode}
+          sentinelRef={(el) => {
+            sentinelRef = el;
+          }}
+          handleLike={handleLike}
+          handleUnlike={handleUnlike}
+          pushRelated={pushRelated}
+          openArtist={openArtist}
+          setTagsIllust={setTagsIllust}
+          openTagPage={openTagPage}
+          loadMore={loadMore}
+        />
       </div>
 
-      {/* Toast: new recommendations available (or a transient error).
-          Error toasts are inert — a button whose tap no-ops would be a
-          lying affordance. */}
-      <Show when={toast.visible() && !modalOpen()}>
-        <Show
-          when={toast.opens()}
-          fallback={
-            <div class="toast" role="status">
-              {toast.text()}
-            </div>
-          }
-        >
-          <button type="button" class="toast" onClick={openRecs}>
-            {toast.text()}
-          </button>
-        </Show>
-      </Show>
+      <FeedToast
+        visible={toast.visible}
+        opens={toast.opens}
+        text={toast.text}
+        modalOpen={modalOpen}
+        openRecs={openRecs}
+      />
 
       {/* Recommendations modal — its own slider, main feed untouched */}
       <Show when={modalOpen()}>
@@ -1341,20 +1103,10 @@ export default function App() {
       </For>
       </Show>
 
-      {/* Red error toast — any failed request surfaces here for 2s;
-          tap to dismiss. Above every layer, modal, and the bottom
-          toast (z-120). */}
-      <Show when={errorToastMsg()}>
-        {(msg) => (
-          <div
-            class="error-toast"
-            role="alert"
-            onClick={() => setErrorToastMsg(null)}
-          >
-            {msg()}
-          </div>
-        )}
-      </Show>
+      <ErrorToast
+        errorToastMsg={errorToastMsg}
+        setErrorToastMsg={setErrorToastMsg}
+      />
     </>
   );
 }
