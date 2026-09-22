@@ -126,7 +126,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
-    setupFiles: ["./src/test-setup.ts"],
+    setupFiles: ["./src/test-setup.ts", "./src/test/msw/setup.ts"],
     exclude: ["e2e/**", "node_modules/**"],
     // REQUIRED for SolidJS component tests — see frontend-testing.md:
     // without inlining, vitest resolves solid-js/web to the SSR entry and

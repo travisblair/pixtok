@@ -1,18 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { http, HttpResponse } from "msw";
 import GateScreen from "./GateScreen";
+import { requestCount, requestsTo, server } from "../test/msw/server";
 
-vi.mock("../api/auth", () => ({
-  gateUnlock: vi.fn(),
-}));
-vi.mock("../api/client", () => ({ reportApiError: vi.fn() }));
-
-import * as auth from "../api/auth";
-const mockedApi = auth as unknown as { gateUnlock: ReturnType<typeof vi.fn> };
-
-beforeEach(() => {
-  mockedApi.gateUnlock.mockReset().mockResolvedValue({ ok: true });
-});
+// Real api/auth.gateUnlock -> request() -> MSW. The default handler
+// accepts any well-formed POST /api/gate; failure cases override below.
+// Assertions stay at the network level: a gate request must reach the
+// real endpoint with the typed password (the module-mock era asserted
+// gateUnlock("hunter2"); the wire form is the same contract, minus the
+// mock).
 
 describe("GateScreen", () => {
   it("unlocks on the correct password and fires onUnlocked", async () => {
@@ -24,11 +21,19 @@ describe("GateScreen", () => {
     fireEvent.click(container.querySelector("button")!);
 
     await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
-    expect(mockedApi.gateUnlock).toHaveBeenCalledWith("hunter2");
+    expect(requestCount("/api/gate")).toBe(1);
+    expect(await requestsTo("/api/gate")[0].json()).toEqual({
+      password: "hunter2",
+    });
   });
 
   it("shows the error and clears the password when the unlock is rejected", async () => {
-    mockedApi.gateUnlock.mockRejectedValue(new Error("401: wrong password"));
+    // Backend contract: a wrong password is 401 "wrong password".
+    server.use(
+      http.post("/api/gate", () =>
+        new HttpResponse("wrong password\n", { status: 401 })
+      )
+    );
     const onUnlocked = vi.fn();
     const { container } = render(() => <GateScreen onUnlocked={onUnlocked} />);
 
@@ -45,10 +50,14 @@ describe("GateScreen", () => {
   });
 
   it("does not submit while a request is in flight", async () => {
-    let resolveUnlock: (v: { ok: boolean }) => void = () => {};
-    mockedApi.gateUnlock.mockReturnValue(
-      new Promise((res) => {
-        resolveUnlock = res;
+    let releaseGate!: () => void;
+    const pending = new Promise<void>((res) => {
+      releaseGate = res;
+    });
+    server.use(
+      http.post("/api/gate", async () => {
+        await pending;
+        return HttpResponse.json({ ok: true });
       })
     );
     const onUnlocked = vi.fn();
@@ -58,9 +67,9 @@ describe("GateScreen", () => {
     fireEvent.input(input, { target: { value: "hunter2" } });
     fireEvent.click(container.querySelector("button")!);
     fireEvent.click(container.querySelector("button")!); // double-tap
-    expect(mockedApi.gateUnlock).toHaveBeenCalledTimes(1);
+    expect(requestCount("/api/gate")).toBe(1);
 
-    resolveUnlock({ ok: true });
+    releaseGate();
     await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
   });
 });
