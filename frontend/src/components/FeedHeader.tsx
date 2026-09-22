@@ -1,10 +1,8 @@
 import { For, Show } from "solid-js";
-import type { ContentMode, RankingMode } from "../types";
+import type { ContentMode, FeedType, RankingMode } from "../types";
 import NavigationDrawer from "./NavigationDrawer";
 import ContentPills from "./ContentPills";
 import RankingSelector from "./RankingSelector";
-
-type FeedType = "home" | "newest" | "illustrations" | "top" | "recommended" | "bookmarks";
 
 /**
  * Header area: row 1 = burger + content pills, row 2 = the ranking

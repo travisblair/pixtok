@@ -63,6 +63,14 @@ export interface SearchUsersResponse {
 /** Content filter shared by the Ranking/Newest/Top feed pills. */
 export type ContentMode = "all" | "r18";
 
+export type FeedType =
+  | "home"
+  | "newest"
+  | "illustrations"
+  | "top"
+  | "recommended"
+  | "bookmarks";
+
 /**
  * App-API ranking modes (GET /v1/illust/ranking?mode=...). Single
  * source of truth: RankingSelector's pill lists and the snapshot

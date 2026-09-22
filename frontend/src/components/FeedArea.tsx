@@ -1,10 +1,8 @@
 import { For, Show } from "solid-js";
-import type { PixivIllust } from "../types";
+import type { FeedType, PixivIllust } from "../types";
 import type { ViewMode } from "../store";
 import FeedCard from "./FeedCard/FeedCard";
 import GridFeed from "./GridFeed";
-
-type FeedType = "home" | "newest" | "illustrations" | "top" | "recommended" | "bookmarks";
 
 /**
  * Feed body: the strip (FeedCard) / grid (GridFeed) switch plus the

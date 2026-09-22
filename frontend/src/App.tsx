@@ -6,7 +6,7 @@ import { getWorkRecs } from "./api/illust";
 import { getBlockedTags, getImageSize, getFeedViewMode, getArtistViewMode } from "./api/prefs";
 import { gateStatus } from "./api/auth";
 import { uploadCrashBuffer } from "./crash-trap";
-import type { ContentMode, PixivIllust, RankingMode } from "./types";
+import type { ContentMode, FeedType, PixivIllust, RankingMode } from "./types";
 import { isRankingMode } from "./types";
 import { dedupeSeen, filterBlockedTags } from "./helpers";
 import {
@@ -41,8 +41,6 @@ import {
 import { useFeedSentinel, useToast } from "./hooks";
 import { useEdgeBackGesture } from "./hooks/useEdgeBackGesture";
 import "./App.css";
-
-type FeedType = "home" | "newest" | "illustrations" | "top" | "recommended" | "bookmarks";
 
 // Overlay slide-out animation duration. The CSS keyframes
 // (slide-out-rtl/ltr in App.css) are 250ms; the JS close timeouts wait
