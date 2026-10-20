@@ -113,6 +113,50 @@ func TestSetTokensSerializesAgainstInflightRefresh(t *testing.T) {
 	}
 }
 
+// Regression (review 1017-1 F-15): the old guard covered only
+// expires_in <= 300, but the 5-minute skew is subtracted afterwards, so
+// a 301..599s lifetime derived an expiresAt seconds-to-minutes out and
+// every request re-entered the token endpoint (rotating the refresh
+// token and rewriting .env each time).
+func TestRefreshNormalizesPathologicalExpiresIn(t *testing.T) {
+	for _, expiresIn := range []int{301, 599} {
+		rt := &healthTransport{
+			tokenBody: fmt.Sprintf(`{"access_token":"acc","refresh_token":"rot","expires_in":%d}`, expiresIn),
+		}
+		c := healthClient(t, rt)
+		if err := c.refresh(); err != nil {
+			t.Fatalf("expires_in %d: refresh: %v", expiresIn, err)
+		}
+		c.mu.Lock()
+		ttl := time.Until(c.expiresAt)
+		c.mu.Unlock()
+		if ttl < 50*time.Minute {
+			t.Fatalf("expires_in %d produced a %v token window — every request will re-refresh", expiresIn, ttl)
+		}
+		if err := c.ensureToken(); err != nil {
+			t.Fatalf("expires_in %d: ensureToken: %v", expiresIn, err)
+		}
+		if rt.calls() != 1 {
+			t.Fatalf("expires_in %d: token endpoint calls = %d after two requests, want 1", expiresIn, rt.calls())
+		}
+	}
+}
+
+func TestSetTokensNormalizesPathologicalExpiresIn(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	t.Setenv("PIXTOK_ENV_FILE", envPath)
+	c := &Client{}
+	if err := c.SetTokens("rt", "acc", 301); err != nil {
+		t.Fatalf("SetTokens: %v", err)
+	}
+	c.mu.Lock()
+	ttl := time.Until(c.expiresAt)
+	c.mu.Unlock()
+	if ttl < 50*time.Minute {
+		t.Fatalf("expires_in 301 produced a %v token window", ttl)
+	}
+}
+
 // healthTransport serves the token endpoint and the web health probe
 // with scripted answers, keyed by host.
 type healthTransport struct {

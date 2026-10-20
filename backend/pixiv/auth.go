@@ -22,6 +22,24 @@ const tokenRetryBackoff = 30 * time.Second
 // upstream expiry so a slow Pi never serves a token that dies mid-flight.
 const tokenExpirySkew = 5 * time.Minute
 
+// tokenMinExpiresIn: upstream lifetimes below this are rewritten to the
+// normal 3600. The skew is subtracted AFTER the upstream value, so the
+// old <=300 guard left 301..599s lifetimes deriving an expiresAt one
+// second to four minutes out — every request then re-entered refresh(),
+// rotating the refresh token and rewriting .env at ~1Hz. Pixiv normally
+// returns 3600; a value this far below it is a broken response, not a
+// legitimately short-lived token.
+const tokenMinExpiresIn = 600
+
+// normalizeExpiresIn maps a pathological token lifetime to the normal
+// 3600 so the derived expiry cannot land in the past.
+func normalizeExpiresIn(expiresIn int) int {
+	if expiresIn < tokenMinExpiresIn {
+		return 3600
+	}
+	return expiresIn
+}
+
 const (
 	authURL   = "https://oauth.secure.pixiv.net/auth/token"
 	clientID  = "MOBrBDS8blbauoSck0ZfDbtuzpyT"
@@ -124,10 +142,7 @@ func (c *Client) refreshLocked(force bool) error {
 		return fmt.Errorf("token response omitted access_token")
 	}
 
-	expiresIn := tr.ExpiresIn
-	if expiresIn <= 300 {
-		expiresIn = 3600 // defensive: never land in the past on a bad response
-	}
+	expiresIn := normalizeExpiresIn(tr.ExpiresIn)
 
 	// Persist a rotated refresh token BEFORE committing it to memory
 	// (reviewer finding): the refresh token is the durable credential —
@@ -232,9 +247,7 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 
-	if expiresIn <= 300 {
-		expiresIn = 3600
-	}
+	expiresIn = normalizeExpiresIn(expiresIn)
 	// Persist BEFORE committing to memory — the same invariant as
 	// refresh(): memory must never get ahead of disk. On a failed write
 	// the running client keeps the old pair and the caller surfaces the
