@@ -2,6 +2,7 @@ package pixiv
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +50,71 @@ func TestSetWebSessionPersistsBothKeys(t *testing.T) {
 			t.Fatalf(".env missing %q:\n%s", want, raw)
 		}
 	}
+}
+
+// Regression (review 1017-1 F-11): the csrf token and the PHPSESSID
+// were read in two separate lock acquisitions, so a login capture
+// landing between them paired session A's token with session B's
+// cookie — pixiv 400s that, and the request is wasted. The token also
+// carries its session, and callers must use THAT session for the
+// cookie (and for the uid in the URL).
+func TestWebCallsPairCsrfTokenWithItsOwnSession(t *testing.T) {
+	token := strings.Repeat("a", 32)
+
+	t.Run("street", func(t *testing.T) {
+		rt := &csrfSwapTransport{token: token, swapTo: [2]string{"654321_b", "tok-b"}}
+		c := &Client{phpSessID: "123456_a", http: &http.Client{Transport: rt}}
+		rt.client = c
+
+		if _, err := c.GetStreet("{}"); err != nil {
+			t.Fatalf("GetStreet: %v", err)
+		}
+		if rt.lastCSRF != token {
+			t.Fatalf("x-csrf-token = %q, want the token scraped for the session", rt.lastCSRF)
+		}
+		if rt.lastCookie != "PHPSESSID=123456_a" {
+			t.Fatalf("Cookie = %q — the POST paired session A's token with another session's cookie", rt.lastCookie)
+		}
+	})
+
+	t.Run("bookmarks page uid", func(t *testing.T) {
+		rt := &csrfSwapTransport{token: token, swapTo: [2]string{"654321_b", "tok-b"}}
+		c := &Client{phpSessID: "123456_a", http: &http.Client{Transport: rt}}
+		rt.client = c
+
+		if _, err := c.GetBookmarkPage("", 0, 20, "desc"); err != nil {
+			t.Fatalf("GetBookmarkPage: %v", err)
+		}
+		if !strings.Contains(rt.lastPath, "/ajax/user/123456/") {
+			t.Fatalf("bookmarks URL = %q, want the uid of the session that signs the call", rt.lastPath)
+		}
+		if rt.lastCookie != "PHPSESSID=123456_a" {
+			t.Fatalf("Cookie = %q, want the same session as the uid in the URL", rt.lastCookie)
+		}
+	})
+}
+
+// csrfSwapTransport answers the profile-page token scrape, then swaps the
+// live web session BEFORE answering the AJAX call — the login-capture
+// race in its worst order.
+type csrfSwapTransport struct {
+	client     *Client
+	swapTo     [2]string
+	token      string
+	lastPath   string
+	lastCSRF   string
+	lastCookie string
+}
+
+func (t *csrfSwapTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.lastPath = req.URL.Path
+	if strings.HasPrefix(req.URL.Path, "/en/users/") {
+		t.client.setWebCache(t.swapTo[0], t.swapTo[1])
+		return fsJSON(req, `token\":\"`+t.token+`"`), nil
+	}
+	t.lastCSRF = req.Header.Get("x-csrf-token")
+	t.lastCookie = req.Header.Get("Cookie")
+	return fsJSON(req, `{"error":false,"body":{"contents":[],"illusts":[],"works":[],"total":0},"illusts":[]}`), nil
 }
 
 // Regression (review 1017-1 F-13): the ugoira-meta and recs handlers
