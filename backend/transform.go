@@ -361,8 +361,11 @@ func transformStreet(raw []byte) ([]byte, error) {
 		out.Illusts = append(out.Illusts, ill)
 	}
 
-	if len(src.Body.NextParams) > 0 && string(src.Body.NextParams) != "null" {
-		next := string(src.Body.NextParams)
+	// Only literal "null" used to end pagination, so an empty cursor
+	// object was echoed back as next_url and the client POSTed {} again
+	// forever, re-fetching page 1. Treat both as the terminal page.
+	next := strings.TrimSpace(string(src.Body.NextParams))
+	if next != "" && next != "null" && next != "{}" {
 		out.NextURL = &next
 	}
 

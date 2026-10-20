@@ -121,6 +121,47 @@ func TestSearchUsersEmitsEmptyArraysNotNull(t *testing.T) {
 	}
 }
 
+// Regression (review 1017-1 F-20): pagination ended only on literal
+// nextParams:null. An empty cursor object was passed through as
+// next_url:"{}", which the client POSTs back — a terminal {} would loop
+// the home feed on page 1 until the user left.
+func TestStreetTreatsEmptyCursorAsEndOfFeed(t *testing.T) {
+	for _, nextParams := range []string{`{}`, `null`, ``} {
+		raw := `{"error":false,"body":{"contents":[],"nextParams":` + nextParams + `}}`
+		if nextParams == "" {
+			raw = `{"error":false,"body":{"contents":[]}}`
+		}
+		out, err := transformStreet([]byte(raw))
+		if err != nil {
+			t.Fatalf("nextParams %q: %v", nextParams, err)
+		}
+		var got struct {
+			NextURL *string `json:"next_url"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.NextURL != nil {
+			t.Fatalf("nextParams %q produced next_url %q, want null (end of feed)", nextParams, *got.NextURL)
+		}
+	}
+
+	// A real cursor still round-trips verbatim.
+	out, err := transformStreet([]byte(`{"error":false,"body":{"contents":[],"nextParams":{"page":2,"li":"111"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		NextURL *string `json:"next_url"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.NextURL == nil || !strings.Contains(*got.NextURL, `"page":2`) {
+		t.Fatalf("next_url = %v, want the cursor object", got.NextURL)
+	}
+}
+
 // The empty-page shapes must still marshal to a non-nil illusts array —
 // the wire contract the frontend depends on.
 func TestEmptyFeedKeepsIllustsArray(t *testing.T) {
