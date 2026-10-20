@@ -64,6 +64,63 @@ func TestTransformsRejectUpstreamErrorEnvelope(t *testing.T) {
 	}
 }
 
+// Regression (review 1017-1 F-05): transformSearchUsers emitted
+// "users":null for a zero-result artist search and "previews":null when
+// a user had no workIds entry. The search screen dereferences both
+// unguarded (users().length, u.previews.slice), so typing gibberish in
+// Artists mode crashed the screen instead of showing "no results".
+func TestSearchUsersEmitsEmptyArraysNotNull(t *testing.T) {
+	out, err := transformSearchUsers([]byte(`{"error":false,"body":{"users":[],"thumbnails":{"illust":[]},"page":{"workIds":{},"total":0}}}`))
+	if err != nil {
+		t.Fatalf("empty artist search: %v", err)
+	}
+	if out.Users == nil {
+		t.Fatal("users is nil — marshals to null, which the search screen cannot read")
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"users":null`) {
+		t.Fatalf("empty artist search still emits users:null: %s", raw)
+	}
+
+	// A row whose user is absent from page.workIds must carry an empty
+	// previews array, not null.
+	out, err = transformSearchUsers([]byte(`{"error":false,"body":{
+		"users":[{"userId":"42","name":"Alice"}],
+		"thumbnails":{"illust":[]},
+		"page":{"workIds":{},"total":1}}}`))
+	if err != nil {
+		t.Fatalf("artist search without workIds: %v", err)
+	}
+	if len(out.Users) != 1 {
+		t.Fatalf("users = %d, want 1", len(out.Users))
+	}
+	if out.Users[0].Previews == nil {
+		t.Fatal("previews is nil — marshals to null, and the row render calls u.previews.slice")
+	}
+	raw, err = json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"previews":null`) {
+		t.Fatalf("row still emits previews:null: %s", raw)
+	}
+
+	// The populated case is unchanged.
+	out, err = transformSearchUsers([]byte(`{"error":false,"body":{
+		"users":[{"userId":"42","name":"Alice"}],
+		"thumbnails":{"illust":[{"id":"7","userId":"42","url":"https://i.pximg.net/c/250x250_80_a2/img-master/img/1/7_p0_square1200.jpg"}]},
+		"page":{"workIds":{"42":[{"id":"7","type":"illust"}]},"total":1}}}`))
+	if err != nil {
+		t.Fatalf("artist search with previews: %v", err)
+	}
+	if len(out.Users) != 1 || len(out.Users[0].Previews) != 1 || out.Users[0].Previews[0].ID != "7" {
+		t.Fatalf("previews mapping broke: %+v", out.Users)
+	}
+}
+
 // The empty-page shapes must still marshal to a non-nil illusts array —
 // the wire contract the frontend depends on.
 func TestEmptyFeedKeepsIllustsArray(t *testing.T) {

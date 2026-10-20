@@ -724,9 +724,23 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 		byID[string(work.ID)] = work
 	}
 
-	out := searchUsersResponse{Total: src.Body.Page.Total}
+	// Both arrays are emitted as [] rather than null: the search screen
+	// dereferences them unguarded (users().length, u.previews.slice), and
+	// a nil slice marshals to null. A zero-result artist search is a
+	// normal outcome, not a broken payload.
+	out := searchUsersResponse{
+		Users: make([]userSearchResult, 0, len(src.Body.Users)),
+		Total: src.Body.Page.Total,
+	}
 	for _, user := range src.Body.Users {
-		row := userSearchResult{ID: string(user.UserID), Name: user.Name, Avatar: user.Image, Premium: user.Premium, IsFollowed: user.IsFollowed}
+		row := userSearchResult{
+			ID:         string(user.UserID),
+			Name:       user.Name,
+			Avatar:     user.Image,
+			Premium:    user.Premium,
+			IsFollowed: user.IsFollowed,
+			Previews:   make([]illust, 0, 3),
+		}
 		if ids, ok := src.Body.Page.WorkIDs[string(user.UserID)]; ok {
 			previews := make([]webIllust, 0, 3)
 			for _, wid := range ids {
