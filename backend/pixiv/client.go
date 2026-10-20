@@ -1,6 +1,7 @@
 package pixiv
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -220,15 +221,32 @@ func (c *Client) doWith(cl *http.Client, req *http.Request) (*http.Response, err
 	// CPU-bound part is the TLS handshake, and this bounds the number of
 	// them in flight. JSON bodies drain in microseconds after the gate
 	// releases; the authproxy's streamed login flow is a single request.
+	//
+	// Acquisition selects on the request context: without it a waiter
+	// blocked behind a slow upstream kept a goroutine alive after the
+	// browser had gone (and across shutdown). A canceled caller gets its
+	// context error instead of a slot.
 	if c.upstreamSlots != nil {
-		c.upstreamSlots <- struct{}{}
+		select {
+		case c.upstreamSlots <- struct{}{}:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 		defer func() { <-c.upstreamSlots }()
 	}
 	return cl.Do(req)
 }
 
 func (c *Client) doGet(u string) ([]byte, error) {
-	req, err := http.NewRequest("GET", u, nil)
+	return c.doGetCtx(context.Background(), u)
+}
+
+// doGetCtx is doGet with a caller-supplied context, so a request-driven
+// call (browser disconnect, shutdown) cancels the upstream fetch and any
+// wait for an upstream slot. Callers that have an *http.Request in hand
+// should pass r.Context().
+func (c *Client) doGetCtx(ctx context.Context, u string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
 	}
