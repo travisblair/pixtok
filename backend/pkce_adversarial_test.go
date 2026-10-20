@@ -217,7 +217,7 @@ func TestPkceCallbackSetTokensFailureIsFatal(t *testing.T) {
 // The callback's cookie-deletion sweep must match the transport's Secure
 // posture like every other cookie the proxy sets.
 func TestPkceCallbackDeletionCookiesCarrySecure(t *testing.T) {
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
+	withPublicHTTPS(t, "true")
 
 	pkce := newPkceStore()
 	flow := "flow-secure"

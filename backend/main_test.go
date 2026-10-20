@@ -1468,6 +1468,16 @@ func withFlowCookie(t *testing.T, h http.Handler, req *http.Request) *http.Reque
 	return req
 }
 
+// withPublicHTTPS pins PIXTOK_PUBLIC_HTTPS for a test. The posture is
+// resolved once and cached (boot-time config in production), so a test
+// that flips it must also reset the cache.
+func withPublicHTTPS(t *testing.T, value string) {
+	t.Helper()
+	t.Setenv("PIXTOK_PUBLIC_HTTPS", value)
+	resetPublicHTTPSCache()
+	t.Cleanup(resetPublicHTTPSCache)
+}
+
 func TestAuthProxyRequiresFlowCookie(t *testing.T) {
 	_, targets := fakePixivUpstream(t)
 	withProxyTargets(t, targets)
@@ -1569,6 +1579,8 @@ func TestAuthProxyAppSessionCookieScoping(t *testing.T) {
 
 func TestAuthProxyRewritesCookiesAndLocations(t *testing.T) {
 	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false") // pin: strip Secure for HTTP dev
+	resetPublicHTTPSCache()
+	t.Cleanup(resetPublicHTTPSCache)
 	_, targets := fakePixivUpstream(t)
 	withProxyTargets(t, targets)
 	f := &fakeAPI{}
@@ -2416,7 +2428,7 @@ func TestSecureForRequest(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			t.Setenv("PIXTOK_PUBLIC_HTTPS", c.flag)
+			withPublicHTTPS(t, c.flag)
 			if got := secureForRequest(c.req); got != c.want {
 				t.Fatalf("secureForRequest = %v, want %v", got, c.want)
 			}
@@ -2505,7 +2517,7 @@ func TestPrivateBookmarksPassthrough(t *testing.T) {
 }
 
 func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
+	withPublicHTTPS(t, "true")
 	h := newGatedServer(t, "correct horse battery staple")
 
 	unlock := func(t *testing.T, mutate func(*http.Request)) *http.Cookie {
@@ -2544,7 +2556,7 @@ func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
 	}
 
 	// Flag off: never Secure, even with the forwarded proto.
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false")
+	withPublicHTTPS(t, "false")
 	if c := unlock(t, func(r *http.Request) {
 		r.Header.Set("X-Forwarded-Proto", "https")
 	}); c.Secure {

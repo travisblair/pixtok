@@ -170,13 +170,34 @@ func checkEnvFilePermissions(candidates []string) error {
 // the gate cookie and the login proxy's rewritten pixiv cookies keep
 // Secure (reviewer finding: Secure was stripped unconditionally, so
 // session cookies could ride plaintext HTTP on the public tunnel).
-// Read per-call (not at init) so tests can pin it with t.Setenv.
+//
+// Resolved ONCE and cached: securityHeaders asks this on every response,
+// and the uncached version ran os.Executable + os.ReadFile(.env) per
+// asset/image request on the Pi — with a transient read failure silently
+// downgrading the Secure flag. The posture is boot config; a change takes
+// a restart (which is how every other PIXTOK_* toggle behaves).
+// resetPublicHTTPSCache is the test hook.
 func publicHTTPSEnabled() bool {
-	v := os.Getenv("PIXTOK_PUBLIC_HTTPS")
-	if v == "" {
-		v = loadEnvKey("PIXTOK_PUBLIC_HTTPS")
-	}
-	return v == "true" || v == "1"
+	publicHTTPSOnce.Do(func() {
+		v := os.Getenv("PIXTOK_PUBLIC_HTTPS")
+		if v == "" {
+			v = pixiv.ReadEnvKey("PIXTOK_PUBLIC_HTTPS")
+		}
+		publicHTTPSCached = v == "true" || v == "1"
+	})
+	return publicHTTPSCached
+}
+
+var (
+	publicHTTPSOnce   sync.Once
+	publicHTTPSCached bool
+)
+
+// resetPublicHTTPSCache re-resolves the posture on the next call. Tests
+// only: production resolves it exactly once, at boot.
+func resetPublicHTTPSCache() {
+	publicHTTPSOnce = sync.Once{}
+	publicHTTPSCached = false
 }
 
 // secureForRequest decides whether Set-Cookie responses for this request
@@ -458,6 +479,11 @@ func main() {
 	// the API key the dev proxy injects, so the key gate is skipped.
 	// FAIL-CLOSED: frontend serving without an enabled gate would mean
 	// an unauthenticated public app — refuse to boot.
+	// Resolve the public-HTTPS posture once, at boot: it decides the
+	// Secure attribute on every cookie and HSTS on every response, and
+	// re-reading .env per response was a per-request syscall on the Pi.
+	log.Printf("public HTTPS posture: %v (PIXTOK_PUBLIC_HTTPS)", publicHTTPSEnabled())
+
 	serveFrontend := loadEnvKey("PIXTOK_SERVE_FRONTEND") == "true"
 	if err := validateProdServe(serveFrontend, g.enabled); err != nil {
 		log.Fatalf("prod serve config: %v", err)
