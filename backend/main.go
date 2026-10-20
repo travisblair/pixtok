@@ -432,7 +432,10 @@ func main() {
 	}
 	apiKey := loadEnvKey("PIXTOK_API_KEY")
 	if apiKey == "" {
-		log.Printf("WARNING: PIXTOK_API_KEY not set — API key gate DISABLED (loopback-only dev mode)")
+		// Fail-closed truth, not "disabled": apiKeyGate 401s every /api
+		// request except /health when no key is configured (frontend
+		// serving ignores the key entirely and uses the gate cookie).
+		log.Printf("WARNING: PIXTOK_API_KEY not set — the API-key gate FAILS CLOSED: every /api request except /health will 401 until it is set (frontend-serve mode ignores the key and authenticates with the gate cookie)")
 	}
 	mux := newServerBase(client, imgCache)
 	if prefs != nil {
