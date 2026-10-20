@@ -3,6 +3,7 @@ package pixiv
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,13 @@ import (
 // requests read them. Run under -race this fails on any unsynchronized
 // access (the reads used to touch the bare fields with no lock).
 func TestWebSessionSwapRace(t *testing.T) {
+	// SetWebSession persists to .env, and UpdateEnvFile CREATES the file
+	// when it is missing. With the test's CWD at backend/pixiv that write
+	// resolved to ../.env = backend/.env — a live operator credential
+	// store — and rewrote its web session 200 times. Pin the resolver at
+	// a sandbox file instead.
+	t.Setenv("PIXTOK_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
+
 	var upstreamMu sync.Mutex
 	upstreamHits := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,10 +52,12 @@ func TestWebSessionSwapRace(t *testing.T) {
 				"111_session_"+string(rune('a'+i%26)),
 				"tok"+string(rune('a'+i%26)),
 			)
-			// SetWebSession also persists to .env; in the test sandbox
-			// that write fails (no .env) and returns an error — fine,
-			// we only care about the locked swap it performs first.
-			_ = c.SetWebSession("111_session_x", "tok_x")
+			// SetWebSession also persists to .env. The sandbox pinned
+			// above must accept the write — otherwise the swap this
+			// test exists to exercise never happens.
+			if err := c.SetWebSession("111_session_x", "tok_x"); err != nil {
+				t.Errorf("SetWebSession: %v", err)
+			}
 		}
 		close(stop)
 	}()
