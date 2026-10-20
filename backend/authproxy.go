@@ -39,37 +39,45 @@ const loginFlowCookie = "pixtok_login"
 
 var browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
-// rewriteCookie rebuilds a Set-Cookie header without Domain=/Secure=/
-// Expires=/Max-Age=/SameSite. Host-only cookies on our origin are the
-// whole trick: the browser stores and replays them on follow-up
-// requests through the proxy, so the backend can read pixiv's session.
-// `secure` is secureForRequest(r): on HTTPS transports the Secure
-// attribute is preserved (reviewer finding: stripping it unconditionally
-// let session cookies ride plaintext on the public tunnel); on HTTP
-// transports it must go, or the browser stores but never sends the
-// cookie and the session silently breaks.
+// rewriteCookie rebuilds a Set-Cookie header for OUR origin: Domain= is
+// always stripped and Secure is kept only on HTTPS. Host-only cookies on
+// our origin are the whole trick: the browser stores and replays them on
+// follow-up requests through the proxy, so the backend can read pixiv's
+// session. `secure` is secureForRequest(r): on HTTPS transports the
+// Secure attribute is preserved (reviewer finding: stripping it
+// unconditionally let session cookies ride plaintext on the public
+// tunnel); on HTTP transports it must go, or the browser stores but
+// never sends the cookie and the session silently breaks.
+//
+// rewriteCookie is a parser, not a filter. The old field-by-field filter
+// dropped Max-Age and Expires, which turned a DELETION cookie
+// (`Set-Cookie: X=; Max-Age=0`, how pixiv logs a session out) into a
+// fresh SESSION cookie that shadowed the deleted one until the browser
+// closed — a logout that silently kept working for the rest of the day.
+// Deleting is not the only case: any real TTL was lost the same way, so
+// the browser's copy outlived our proxy's view of it.
+//
+// Kept rewrites: Domain is always stripped (the cookie must be scoped to
+// our origin, not pixiv's), Secure is kept only when the deployment is
+// HTTPS, and SameSite is dropped — SameSite=None without Secure is
+// rejected outright by browsers, and our proxy is same-origin anyway.
 func rewriteCookie(setCookie string, secure bool) string {
-	parts := strings.Split(setCookie, ";")
-	out := make([]string, 0, 3)
-	for _, p := range parts {
-		t := strings.TrimSpace(p)
-		if t == "" {
-			continue
-		}
-		lower := strings.ToLower(t)
-		if strings.HasPrefix(lower, "domain=") ||
-			(lower == "secure" && !secure) ||
-			strings.HasPrefix(lower, "expires=") ||
-			strings.HasPrefix(lower, "max-age=") ||
-			strings.HasPrefix(lower, "samesite=") {
-			continue
-		}
-		out = append(out, t)
-	}
-	if len(out) == 0 {
+	c, err := http.ParseSetCookie(setCookie)
+	if err != nil || c.Name == "" {
+		// Malformed upstream cookie: never relay a half-parsed one.
 		return ""
 	}
-	return strings.Join(out, "; ")
+	out := &http.Cookie{
+		Name:     c.Name,
+		Value:    c.Value,
+		Path:     c.Path,
+		Domain:   "",
+		MaxAge:   c.MaxAge,
+		Expires:  c.Expires,
+		HttpOnly: c.HttpOnly,
+		Secure:   c.Secure && secure,
+	}
+	return out.String()
 }
 
 // rewriteLocation maps an upstream redirect back onto our proxy paths so
