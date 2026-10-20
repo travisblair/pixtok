@@ -206,6 +206,17 @@ func (c *Client) ExchangePkce(code, codeVerifier string) (string, string, int, e
 // persists the refresh token to .env (the access token is transient —
 // the client refreshes on demand).
 func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) error {
+	// Serialize against refresh(): both write the same durable
+	// credential, and refresh() snapshots the refresh token BEFORE its
+	// network call (it has to — the body needs it). Without a shared
+	// lock an in-flight refresh lands AFTER the login and commits the
+	// PREVIOUS account's rotated token to .env and memory, silently
+	// reverting the login that just succeeded. refreshMu is the lock
+	// refresh() already holds for its whole round trip, so taking it
+	// here makes the login the last writer.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
 	if expiresIn <= 300 {
 		expiresIn = 3600
 	}
