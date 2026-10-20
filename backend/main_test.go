@@ -2683,10 +2683,63 @@ func TestTarpitSleep(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tarpitSleep(tc.delay, tc.sinceLast); got != tc.want {
-				t.Fatalf("tarpitSleep(%v, %v) = %v, want %v", tc.delay, tc.sinceLast, got, tc.want)
+			if got := tarpitSleep(tc.delay, tc.sinceLast, tarpitMaxSleep); got != tc.want {
+				t.Fatalf("tarpitSleep(%v, %v, %v) = %v, want %v", tc.delay, tc.sinceLast, tarpitMaxSleep, got, tc.want)
 			}
 		})
+	}
+}
+
+// Regression (M1): the tarpit's longest tier used to equal or exceed the
+// server's 15s WriteTimeout, so the promised 401 never arrived — the
+// client got EOF at the deadline. A real server with a deliberately SHORT
+// write timeout proves the handler's own deadline now covers sleep+write.
+func TestTarpitDelivers401AtHighestTier(t *testing.T) {
+	g, err := newGate("correct horse battery staple", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	// Keep the test fast while staying on the HIGHEST failure tier
+	// (failures >= 17 → the 60s tier, capped here).
+	g.tarpitCap = 1500 * time.Millisecond
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/probe", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	registerGateRoutes(mux, g)
+
+	srv := httptest.NewUnstartedServer(apiKeyGate("secret", g.middleware(mux)))
+	srv.Config.WriteTimeout = 500 * time.Millisecond // shorter than the tarpit sleep
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	// Seed the failure streak (17 failures puts us on the 60s tier,
+	// capped to 1.5s here). The spacing guard only skips the sleep when
+	// the previous failure is >=2s old, so seed them back-to-back.
+	for i := 0; i < 17; i++ {
+		g.recordFailure()
+	}
+
+	body := strings.NewReader(`{"password":"wrong"}`)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/gate", body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Api-Key", "secret")
+	req.Header.Set("Content-Type", "application/json")
+
+	start := time.Now()
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("tarpit request failed after %v (the 401 was never delivered): %v", time.Since(start).Round(time.Millisecond), err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("tarpit response = %d, want 401", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed < g.tarpitCap {
+		t.Fatalf("401 arrived after %v, want the tarpit to have slept ~%v", elapsed.Round(time.Millisecond), g.tarpitCap)
 	}
 }
 
