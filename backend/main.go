@@ -398,14 +398,21 @@ const (
 )
 
 // middlewareChain is THE middleware order for the server, extracted from
-// main() so a test can pin it. Notes on the two load-bearing positions:
+// main() so a test can pin it:
+//
+//	securityHeaders -> logRequests -> rateLimit -> originCheck -> requestPathLimit -> apiKeyGate -> gate -> mux
+//
+// Notes on the load-bearing positions:
 //   - logRequests wraps the rate limiter (every request, including 429s,
 //     gets a REQ line) but its fields are sanitized and capped.
 //   - originCheck sits INSIDE the rate limiter: a cross-origin mutation
 //     must spend a token before it is rejected, or rejects are a free
 //     unbounded journal-write amplifier.
+//   - originCheck also precedes the credential gates (apiKeyGate/gate), so
+//     a cross-site mutation is refused as a CROSS-ORIGIN request (403)
+//     rather than being invited to authenticate (401).
 func middlewareChain(h http.Handler, rl *rateLimiter) http.Handler {
-	return securityHeaders(logRequests(rl.middleware(requestPathLimit(originCheck(h)))))
+	return securityHeaders(logRequests(rl.middleware(originCheck(requestPathLimit(h)))))
 }
 
 // newHTTPServer builds the listener config. Extracted so tests can pin

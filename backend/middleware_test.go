@@ -264,3 +264,87 @@ func TestMiddlewareChainKeepsRateLimiterOutsideOriginCheck(t *testing.T) {
 		}
 	}
 }
+
+// TestMiddlewareOrderPinned pins the exact chain documented on
+// middlewareChain by observing each relative position from the outside:
+//
+//	securityHeaders -> logRequests -> rateLimit -> originCheck ->
+//	requestPathLimit -> apiKeyGate -> gate -> mux
+//
+// Reordering any pair flips one of these assertions. (Review finding H2:
+// origin rejects used to sit OUTSIDE the limiter and produced no REQ
+// line, so a broken login flow was invisible in the journal.)
+func TestMiddlewareOrderPinned(t *testing.T) {
+	newChain := func(t *testing.T) (http.Handler, *rateLimiter) {
+		t.Helper()
+		mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+		g, err := newGate("", true) // no gate password: gate is a pass-through
+		if err != nil {
+			t.Fatalf("newGate: %v", err)
+		}
+		rl := newRateLimiter(nil)
+		// Mirrors main()'s dev-mode composition.
+		return middlewareChain(apiKeyGate("secret", g.middleware(mux)), rl), rl
+	}
+
+	t.Run("originCheck precedes apiKeyGate", func(t *testing.T) {
+		h, _ := newChain(t)
+		req := httptest.NewRequest(http.MethodPost, "/api/prefs/blocked-tags", strings.NewReader("{}"))
+		req.RemoteAddr = "203.0.113.20:5555"
+		req.Header.Set("Origin", "https://evil.example")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("cross-origin POST without key = %d, want 403 (originCheck before apiKeyGate); 401 means the credential gate ran first", rr.Code)
+		}
+
+		// Same-origin with no key still hits the key gate: the 403 above
+		// is the origin check, not a dead route.
+		req = httptest.NewRequest(http.MethodPost, "/api/prefs/blocked-tags", strings.NewReader("{}"))
+		req.RemoteAddr = "203.0.113.21:5555"
+		req.Header.Set("Origin", "http://"+req.Host)
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("same-origin POST without key = %d, want 401", rr.Code)
+		}
+	})
+
+	t.Run("requestPathLimit answers 414 before the key gate", func(t *testing.T) {
+		h, _ := newChain(t)
+		req := httptest.NewRequest(http.MethodGet, "/"+strings.Repeat("a", maxRequestPathBytes+1), nil)
+		req.RemoteAddr = "203.0.113.22:5555"
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusRequestURITooLong {
+			t.Fatalf("over-long path without key = %d, want 414", rr.Code)
+		}
+	})
+
+	t.Run("rateLimit is inside securityHeaders and logRequests", func(t *testing.T) {
+		out := captureLog(t)
+		rl := newRateLimiter(nil)
+		h := middlewareChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}), rl)
+
+		var last *httptest.ResponseRecorder
+		for i := 0; i <= readsPerMinute; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/api/probe", nil)
+			req.RemoteAddr = "203.0.113.23:5555"
+			last = httptest.NewRecorder()
+			h.ServeHTTP(last, req)
+		}
+		if last.Code != http.StatusTooManyRequests {
+			t.Fatalf("bucket not exhausted: %d", last.Code)
+		}
+		// securityHeaders outside the limiter: the 429 still carries CSP.
+		if csp := last.Header().Get("Content-Security-Policy"); csp == "" {
+			t.Fatal("429 lost the security headers — securityHeaders is inside the limiter")
+		}
+		// logRequests outside the limiter: the 429 still produced a REQ line.
+		if got := out(); !strings.Contains(got, "429") || !strings.Contains(got, "/api/probe") {
+			t.Fatalf("429 produced no REQ line: %q", got)
+		}
+	})
+}
