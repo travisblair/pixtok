@@ -308,12 +308,26 @@ func (c *Client) ScrapeCsrfFor(phpsessid string) (string, error) {
 
 // SetWebSession hot-swaps the web session (PHPSESSID + its bound csrf
 // token) into the running client and persists both to .env.
+//
+// Persist BEFORE committing, like the app token: if the .env write fails
+// (read-only FS, full disk) the process must not serve a session disk
+// has never seen — a restart would resurrect the old, usually dead
+// PHPSESSID and every web-AJAX surface breaks until the next login.
+// sessionMu is held across the write so two overlapping logins cannot
+// interleave their disk and memory halves in opposite orders (envFileMu
+// serializes each write, not the cache+disk pair).
 func (c *Client) SetWebSession(phpsessid, csrfToken string) error {
-	c.setWebCache(phpsessid, csrfToken)
-	return UpdateEnvFile(map[string]string{
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	if err := UpdateEnvFile(map[string]string{
 		"PIXIV_PHPSESSID":   phpsessid,
 		"PIXTOK_CSRF_TOKEN": csrfToken,
-	})
+	}); err != nil {
+		return err
+	}
+	c.phpSessID = phpsessid
+	c.csrfTokenCache = csrfToken
+	return nil
 }
 
 // GetStreet fetches the modern personalized homepage feed. nextParams is
