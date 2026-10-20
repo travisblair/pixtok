@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { http, HttpResponse } from "msw";
 import App from "./App";
 
 /** Topmost related view's cards — robust against animation-timing
@@ -12,152 +13,102 @@ function topRelatedCards(container: HTMLElement) {
 
 import { makeFeedOf, makeFeed, makeIllust } from "./test-fixtures";
 
-vi.mock("./api/client", async () => {
-  const actual = await vi.importActual("./api/client");
+/**
+ * App orchestration: boot, the gate, feed/mode switching, snapshot
+ * rehydration and the layer machine.
+ *
+ * Network: the REAL api/*.ts modules run against the shared MSW fixture
+ * (src/test/msw) — every call goes through request() → fetch() and is
+ * answered at the HTTP boundary, like production. Per-test variations
+ * use server.use(...) (reset after each test) instead of vi.mock module
+ * factories. Feed fixtures keep the old mock defaults' id ranges
+ * (street 1.., top 1000.., recommended/workRecs 500.., related 900..,
+ * bookmarks 4000..), so a cross-feed bleed still shows up in counts.
+ *
+ * Why api/client is STILL partially mocked: setOnGateLocked /
+ * setOnRequestError are the app↔transport registration API. The specs
+ * below pin the SUBSCRIPTION wiring ("exactly one listener registered
+ * on mount") and then invoke the captured callback directly to simulate
+ * a mid-session 403 / transport failure — neither is observable at the
+ * HTTP boundary, so server.use() cannot express it. Everything else in
+ * the module (request, ApiError, reportApiError, logEvent) stays REAL:
+ * a failed fetch now reaches the app's real error path.
+ */
+vi.mock("./api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api/client")>();
   return {
-    logEvent: vi.fn(),
-    reportApiError: vi.fn(),
-    ApiError: actual.ApiError,
+    ...actual,
     setOnGateLocked: vi.fn(),
     setOnRequestError: vi.fn(),
   };
 });
-vi.mock("./api/feeds", () => ({
-  getStreet: vi.fn(),
-  getTop: vi.fn(),
-  getRecommended: vi.fn(),
-  getNextPage: vi.fn(),
-}));
-vi.mock("./api/illust", () => ({
-  getWorkRecs: vi.fn(),
-  getRelated: vi.fn(),
-  like: vi.fn(async () => {}),
-  unlike: vi.fn(async () => {}),
-}));
-vi.mock("./api/follow", () => ({
-  getUserIllusts: vi.fn(),
-  follow: vi.fn(async () => {}),
-  unfollow: vi.fn(async () => {}),
-  getFollowed: vi.fn(),
-}));
-vi.mock("./api/search", () => ({
-  getUgoiraMeta: vi.fn(),
-  searchArtworks: vi.fn(),
-  searchUsers: vi.fn(),
-}));
-vi.mock("./api/bookmarks", () => ({
-  getBookmarkIds: vi.fn(),
-  getBookmarks: vi.fn(),
-  getBookmarksNext: vi.fn(),
-  getBookmarkTags: vi.fn(),
-}));
-vi.mock("./api/prefs", () => ({
-  getBlockedTags: vi.fn(),
-  setBlockedTags: vi.fn(async () => {}),
-  getImageSize: vi.fn(),
-  setImageSize: vi.fn(async () => {}),
-  getFeedViewMode: vi.fn(),
-  setFeedViewMode: vi.fn(async () => {}),
-  getArtistViewMode: vi.fn(),
-  setArtistViewMode: vi.fn(async () => {}),
-}));
-vi.mock("./api/auth", () => ({
-  gateStatus: vi.fn(),
-  gateUnlock: vi.fn(async () => {}),
-  getAuthStatus: vi.fn(),
-}));
 
 import { setOnGateLocked, setOnRequestError } from "./api/client";
-import * as feeds from "./api/feeds";
-import * as illust from "./api/illust";
-import * as follow from "./api/follow";
-import * as search from "./api/search";
-import * as bookmarks from "./api/bookmarks";
-import * as prefs from "./api/prefs";
-import * as auth from "./api/auth";
-const mockedApi = {
-  ...feeds,
-  ...illust,
-  ...follow,
-  ...search,
-  ...bookmarks,
-  ...prefs,
-  ...auth,
-} as unknown as Record<string, ReturnType<typeof vi.fn>>;
+import { json } from "./test/msw/handlers";
+import {
+  requestCount,
+  requestParams,
+  requestsTo,
+  server,
+} from "./test/msw/server";
+
+/**
+ * Pump microtasks WITHOUT advancing fake timers — the fake-timer-safe
+ * waitFor. MSW resolves its request pipeline (match → headers → body
+ * stream) over microtasks, so this waits for data without touching the
+ * fake clock (same helper shape as UgoiraPlayer.test.tsx).
+ */
+async function pumpUntil(check: () => boolean, label: string, max = 5000) {
+  for (let i = 0; i < max; i++) {
+    if (check()) return;
+    await Promise.resolve();
+  }
+  throw new Error(
+    `pumpUntil: "${label}" never became true within ${max} microtask turns`
+  );
+}
+
+/** Query-param values carried by that path's requests, in arrival order. */
+function paramsOf(path: string): Record<string, string>[] {
+  return requestParams(path);
+}
+
+/**
+ * Resolve once MSW has ANSWERED a matching request. MSW's hop costs real
+ * milliseconds (unlike a module mock's microtask), so two orderings
+ * matter: a boot seed may land after the test's first interaction (and
+ * re-seed the store), and a write may still be in flight when afterEach
+ * resets the shared fixture. Register BEFORE the action, await after.
+ */
+function nextMockedResponse(
+  match: (request: Request) => boolean
+): Promise<void> {
+  return new Promise((resolve) => {
+    const listener = ({
+      request,
+    }: {
+      request: Request;
+      response: Response;
+      requestId: string;
+    }) => {
+      if (!match(request)) return;
+      server.events.removeListener("response:mocked", listener);
+      resolve();
+    };
+    server.events.on("response:mocked", listener);
+  });
+}
 
 beforeEach(() => {
   // Session snapshots must not leak between tests (a leftover
   // pixtok_state_v2 would make later renders rehydrate instead of
   // loading the street feed).
   localStorage.clear();
-  // The gate-lock listener is registered per-mount; a stale handler
-  // bound to an unmounted component's signal would silently no-op.
+  // The gate-lock / error listeners are registered per-mount; a stale
+  // handler bound to an unmounted component's signal would silently
+  // no-op between tests.
   vi.mocked(setOnGateLocked).mockReset();
   vi.mocked(setOnRequestError).mockReset();
-  // Distinct id ranges per feed so cross-feed bleed is visible in
-  // assertions (street 1.., top 1000.., recommended/workRecs 500..,
-  // related 900..).
-  mockedApi.getStreet
-    .mockReset()
-    .mockResolvedValue(makeFeedOf(30, 1));
-  mockedApi.getTop.mockReset().mockResolvedValue(makeFeedOf(30, 1000));
-  mockedApi.getRecommended
-    .mockReset()
-    .mockResolvedValue(makeFeedOf(5, 500));
-  mockedApi.getWorkRecs
-    .mockReset()
-    .mockResolvedValue(makeFeedOf(5, 500));
-  mockedApi.getNextPage.mockReset().mockResolvedValue(makeFeedOf(10, 100));
-  mockedApi.getRelated.mockReset().mockResolvedValue(makeFeedOf(8, 900));
-  mockedApi.getUserIllusts.mockReset().mockResolvedValue(makeFeedOf(6, 600));
-  mockedApi.getUgoiraMeta
-    .mockReset()
-    .mockResolvedValue({ error: false, body: { src: "z", frames: [] } });
-  mockedApi.getAuthStatus
-    .mockReset()
-    .mockResolvedValue({ app_api: true, web_session: true });
-  mockedApi.getBookmarkIds.mockReset().mockResolvedValue({ ids: [] });
-  mockedApi.getBlockedTags.mockReset().mockResolvedValue({ tags: [] });
-  mockedApi.setBlockedTags.mockReset().mockResolvedValue(undefined);
-  mockedApi.getImageSize.mockReset().mockResolvedValue({ value: "large" });
-  mockedApi.setImageSize.mockReset().mockResolvedValue(undefined);
-  mockedApi.getFeedViewMode.mockReset().mockResolvedValue({ value: "strip" });
-  mockedApi.setFeedViewMode.mockReset().mockResolvedValue(undefined);
-  mockedApi.getArtistViewMode
-    .mockReset()
-    .mockResolvedValue({ value: "strip" });
-  mockedApi.setArtistViewMode.mockReset().mockResolvedValue(undefined);
-  mockedApi.gateStatus.mockReset().mockResolvedValue({ locked: false });
-  mockedApi.gateUnlock.mockReset().mockResolvedValue({ ok: true });
-  mockedApi.getBookmarks
-    .mockReset()
-    .mockResolvedValue(makeFeedOf(8, 4000));
-  mockedApi.getBookmarksNext
-    .mockReset()
-    .mockResolvedValue({ illusts: [], next_url: null });
-  mockedApi.getBookmarkTags
-    .mockReset()
-    .mockResolvedValue({ public: [], private: [] });
-  mockedApi.follow.mockReset().mockResolvedValue({ ok: true });
-  mockedApi.unfollow.mockReset().mockResolvedValue({ ok: true });
-  mockedApi.getFollowed.mockReset().mockResolvedValue({ followed: false });
-  mockedApi.searchArtworks.mockReset().mockResolvedValue({
-    illusts: makeFeedOf(3, 2000).illusts,
-    total: 900,
-    last_page: 1,
-    page: 1,
-    next_url: null,
-    popular: [],
-    related_tags: [],
-  });
-  mockedApi.searchUsers.mockReset().mockResolvedValue({
-    users: [],
-    total: 0,
-    page: 1,
-    next_url: null,
-  });
-  mockedApi.like.mockReset().mockResolvedValue(undefined);
-  mockedApi.unlike.mockReset().mockResolvedValue(undefined);
 });
 
 describe("App", () => {
@@ -166,7 +117,11 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
-    expect(mockedApi.getStreet).toHaveBeenCalledWith("");
+    // The first-page cursor is the literal "{}" body (feeds.ts) — the
+    // wire shape, not just the module call, is the backend contract.
+    const street = requestsTo("/api/street");
+    expect(street).toHaveLength(1);
+    expect(await street[0].bodyText()).toBe("{}");
   });
 
   it("restores the saved tab and layers but always loads the feed fresh", async () => {
@@ -192,8 +147,8 @@ describe("App", () => {
     );
     // Feeds always load fresh on boot (user decision): the saved TAB
     // survives, saved feed content does not exist to restore.
-    expect(mockedApi.getStreet).not.toHaveBeenCalled();
-    expect(mockedApi.getRecommended).toHaveBeenCalled();
+    expect(requestCount("/api/street")).toBe(0);
+    expect(requestCount("/api/recommended")).toBeGreaterThan(0);
   });
 
   it("self-heals an empty snapshot saved while the gate was locked", async () => {
@@ -225,7 +180,9 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
-    expect(mockedApi.getStreet).toHaveBeenCalledWith("");
+    const street = requestsTo("/api/street");
+    expect(street).toHaveLength(1);
+    expect(await street[0].bodyText()).toBe("{}");
   });
 
   it("restores an open artist page from the snapshot", async () => {
@@ -258,10 +215,10 @@ describe("App", () => {
         "RestoredArtist"
       )
     );
-    expect(mockedApi.getUserIllusts).toHaveBeenCalledWith(777);
+    expect(requestCount("/api/user/777/illusts")).toBeGreaterThan(0);
     // The feed still loads fresh underneath the restored artist layer —
     // layers persist, feeds are always new.
-    expect(mockedApi.getStreet).toHaveBeenCalledWith("");
+    expect(requestCount("/api/street")).toBeGreaterThan(0);
   });
 
   it("restores an open recs modal with images loading (not suppressed)", async () => {
@@ -381,7 +338,14 @@ describe("App", () => {
     const input = container.querySelector(".search-input") as HTMLInputElement;
     await fireEvent.input(input, { target: { value: "fantasy" } });
     await fireEvent.submit(input.closest("form")!);
-    await waitFor(() => expect(mockedApi.searchArtworks).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(requestCount("/api/search/artworks")).toBe(1)
+    );
+    // The typed word rides the query string; a dropped/renamed param
+    // would search something else entirely.
+    expect(paramsOf("/api/search/artworks")[0]).toMatchObject({
+      word: "fantasy",
+    });
     await waitFor(() =>
       expect(container.querySelectorAll(".search-screen .feed-card").length).toBe(3)
     );
@@ -431,7 +395,7 @@ describe("App", () => {
       expect(container.querySelectorAll(".search-screen .feed-card").length).toBe(3)
     );
     // Restored works render verbatim — no refetch.
-    expect(mockedApi.searchArtworks).not.toHaveBeenCalled();
+    expect(requestCount("/api/search/artworks")).toBe(0);
   });
 
   it("Bookmarks tab loads the user's bookmarked works", async () => {
@@ -444,18 +408,21 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(8)
     );
-    expect(mockedApi.getBookmarks).toHaveBeenCalled();
+    expect(requestCount("/api/bookmarks")).toBeGreaterThan(0);
+    // The backend 400s a bookmarks page without an offset — the wire
+    // must carry offset=0 on the first load.
+    expect(paramsOf("/api/bookmarks")[0]).toMatchObject({ offset: "0" });
   });
 
   it("locks behind the gate and boots after unlocking", async () => {
-    mockedApi.gateStatus.mockResolvedValue({ locked: true });
+    server.use(http.get("/api/gate/status", () => json({ locked: true })));
     const { container } = render(() => <App />);
 
     // Gate up, nothing boots.
     await waitFor(() =>
       expect(container.querySelector(".gate-screen")).not.toBeNull()
     );
-    expect(mockedApi.getStreet).not.toHaveBeenCalled();
+    expect(requestCount("/api/street")).toBe(0);
 
     // Unlock → gate clears and the feed loads.
     const input = container.querySelector(".gate-form input") as HTMLInputElement;
@@ -467,7 +434,9 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
-    expect(mockedApi.gateUnlock).toHaveBeenCalledWith("letmein");
+    const unlock = requestsTo("/api/gate");
+    expect(unlock).toHaveLength(1);
+    expect(await unlock[0].json()).toEqual({ password: "letmein" });
   });
 
   it("persists the session as the user navigates", async () => {
@@ -503,12 +472,17 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelector(".mode-selector")).not.toBeNull()
     );
-    expect(mockedApi.getTop).toHaveBeenCalledWith("day");
+    expect(paramsOf("/api/top").map((p) => p.mode)).toContain("day");
   });
 
   it("switching to R18 on the Ranking tab refetches with mode=day_r18", async () => {
-    mockedApi.getTop.mockImplementation(async (mode: string) =>
-      mode === "day_r18" ? makeFeedOf(12, 9000) : makeFeedOf(30, 1)
+    server.use(
+      http.get("/api/top", ({ request }) => {
+        const mode = new URL(request.url).searchParams.get("mode");
+        return json(
+          mode === "day_r18" ? makeFeedOf(12, 9000) : makeFeedOf(30, 1)
+        );
+      })
     );
     const { getByText, container } = render(() => <App />);
     await waitFor(() =>
@@ -525,15 +499,10 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(12)
     );
-    expect(mockedApi.getTop).toHaveBeenCalledWith("day_r18");
+    expect(paramsOf("/api/top").map((p) => p.mode)).toContain("day_r18");
   });
 
   it("switching the ranking mode pill refetches with the new mode", async () => {
-    const modes: string[] = [];
-    mockedApi.getTop.mockImplementation(async (mode: string) => {
-      modes.push(mode);
-      return makeFeedOf(30, 1);
-    });
     const { getByText, container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
@@ -549,11 +518,13 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
-    expect(modes).toContain("week");
+    expect(paramsOf("/api/top").map((p) => p.mode)).toContain("week");
   });
 
   it("switching to Discover loads the recommended feed", async () => {
-    mockedApi.getRecommended.mockResolvedValue(makeFeedOf(9, 700));
+    server.use(
+      http.get("/api/recommended", () => json(makeFeedOf(9, 700)))
+    );
     const { getByText, container } = render(() => <App />);
 
     // The app UI mounts once the gate check clears — wait for it.
@@ -565,7 +536,7 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(9)
     );
-    expect(mockedApi.getRecommended).toHaveBeenCalled();
+    expect(requestCount("/api/recommended")).toBeGreaterThan(0);
   });
 
   it("Account item opens the login screen with auth status", async () => {
@@ -580,7 +551,7 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelector(".auth-status")).not.toBeNull()
     );
-    expect(mockedApi.getAuthStatus).toHaveBeenCalled();
+    expect(requestCount("/api/auth/status")).toBeGreaterThan(0);
     await waitFor(() =>
       // Connected banner + two green surface rows when fully authed.
       expect(container.querySelectorAll(".auth-status.ok").length).toBe(3)
@@ -588,9 +559,16 @@ describe("App", () => {
   });
 
   it("shows the retry button and recovers after a failed first load", async () => {
-    mockedApi.getStreet
-      .mockRejectedValueOnce(new Error("boom"))
-      .mockResolvedValue(makeFeedOf(5, 1));
+    // First street page fails, the retry succeeds with a shorter feed.
+    let streetCalls = 0;
+    server.use(
+      http.post("/api/street", () => {
+        streetCalls++;
+        return streetCalls === 1
+          ? new HttpResponse("boom\n", { status: 500 })
+          : json(makeFeedOf(5, 1));
+      })
+    );
     const { getByText, container } = render(() => <App />);
 
     await waitFor(() => expect(getByText("Retry")).toBeTruthy());
@@ -601,15 +579,19 @@ describe("App", () => {
   });
 
   it("discards an in-flight street load when the user switches tabs", async () => {
-    let resolveStreet!: (v: ReturnType<typeof makeFeedOf>) => void;
-    mockedApi.getStreet.mockImplementation(
-      () =>
-        new Promise((res) => {
-          resolveStreet = res;
-        })
+    // The street response is held open until after the tab switch.
+    let releaseStreet!: (response: Response) => void;
+    server.use(
+      http.post(
+        "/api/street",
+        () =>
+          new Promise<Response>((resolve) => {
+            releaseStreet = resolve;
+          })
+      )
     );
     const { container, getByText } = render(() => <App />);
-    await waitFor(() => expect(mockedApi.getStreet).toHaveBeenCalled());
+    await waitFor(() => expect(requestCount("/api/street")).toBe(1));
 
     // Switch to Discover while the street load is still pending.
     await fireEvent.click(container.querySelector(".burger-pill")!);
@@ -619,14 +601,17 @@ describe("App", () => {
     );
 
     // The stale street response arrives AFTER the switch — discarded.
-    resolveStreet(makeFeedOf(30, 1));
+    releaseStreet(json(makeFeedOf(30, 1)));
     await new Promise((r) => setTimeout(r, 50));
     expect(container.querySelectorAll(".feed-card").length).toBe(5);
-    expect(mockedApi.getNextPage).not.toHaveBeenCalled();
+    // No continuation was requested off the abandoned load.
+    expect(requestCount("/api/street")).toBe(1);
   });
 
   it("no toast when the liked work has no recommendations", async () => {
-    mockedApi.getWorkRecs.mockResolvedValue(makeFeedOf(0, 0));
+    server.use(
+      http.get("/api/illust/:id/recs", () => json(makeFeedOf(0, 0)))
+    );
     const { container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
@@ -637,7 +622,12 @@ describe("App", () => {
   });
 
   it("shows an error toast when recommendations fail to load", async () => {
-    mockedApi.getWorkRecs.mockRejectedValue(new Error("boom"));
+    server.use(
+      http.get(
+        "/api/illust/:id/recs",
+        () => new HttpResponse("upstream error\n", { status: 502 })
+      )
+    );
     const { container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
@@ -682,8 +672,10 @@ describe("App", () => {
     // Each level gets UNIQUE related ids so the stack dedupe doesn't
     // (correctly) refuse the push.
     let level = 0;
-    mockedApi.getRelated.mockImplementation(async () =>
-      makeFeedOf(8, 900 + level++ * 100)
+    server.use(
+      http.get("/api/illust/:id/related", () =>
+        json(makeFeedOf(8, 900 + level++ * 100))
+      )
     );
     const { container } = render(() => <App />);
     await waitFor(() =>
@@ -696,7 +688,14 @@ describe("App", () => {
         ? topRelatedCards(container)[1]
         : container.querySelectorAll(".feed-card")[0];
       await fireEvent.click(topCard.querySelector(".card-overlay")!);
-      await new Promise((r) => setTimeout(r, 30));
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(i + 1)
+      );
+      // The new level's related works must land before the next tap —
+      // the overlay we tap lives on card #1 of that page.
+      await waitFor(() =>
+        expect(topRelatedCards(container).length).toBeGreaterThanOrEqual(2)
+      );
     }
     expect(container.querySelectorAll(".related-view").length).toBe(10);
 
@@ -732,8 +731,11 @@ describe("App", () => {
 
     await fireEvent.click(container.querySelector(".like-btn")!);
     await waitFor(() => expect(container.querySelector(".toast")).toBeTruthy());
-    // per-work recommendations for the liked card, with an abort signal
-    expect(mockedApi.getWorkRecs).toHaveBeenCalledWith(1, expect.any(AbortSignal));
+    // Per-work recommendations for the liked card. (getWorkRecs also
+    // hands the request an AbortSignal so a newer like supersedes an
+    // older fetch; that is internal to the api module and has no wire
+    // representation — the id in the path is the observable contract.)
+    expect(requestsTo("/api/illust/1/recs")).toHaveLength(1);
 
     await fireEvent.click(container.querySelector(".toast")!);
     await waitFor(() =>
@@ -741,11 +743,10 @@ describe("App", () => {
     );
     expect(
       container.querySelectorAll(".recs-modal .feed-card").length
-    ).toBe(5); // getWorkRecs mock returns 5 works
+    ).toBe(5); // shared fixture returns 5 recs
   });
 
   it("tapping a card pushes a related view anchored on that card", async () => {
-    mockedApi.getRelated.mockResolvedValue(makeFeedOf(8, 900));
     const { container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
@@ -757,10 +758,11 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelector(".related-view")).toBeTruthy()
     );
-    const rvCards = container.querySelectorAll(
-      ".related-view .feed-card"
+    await waitFor(() =>
+      expect(
+        container.querySelectorAll(".related-view .feed-card").length
+      ).toBe(9) // anchor + 8 related
     );
-    expect(rvCards.length).toBe(9); // anchor + 8 related
   });
 
   it("first stack open shows the one-time hint; Got it dismisses it forever", async () => {
@@ -858,8 +860,10 @@ describe("App", () => {
 
   it("covered stack layers unload images; back restores the top layer's", async () => {
     let level = 0;
-    mockedApi.getRelated.mockImplementation(async () =>
-      makeFeedOf(8, 900 + level++ * 100)
+    server.use(
+      http.get("/api/illust/:id/related", () =>
+        json(makeFeedOf(8, 900 + level++ * 100))
+      )
     );
     const { container } = render(() => <App />);
     await waitFor(() =>
@@ -872,7 +876,12 @@ describe("App", () => {
         ? topRelatedCards(container)[1]
         : container.querySelectorAll(".feed-card")[0];
       await fireEvent.click(topCard.querySelector(".card-overlay")!);
-      await new Promise((r) => setTimeout(r, 30));
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(i + 1)
+      );
+      await waitFor(() =>
+        expect(topRelatedCards(container).length).toBeGreaterThanOrEqual(2)
+      );
     }
     const views = container.querySelectorAll(".related-view");
     expect(views.length).toBe(2);
@@ -944,8 +953,10 @@ describe("App", () => {
 
   it("close-all returns to the feed from any depth", async () => {
     let level = 0;
-    mockedApi.getRelated.mockImplementation(async () =>
-      makeFeedOf(8, 900 + level++ * 100)
+    server.use(
+      http.get("/api/illust/:id/related", () =>
+        json(makeFeedOf(8, 900 + level++ * 100))
+      )
     );
     const { container } = render(() => <App />);
     await waitFor(() =>
@@ -958,7 +969,12 @@ describe("App", () => {
         ? topRelatedCards(container)[1]
         : container.querySelectorAll(".feed-card")[0];
       await fireEvent.click(topCard.querySelector(".card-overlay")!);
-      await new Promise((r) => setTimeout(r, 30));
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(i + 1)
+      );
+      await waitFor(() =>
+        expect(topRelatedCards(container).length).toBeGreaterThanOrEqual(2)
+      );
     }
     expect(container.querySelectorAll(".related-view").length).toBe(2);
 
@@ -979,7 +995,7 @@ describe("App", () => {
     await waitFor(() =>
       expect(container.querySelector(".artist-view")).toBeTruthy()
     );
-    expect(mockedApi.getUserIllusts).toHaveBeenCalledWith(101); // first mock artist id
+    expect(requestCount("/api/user/101/illusts")).toBeGreaterThan(0); // first feed artist id
     await waitFor(() =>
       expect(
         container.querySelectorAll(".artist-view .feed-card").length
@@ -989,16 +1005,32 @@ describe("App", () => {
 
   it("settings live in the drawer; adding a blocked tag filters the feed on reload", async () => {
     // Street feed: one work tagged swimsuit.
-    mockedApi.getStreet.mockResolvedValue(
-      makeFeed([
-        ...makeFeedOf(29, 1).illusts.map((i) => ({ ...i, tags: [] })),
-        makeIllust({ id: 999, tags: [{ name: "swimsuit" }] }),
-      ])
+    server.use(
+      http.post("/api/street", () =>
+        json(
+          makeFeed([
+            ...makeFeedOf(29, 1).illusts.map((i) => ({ ...i, tags: [] })),
+            makeIllust({ id: 999, tags: [{ name: "swimsuit" }] }),
+          ])
+        )
+      )
+    );
+    // The boot seed (GET blocked-tags) must land before the user adds a
+    // tag: a seed arriving later would REPLACE the working list with
+    // the server's old [] (the app treats boot as server truth).
+    const seeded = nextMockedResponse(
+      (r) =>
+        r.method === "GET" &&
+        new URL(r.url).pathname === "/api/prefs/blocked-tags"
     );
     const { container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
+    await seeded;
+    // response:mocked fires before the caller's fetch promise resolves;
+    // one macrotask turn lets App's .then seed the store.
+    await new Promise((r) => setTimeout(r, 0));
 
     // Open settings from the drawer.
     await fireEvent.click(container.querySelector(".burger-pill")!);
@@ -1056,11 +1088,21 @@ describe("App", () => {
       await waitFor(() =>
         expect(container.querySelectorAll(".related-view").length).toBe(1)
       );
+      // The second level's related page must land before we can tap a
+      // work on it (fake timers: pump microtasks, never the clock).
+      await pumpUntil(
+        () => topRelatedCards(container).length >= 2,
+        "first related page"
+      );
       await fireEvent.click(
         topRelatedCards(container)[1].querySelector(".card-overlay")!
       );
       await waitFor(() =>
         expect(container.querySelectorAll(".related-view").length).toBe(2)
+      );
+      await pumpUntil(
+        () => topRelatedCards(container).length >= 2,
+        "second related page"
       );
     }
 
@@ -1078,6 +1120,10 @@ describe("App", () => {
       );
       await waitFor(() =>
         expect(container.querySelector(".artist-view")).toBeTruthy()
+      );
+      await pumpUntil(
+        () => container.querySelectorAll(".artist-view .feed-card").length === 6,
+        "artist works"
       );
       vi.advanceTimersByTime(700); // flush image activation timers
       expect(artistImgSrc(container)).toContain("/api/img");
@@ -1117,6 +1163,10 @@ describe("App", () => {
       await waitFor(() =>
         expect(container.querySelector(".artist-view")).toBeTruthy()
       );
+      await pumpUntil(
+        () => container.querySelectorAll(".artist-view .feed-card").length === 6,
+        "artist works"
+      );
 
       // The stale pop timeout must NOT demote the artist to below the
       // remaining stack (old code: topZ pointed at the stack).
@@ -1145,6 +1195,10 @@ describe("App", () => {
       );
       await waitFor(() =>
         expect(container.querySelector(".artist-view")).toBeTruthy()
+      );
+      await pumpUntil(
+        () => container.querySelectorAll(".artist-view .feed-card").length === 6,
+        "artist works"
       );
       vi.advanceTimersByTime(700);
       expect(artistImgSrc(container)).toContain("/api/img");
@@ -1229,11 +1283,15 @@ describe("App", () => {
     }
 
     it("tag taps stack search pages instead of re-seeding one layer", async () => {
-      mockedApi.getStreet.mockResolvedValue(
-        makeFeed([
-          makeIllust({ id: 1, tags: [{ name: "snow" }] }),
-          makeIllust({ id: 2, tags: [{ name: "rain" }] }),
-        ])
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed([
+              makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+              makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+            ])
+          )
+        )
       );
       const { container } = render(() => <App />);
       await waitFor(() =>
@@ -1248,17 +1306,26 @@ describe("App", () => {
         expect(container.querySelectorAll(".search-screen").length).toBe(2)
       );
       // Both layers fetched their own tag page.
-      expect(mockedApi.searchArtworks).toHaveBeenCalledTimes(2);
+      await waitFor(() =>
+        expect(requestCount("/api/search/artworks")).toBe(2)
+      );
       // The covered layer's images are suppressed (top layer owns them).
       const views = container.querySelectorAll(".search-screen");
+      await waitFor(() =>
+        expect(views[0].querySelector("img")).toBeTruthy()
+      );
       expect(views[0].querySelector("img")?.getAttribute("src")).toContain(
         "data:image/gif"
       );
     });
 
     it("tapping a tag already open toasts instead of stacking a duplicate", async () => {
-      mockedApi.getStreet.mockResolvedValue(
-        makeFeed([makeIllust({ id: 1, tags: [{ name: "snow" }] })])
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed([makeIllust({ id: 1, tags: [{ name: "snow" }] })])
+          )
+        )
       );
       const { container } = render(() => <App />);
       await waitFor(() =>
@@ -1275,14 +1342,20 @@ describe("App", () => {
         )
       );
       expect(container.querySelectorAll(".search-screen").length).toBe(1);
+      // The duplicate tap issued no second search.
+      expect(requestCount("/api/search/artworks")).toBe(1);
     });
 
     it("back on the top search layer reveals the layer beneath", async () => {
-      mockedApi.getStreet.mockResolvedValue(
-        makeFeed([
-          makeIllust({ id: 1, tags: [{ name: "snow" }] }),
-          makeIllust({ id: 2, tags: [{ name: "rain" }] }),
-        ])
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed([
+              makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+              makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+            ])
+          )
+        )
       );
       const { container } = render(() => <App />);
       await waitFor(() =>
@@ -1314,12 +1387,16 @@ describe("App", () => {
       // key↔array identity desynced, topZ resolved an undefined entry,
       // and the new top layer rendered black (images suppressed). The
       // open must finalize the pending close first.
-      mockedApi.getStreet.mockResolvedValue(
-        makeFeed([
-          makeIllust({ id: 1, tags: [{ name: "snow" }] }),
-          makeIllust({ id: 2, tags: [{ name: "rain" }] }),
-          makeIllust({ id: 3, tags: [{ name: "storm" }] }),
-        ])
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed([
+              makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+              makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+              makeIllust({ id: 3, tags: [{ name: "storm" }] }),
+            ])
+          )
+        )
       );
       const { container } = render(() => <App />);
       await waitFor(() =>
@@ -1345,6 +1422,13 @@ describe("App", () => {
 
       // Long after the close timeout, the TOP layer's images must be
       // live (the /api/img proxy path), not the suppression pixel.
+      await waitFor(() =>
+        expect(
+          container
+            .querySelectorAll(".search-screen")[1]
+            .querySelectorAll(".feed-card").length
+        ).toBe(3)
+      );
       await new Promise((r) => setTimeout(r, 400));
       const views = container.querySelectorAll(".search-screen");
       const topImg = views[views.length - 1].querySelector("img");
@@ -1353,9 +1437,13 @@ describe("App", () => {
 
     it("caps search pages at MAX_SEARCH_DEPTH with a toast", async () => {
       const tags = Array.from({ length: 11 }, (_, i) => `tag${i}`);
-      mockedApi.getStreet.mockResolvedValue(
-        makeFeed(
-          tags.map((t, i) => makeIllust({ id: i + 1, tags: [{ name: t }] }))
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed(
+              tags.map((t, i) => makeIllust({ id: i + 1, tags: [{ name: t }] }))
+            )
+          )
         )
       );
       const { container } = render(() => <App />);
@@ -1377,7 +1465,9 @@ describe("App", () => {
 
   describe("grid view mode", () => {
     it("grid toggle renders cells in the main feed; stack layers stay strip", async () => {
-      mockedApi.getFeedViewMode.mockResolvedValue({ value: "grid" });
+      server.use(
+        http.get("/api/prefs/feed-view-mode", () => json({ value: "grid" }))
+      );
       const { container } = render(() => <App />);
       await waitFor(() =>
         expect(container.querySelectorAll(".grid-cell").length).toBe(30)
@@ -1391,38 +1481,25 @@ describe("App", () => {
       await waitFor(() =>
         expect(container.querySelectorAll(".related-view .feed-card").length).toBeGreaterThan(0)
       );
-      expect(mockedApi.getRelated).toHaveBeenCalledWith(1);
+      expect(requestCount("/api/illust/1/related")).toBeGreaterThan(0);
     });
 
     it("seeds the artist-view mode at boot from the server", async () => {
-      mockedApi.getArtistViewMode.mockResolvedValue({ value: "grid" });
+      server.use(
+        http.get("/api/prefs/artist-view-mode", () => json({ value: "grid" }))
+      );
       const { container } = render(() => <App />);
       await waitFor(() =>
         expect(container.querySelectorAll(".feed-card").length).toBe(30)
       );
       // Feed still strip; artist page would be grid — assert the seed
       // call was made and the main feed is untouched.
-      expect(mockedApi.getArtistViewMode).toHaveBeenCalled();
-      expect(mockedApi.getFeedViewMode).toHaveBeenCalled();
+      expect(requestCount("/api/prefs/artist-view-mode")).toBeGreaterThan(0);
+      expect(requestCount("/api/prefs/feed-view-mode")).toBeGreaterThan(0);
       expect(container.querySelectorAll(".grid-cell")).toHaveLength(0);
     });
 
     it("settings toggle persists the feed view mode via PUT", async () => {
-      // store.ts holds the REAL api module (test-setup loads it before
-      // the vi.mock hoist) — stub fetch at the network edge to observe
-      // the prefs PUT, same technique as store.test.ts.
-      const fetchCalls: { url: string; init?: RequestInit }[] = [];
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (url: string, init?: RequestInit) => {
-          fetchCalls.push({ url, init });
-          return new Response(JSON.stringify({ value: "grid" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        })
-      );
-
       const { container } = render(() => <App />);
       await waitFor(() =>
         expect(container.querySelectorAll(".feed-card").length).toBe(30)
@@ -1439,7 +1516,14 @@ describe("App", () => {
         expect(container.querySelector(".modal-dialog")).toBeTruthy()
       );
 
-      // Feeds row → Grid.
+      // Feeds row → Grid. Register the response waiter first: afterEach
+      // resets the shared prefs fixture, so the write must have LANDED
+      // (not merely been sent) before this test ends.
+      const persisted = nextMockedResponse(
+        (r) =>
+          r.method === "PUT" &&
+          new URL(r.url).pathname === "/api/prefs/feed-view-mode"
+      );
       const feedsRow = container.querySelector(
         '[data-testid="feed-view-row"]'
       )!;
@@ -1459,14 +1543,16 @@ describe("App", () => {
       // endpoint (queued writes settle across microtasks).
       await vi.waitFor(() => {
         expect(
-          fetchCalls.some(
-            (c) =>
-              c.url === "/api/prefs/feed-view-mode" &&
-              c.init?.method === "PUT"
+          requestsTo("/api/prefs/feed-view-mode").some(
+            (r) => r.method === "PUT"
           )
         ).toBe(true);
       });
-      vi.unstubAllGlobals();
+      const put = requestsTo("/api/prefs/feed-view-mode").find(
+        (r) => r.method === "PUT"
+      )!;
+      expect(await put.json()).toEqual({ value: "grid" });
+      await persisted;
     });
   });
 
@@ -1475,17 +1561,25 @@ describe("App", () => {
     it("a failed page load stops auto-pagination; the retry button recovers", async () => {
       // jsdom's IO mock reports the sentinel intersecting immediately,
       // so with a next_url the continuation fires on its own — same
-      // geometry as the grid-mode bug on a real phone.
-      mockedApi.getStreet
-        .mockResolvedValueOnce(makeFeedOf(30, 1, "/api/next?cursor=p2"))
-        .mockRejectedValueOnce(new Error("429: rate limited"))
-        .mockResolvedValueOnce(makeFeedOf(10, 100, null));
+      // geometry as the grid-mode bug on a real phone. Street
+      // continuations are another POST /api/street carrying the cursor.
+      let streetCalls = 0;
+      server.use(
+        http.post("/api/street", () => {
+          streetCalls++;
+          if (streetCalls === 1)
+            return json(makeFeedOf(30, 1, "/api/next?cursor=p2"));
+          if (streetCalls === 2)
+            return new HttpResponse("429: rate limited\n", { status: 429 });
+          return json(makeFeedOf(10, 100, null));
+        })
+      );
       const { container } = render(() => <App />);
       await waitFor(() =>
         expect(container.querySelectorAll(".feed-card").length).toBe(30)
       );
       await waitFor(() =>
-        expect(mockedApi.getStreet).toHaveBeenCalledTimes(2)
+        expect(requestCount("/api/street")).toBe(2)
       );
       // The failure surfaces the retry button…
       await waitFor(() =>
@@ -1495,14 +1589,14 @@ describe("App", () => {
       );
       // …and MUST NOT auto-retry: after a long settle, still exactly 2.
       await new Promise((r) => setTimeout(r, 400));
-      expect(mockedApi.getStreet).toHaveBeenCalledTimes(2);
+      expect(requestCount("/api/street")).toBe(2);
 
       // The retry button recovers.
       await fireEvent.click(
         container.querySelector(".feed-sentinel .mode-pill")!
       );
       await waitFor(() =>
-        expect(mockedApi.getStreet).toHaveBeenCalledTimes(3)
+        expect(requestCount("/api/street")).toBe(3)
       );
       await waitFor(() =>
         expect(container.querySelectorAll(".feed-card").length).toBe(40)
@@ -1515,14 +1609,19 @@ describe("App", () => {
       // proving the stale loadError was cleared and canLoad is true
       // again). The chain ENDS on a null next_url or jsdom's
       // always-intersecting sentinel paginates forever by construction.
-      mockedApi.getStreet
-        .mockResolvedValueOnce(makeFeedOf(30, 1, "/api/next?cursor=p2"))
-        .mockRejectedValueOnce(new Error("429: rate limited"))
-        .mockResolvedValueOnce(makeFeedOf(30, 1, "/api/next?cursor=p2"))
-        .mockResolvedValueOnce(makeFeedOf(10, 100, null));
+      let streetCalls = 0;
+      server.use(
+        http.post("/api/street", () => {
+          streetCalls++;
+          if (streetCalls === 2)
+            return new HttpResponse("429: rate limited\n", { status: 429 });
+          if (streetCalls === 4) return json(makeFeedOf(10, 100, null));
+          return json(makeFeedOf(30, 1, "/api/next?cursor=p2"));
+        })
+      );
       const { container } = render(() => <App />);
       await waitFor(() =>
-        expect(mockedApi.getStreet).toHaveBeenCalledTimes(2)
+        expect(requestCount("/api/street")).toBe(2)
       );
       await waitFor(() =>
         expect(
@@ -1552,6 +1651,6 @@ describe("App", () => {
         expect(container.querySelectorAll(".feed-card").length).toBe(40)
       );
       await new Promise((r) => setTimeout(r, 300));
-      expect(mockedApi.getStreet).toHaveBeenCalledTimes(4);
+      expect(requestCount("/api/street")).toBe(4);
     });
   });
