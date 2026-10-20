@@ -1,10 +1,23 @@
 package pixiv
 
 import (
+	"errors"
 	"strconv"
 	"sync"
 	"time"
 )
+
+// bookmarkCooldownDuration is how long a 429 on a bookmark walk keeps
+// the walk from being attempted again. The walk is a per-boot firehose
+// (up to 2 × maxPages requests), and during an iOS reload spiral every
+// reload repeated it — adding pressure exactly while pixiv was asking
+// for less. NOT a retry: reloads inside the window answer from the
+// negative cache without touching upstream.
+const bookmarkCooldownDuration = 5 * time.Minute
+
+// ErrBookmarkCooldown marks a bookmark-id answer served during the 429
+// cooldown window: the walk was skipped, not attempted.
+var ErrBookmarkCooldown = errors.New("bookmark walk cooling down after upstream 429")
 
 // bookmarkIDsCache — TTL + single-flight cache for GetBookmarkIDs.
 //
@@ -14,8 +27,11 @@ import (
 // reload (the Sep 2026 spiral drew 429s from exactly this). The cache
 // collapses repeat boots within the TTL to zero upstream traffic.
 //
-// Failures are NEVER cached (same contract as follow-state): a 429 or
-// dead session must surface to the client, and the next boot retries.
+// Failures are NEVER cached as values (same contract as follow-state): a
+// dead session must surface to the client and the next boot retries. The
+// one exception is a 429, which arms bookmarkCooldownDuration of
+// negative caching so a reload spiral cannot re-walk twelve pages while
+// pixiv's limiter is asking for less.
 // Like/unlike staleness is bounded by the TTL and is invisible in
 // practice: the device that made the change already has the new state
 // in its shared store.
@@ -40,6 +56,9 @@ type bookmarkIDsCache struct {
 	// bumps it so a walk that started under the previous account cannot
 	// deposit that account's ids into the new account's cache.
 	gen uint64
+	// cooldownUntil is the end of the 429 negative-cache window (zero =
+	// not cooling).
+	cooldownUntil time.Time
 }
 
 func newBookmarkIDsCache(ttl time.Duration) *bookmarkIDsCache {
@@ -87,10 +106,23 @@ func (b *bookmarkIDsCache) finish(key string, call *bookmarkIDsCall, ids []strin
 	if err == nil && call.gen == b.gen {
 		b.items[key] = bookmarkIDsEntry{ids: ids, expires: time.Now().Add(b.ttl)}
 	}
+	// Only a 429 opens the window: other failures stay uncached so the
+	// next natural attempt retries them (a dead session heals on login).
+	var se *statusError
+	if errors.As(err, &se) && se.status == 429 {
+		b.cooldownUntil = time.Now().Add(bookmarkCooldownDuration)
+	}
 	b.mu.Unlock()
 	call.ids = ids
 	call.err = err
 	close(call.done)
+}
+
+// coolingDown reports whether the 429 negative-cache window is open.
+func (b *bookmarkIDsCache) coolingDown() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return time.Now().Before(b.cooldownUntil)
 }
 
 // CachedBookmarkIDs is GetBookmarkIDs behind the TTL + single-flight
@@ -101,6 +133,12 @@ func (c *Client) CachedBookmarkIDs(restrict string, maxPages int) ([]string, err
 		return c.GetBookmarkIDs(restrict, maxPages)
 	}
 	key := restrict + "|" + strconv.Itoa(maxPages)
+	// While the 429 window is open, answer from the negative cache
+	// without touching upstream: a reload spiral must not re-walk the
+	// bookmarks pages the way it used to.
+	if c.bookmarkIDs.coolingDown() {
+		return nil, ErrBookmarkCooldown
+	}
 	ids, fresh, call, lead := c.bookmarkIDs.getOrStart(key)
 	if fresh {
 		return ids, nil

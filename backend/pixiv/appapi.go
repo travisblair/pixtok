@@ -165,7 +165,11 @@ func (c *Client) GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
 			return nil, err
 		}
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("bookmarks returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+			// A typed status error (not a formatted string) so the
+			// bookmark cache can recognize a 429 without matching on
+			// error text. Error() renders identically to the old
+			// "bookmarks returned %d: %s".
+			return nil, &statusError{op: "bookmarks", status: resp.StatusCode, body: truncate(string(body), 200)}
 		}
 		var parsed struct {
 			Illusts []struct {

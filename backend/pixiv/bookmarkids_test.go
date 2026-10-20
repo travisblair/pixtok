@@ -2,6 +2,7 @@ package pixiv
 
 import (
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -108,5 +109,42 @@ func TestBookmarkIDsCacheResetDropsInflightWalk(t *testing.T) {
 	b.finish("public|1", call, []string{"old-account-work"}, nil)
 	if _, fresh, _, _ := b.getOrStart("public|1"); fresh {
 		t.Fatal("a walk started before the reset populated the new account's cache")
+	}
+}
+
+// Regression (review 1017-1 F-07): a bookmark walk that hits a 429 is a
+// per-boot firehose (2 x maxPages requests). Nothing isolated it, so an
+// iOS reload spiral repeated the full walk on every reload — deepening
+// the 429 window. NOT retried: reloads inside the window answer from the
+// negative cache and the next boot after it walks again.
+func TestCachedBookmarkIDsIsolates429(t *testing.T) {
+	rt := &countTransport{status: http.StatusTooManyRequests, respBody: "slow down"}
+	c := &Client{
+		phpSessID:   "123456_a",
+		expiresAt:   time.Now().Add(time.Hour),
+		http:        &http.Client{Transport: rt},
+		bookmarkIDs: newBookmarkIDsCache(time.Minute),
+	}
+
+	if _, err := c.CachedBookmarkIDs("public", 1); err == nil {
+		t.Fatal("429 walk reported success")
+	}
+	if _, err := c.CachedBookmarkIDs("public", 1); !errors.Is(err, ErrBookmarkCooldown) {
+		t.Fatalf("second call error = %v, want ErrBookmarkCooldown", err)
+	}
+	if rt.count() != 1 {
+		t.Fatalf("upstream calls = %d, want 1 — a reload re-walked a 429", rt.count())
+	}
+
+	// The window is bounded, not a permanent block: once it passes the
+	// walk is attempted again.
+	c.bookmarkIDs.mu.Lock()
+	c.bookmarkIDs.cooldownUntil = time.Now().Add(-time.Second)
+	c.bookmarkIDs.mu.Unlock()
+	if _, err := c.CachedBookmarkIDs("public", 1); errors.Is(err, ErrBookmarkCooldown) {
+		t.Fatal("429 cooldown never expires")
+	}
+	if rt.count() != 2 {
+		t.Fatalf("upstream calls = %d after the window, want 2 (walk resumed)", rt.count())
 	}
 }
