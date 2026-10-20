@@ -1,6 +1,7 @@
 package pixiv
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -174,6 +175,20 @@ func (c *Client) webGet(u string) ([]byte, error) {
 		return nil, fmt.Errorf("web AJAX returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return body, nil
+}
+
+// webErrorEnvelope reports whether a web-AJAX body is pixiv's
+// 200-with-error envelope (expired session, rate limit, shape change).
+// A body that is not a JSON object counts as an error too: a Cloudflare
+// interstitial is not a live session.
+func webErrorEnvelope(body []byte) bool {
+	var env struct {
+		Error bool `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return true
+	}
+	return env.Error
 }
 
 // webSession returns the current PHPSESSID + csrf token under one lock.

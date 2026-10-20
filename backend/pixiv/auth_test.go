@@ -112,3 +112,104 @@ func TestSetTokensSerializesAgainstInflightRefresh(t *testing.T) {
 		t.Fatalf(".env revived the pre-login refresh token:\n%s", raw)
 	}
 }
+
+// healthTransport serves the token endpoint and the web health probe
+// with scripted answers, keyed by host.
+type healthTransport struct {
+	tokenStatus int
+	tokenBody   string
+	webStatus   int
+	webBody     string
+
+	mu         sync.Mutex
+	tokenCalls int
+}
+
+func (h *healthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	status, body := h.webStatus, h.webBody
+	if req.URL.Host == "oauth.secure.pixiv.net" {
+		h.tokenCalls++
+		status, body = h.tokenStatus, h.tokenBody
+	}
+	if status == 0 {
+		status = 200
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+func (h *healthTransport) calls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.tokenCalls
+}
+
+func healthClient(t *testing.T, rt http.RoundTripper) *Client {
+	t.Helper()
+	t.Setenv("PIXTOK_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
+	return &Client{refreshToken: "rt", http: &http.Client{Transport: rt}}
+}
+
+// Regression (review 1017-1 F-03): refresh() short-circuits while
+// expiresAt is in the future, so a status probe that called refresh()
+// reported a revoked credential as healthy indefinitely. AuthHealth must
+// ask the token endpoint.
+func TestAuthHealthProbesTokenEndpointDespiteValidExpiry(t *testing.T) {
+	rt := &healthTransport{
+		tokenStatus: 400,
+		tokenBody:   `{"error":"invalid_grant"}`,
+		webBody:     `{"error":false,"body":{"user":{"id":"1"}}}`,
+	}
+	c := healthClient(t, rt)
+	c.mu.Lock()
+	c.expiresAt = time.Now().Add(time.Hour) // looks valid; the token is revoked
+	c.mu.Unlock()
+
+	appOK, webOK := c.AuthHealth()
+	if appOK {
+		t.Fatal("app_api reported healthy from a future expiresAt — the token endpoint was never asked")
+	}
+	if !webOK {
+		t.Fatal("web_session should be healthy for this fixture")
+	}
+	if rt.calls() != 1 {
+		t.Fatalf("token endpoint calls = %d, want 1", rt.calls())
+	}
+}
+
+// Regression (review 1017-1 F-03): the web AJAX family answers 200 with
+// {"error":true} for an expired session; a status check called that
+// connected.
+func TestAuthHealthRejectsWebErrorEnvelope(t *testing.T) {
+	rt := &healthTransport{
+		tokenBody: `{"access_token":"acc","refresh_token":"rot","expires_in":3600}`,
+		webBody:   `{"error":true,"message":"please log in"}`,
+	}
+	c := healthClient(t, rt)
+
+	appOK, webOK := c.AuthHealth()
+	if !appOK {
+		t.Fatal("app_api should be healthy for this fixture")
+	}
+	if webOK {
+		t.Fatal("web_session reported healthy for a 200 {\"error\":true} envelope")
+	}
+}
+
+func TestAuthHealthReportsHealthySurfaces(t *testing.T) {
+	rt := &healthTransport{
+		tokenBody: `{"access_token":"acc","refresh_token":"rot","expires_in":3600}`,
+		webBody:   `{"error":false,"body":{"user":{"id":"1"}}}`,
+	}
+	c := healthClient(t, rt)
+
+	if appOK, webOK := c.AuthHealth(); !appOK || !webOK {
+		t.Fatalf("AuthHealth = (%v, %v), want (true, true)", appOK, webOK)
+	}
+}

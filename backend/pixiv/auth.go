@@ -33,9 +33,24 @@ func (c *Client) refresh() error {
 	// everyone else either already sees a valid token or waits here.
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
+	return c.refreshLocked(false)
+}
 
+// forceRefresh runs the token round-trip even when the cached expiry
+// says the access token is still valid. Health probes need pixiv's
+// answer, not "a token was fetched recently".
+func (c *Client) forceRefresh() error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	return c.refreshLocked(true)
+}
+
+// refreshLocked performs the token-endpoint round trip. Callers hold
+// refreshMu — it single-flights the network call and serializes the
+// commit with SetTokens (the other writer of the same credential).
+func (c *Client) refreshLocked(force bool) error {
 	c.mu.Lock()
-	if !time.Now().After(c.expiresAt) {
+	if !force && !time.Now().After(c.expiresAt) {
 		c.mu.Unlock() // another goroutine refreshed while we waited
 		return nil
 	}
@@ -237,14 +252,22 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 	return nil
 }
 
-// AuthHealth probes both auth surfaces: the app-API token (a refresh
-// round-trip means the permanent token is still valid) and the web
-// session (/ajax/user/extra 200s with account data for a live session —
-// unlike /ajax/top/illust, which serves anonymously even when dead).
+// AuthHealth probes both auth surfaces: the app-API token and the web
+// session.
+//
+// The app probe is a REAL token round-trip. The cached expiry only says
+// "a token was fetched recently", so the old short-circuit reported a
+// revoked credential as healthy — and it also reported healthy during
+// the 30s failure backoff, which is indistinguishable from a valid
+// window.
+//
+// The web probe parses the body: pixiv answers 200 {"error":true} for
+// an expired PHPSESSID (the envelope every transform here handles), so
+// a bare status check called a dead session connected.
 func (c *Client) AuthHealth() (appOK bool, webOK bool) {
-	appOK = c.refresh() == nil
-	_, err := c.webGet("https://www.pixiv.net/ajax/user/extra?is_smartphone=0&lang=en")
-	webOK = err == nil
+	appOK = c.forceRefresh() == nil
+	body, err := c.webGet("https://www.pixiv.net/ajax/user/extra?is_smartphone=0&lang=en")
+	webOK = err == nil && !webErrorEnvelope(body)
 	return appOK, webOK
 }
 
