@@ -32,6 +32,12 @@ type imageCache struct {
 	maxEntries int
 	maxBytes   int64
 	totalBytes int64
+	// stop ends the reaper goroutine at shutdown; reapDone closes when it
+	// has actually returned, so Stop() can be synchronous and a test can
+	// assert the goroutine is gone.
+	stop     chan struct{}
+	reapDone chan struct{}
+	stopOnce sync.Once
 }
 
 const (
@@ -44,9 +50,19 @@ func newImageCache(ttl time.Duration, maxEntries int, maxBytes int64) *imageCach
 		ttl:        ttl,
 		maxEntries: maxEntries,
 		maxBytes:   maxBytes,
+		stop:       make(chan struct{}),
+		reapDone:   make(chan struct{}),
 	}
 	go c.reapLoop()
 	return c
+}
+
+// Stop ends the reaper goroutine and waits for it to return. Idempotent
+// (review finding: the reaper was never stopped, so it outlived the
+// server during shutdown and raced the process teardown).
+func (c *imageCache) Stop() {
+	c.stopOnce.Do(func() { close(c.stop) })
+	<-c.reapDone
 }
 
 func (c *imageCache) get(key string) ([]byte, string, bool) {
@@ -115,17 +131,24 @@ func (c *imageCache) reapLoop() {
 	// INSIDE the loop body so the reaper survives and keeps ticking
 	// (a function-scope defer would unwind out of the for loop and
 	// kill the reaper permanently after one panic — reviewer finding).
+	// Closed on Stop() so shutdown does not leave the goroutine behind.
+	defer close(c.reapDone)
 	ticker := time.NewTicker(imageCacheReapInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("ERROR image cache reaper panicked: %v", r)
-				}
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-ticker.C:
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("ERROR image cache reaper panicked: %v", r)
+					}
+				}()
+				c.reapOnce(time.Now())
 			}()
-			c.reapOnce(time.Now())
-		}()
+		}
 	}
 }
 
@@ -418,7 +441,41 @@ func validateListenAddr(addr string, allowPublic bool) (bool, error) {
 	return false, fmt.Errorf("PIXTOK_LISTEN %q binds a non-loopback interface — refusing to boot: keep the backend on 127.0.0.1 and let the reverse proxy expose it (set PIXTOK_ALLOW_PUBLIC_LISTEN=true to override deliberately)", addr)
 }
 
+// serverShutdownDrain bounds the graceful drain. It must cover the
+// longest *bounded* handler budget — the gate tarpit (25s cap) and the
+// auth-proxy upstream timeout (30s) — because a 5s drain cut both off
+// mid-flight. The 120s image relay can still outlive it: systemd's
+// TimeoutStopSec is 90s, so a longer drain only gets the process
+// SIGKILLed before cleanup runs.
+const serverShutdownDrain = 30 * time.Second
+
+// shutdownCleanup is the ONE cleanup path. The cache reaper is always
+// stopped; the prefs DB is closed ONLY after a clean drain — closing it
+// while handlers are still running (the timed-out-Shutdown case) turns
+// their preference writes into "database is closed" errors. Boot
+// failures used to skip prefs.Close entirely; routing every exit through
+// here fixes both.
+func shutdownCleanup(cache *imageCache, prefs *prefsStore, drained bool) {
+	if cache != nil {
+		cache.Stop()
+	}
+	if !drained || prefs == nil {
+		return
+	}
+	if err := prefs.Close(); err != nil {
+		log.Printf("close prefs db: %v", err)
+	}
+}
+
 func main() {
+	// Every exit path funnels through run()'s defers (cache reaper stop,
+	// conditional prefs close); a log.Fatalf here would skip them.
+	if err := run(); err != nil {
+		log.Fatalf("%v", err)
+	}
+}
+
+func run() error {
 	// The .env file holds permanent pixiv credentials — check the
 	// permissions of EVERY candidate that could supply one BEFORE
 	// anything writes to any of them (the old order let a rotated token
@@ -427,23 +484,30 @@ func main() {
 	// anyone who can write the file owns the pixiv credential. Merely
 	// readable keeps the warning.
 	if err := checkEnvFilePermissions(pixiv.EnvCandidates()); err != nil {
-		log.Fatalf("env file: %v", err)
+		return fmt.Errorf("env file: %w", err)
 	}
 
 	client, err := pixiv.NewClient()
 	if err != nil {
-		log.Fatalf("pixiv client: %v", err)
+		return fmt.Errorf("pixiv client: %w", err)
 	}
 	log.Printf("pixiv client initialized, refresh token loaded")
 
 	imgCache := newImageCache(cacheConfigFromEnv())
+	// ONE cleanup path for every exit (boot failure, listen error,
+	// signal): stop the reaper always, close the prefs DB only when the
+	// server drained cleanly. `drained` is read when the defer runs.
+	var prefs *prefsStore
+	drained := false
+	defer func() { shutdownCleanup(imgCache, prefs, drained) }()
 
 	// Durable user prefs (blocked tags) — localStorage on the device
 	// proved unreliable, so prefs live in a small SQLite DB next to the
 	// backend (pixtok.db, gitignored).
-	prefs, err := openPrefs("pixtok.db")
+	prefs, err = openPrefs("pixtok.db")
 	if err != nil {
 		log.Printf("WARNING: prefs db unavailable (%v) — blocked-tag persistence disabled", err)
+		prefs = nil
 	}
 
 	// Loopback only — the Vite dev proxy (and only it) should reach us.
@@ -457,7 +521,7 @@ func main() {
 	allowPublicListen := loadEnvKey("PIXTOK_ALLOW_PUBLIC_LISTEN") == "true"
 	listenLoopback, err := validateListenAddr(addr, allowPublicListen)
 	if err != nil {
-		log.Fatalf("listen config: %v", err)
+		return fmt.Errorf("listen config: %w", err)
 	}
 	if !listenLoopback {
 		log.Printf("WARNING: PIXTOK_LISTEN=%s binds a NON-LOOPBACK interface — this backend serves plaintext HTTP and is now reachable beyond this host. The reverse proxy (serve/Funnel) is the intended exposure point; PIXTOK_ALLOW_PUBLIC_LISTEN=true acknowledged the override.", addr)
@@ -480,7 +544,7 @@ func main() {
 	g, err := newGate(loadEnvKey("PIXTOK_GATE_PASSWORD_HASH"),
 		loadEnvKey("PIXTOK_GATE_ALLOW_PLAINTEXT_DEV_ONLY") == "true")
 	if err != nil {
-		log.Fatalf("gate config: %v", err)
+		return fmt.Errorf("gate config: %w", err)
 	}
 	if !g.enabled {
 		// The gate is the app's only defense on the public Funnel —
@@ -521,7 +585,7 @@ func main() {
 
 	serveFrontend := loadEnvKey("PIXTOK_SERVE_FRONTEND") == "true"
 	if err := validateProdServe(serveFrontend, g.enabled); err != nil {
-		log.Fatalf("prod serve config: %v", err)
+		return fmt.Errorf("prod serve config: %w", err)
 	}
 	if serveFrontend && apiKey != "" {
 		log.Printf("PIXTOK_API_KEY is set but ignored in frontend-serve mode — the gate cookie is the auth")
@@ -566,20 +630,24 @@ func main() {
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server: %v", err)
+			return fmt.Errorf("server: %w", err)
 		}
+		// ListenAndServe returned on its own: no handler can be in flight.
+		drained = true
 	case <-ctx.Done():
 		log.Printf("shutdown signal received — draining…")
-		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shCtx, cancel := context.WithTimeout(context.Background(), serverShutdownDrain)
 		defer cancel()
 		if err := srv.Shutdown(shCtx); err != nil {
-			log.Printf("shutdown: %v", err)
-		}
-		if prefs != nil {
-			if err := prefs.Close(); err != nil {
-				log.Printf("close prefs db: %v", err)
-			}
+			// A timed-out drain means handlers are STILL RUNNING.
+			// Closing the prefs DB now would turn their writes into
+			// "database is closed" errors, so leave it open and let
+			// process exit release it.
+			log.Printf("shutdown: %v — handlers still running; leaving the prefs db open", err)
+		} else {
+			drained = true
 		}
 		log.Printf("shutdown complete")
 	}
+	return nil
 }
