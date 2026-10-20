@@ -42,6 +42,8 @@ function baseSnapshot(): SnapshotInput {
     rankMode: "day",
     newestR18: false,
     topMode: "all",
+    bookmarkVis: "public",
+    bookmarkTag: "",
     stack: [makeIllust({ id: 9 })],
     artist: { id: 42, name: "ArtistName" },
     recs: [makeIllust({ id: 11 })],
@@ -344,6 +346,69 @@ describe("saveSnapshot/loadSnapshot", () => {
     expect(s.page).toBe(0);
     expect(s.hasMore).toBe(false);
     expect(s.order).toBe("date_d");
+  });
+
+  it("migrates a pre-bookmark-pills v1 payload to public / no tag", () => {
+    // The fields are additive on the same v:1 payload: an older snapshot
+    // simply lacks them, and the old default view (Public, unfiltered) is
+    // the only safe reading.
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.feedType).toBe("bookmarks");
+    expect(loaded.bookmarkVis).toBe("public");
+    expect(loaded.bookmarkTag).toBe("");
+  });
+
+  it("round-trips the bookmark pills and drops a tag on the private pile", () => {
+    const snap = baseSnapshot();
+    snap.feedType = "bookmarks";
+    snap.bookmarkVis = "public";
+    snap.bookmarkTag = "tag-one";
+    saveSnapshot(snap);
+    const loaded = loadSnapshot()!;
+    expect(loaded.bookmarkVis).toBe("public");
+    expect(loaded.bookmarkTag).toBe("tag-one");
+
+    // Private has no tag folders — a saved tag must not survive with it.
+    snap.bookmarkVis = "private";
+    snap.bookmarkTag = "tag-one";
+    saveSnapshot(snap);
+    const priv = loadSnapshot()!;
+    expect(priv.bookmarkVis).toBe("private");
+    expect(priv.bookmarkTag).toBe("");
+  });
+
+  it("treats an unknown bookmarkVis value as public", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        stack: [],
+        recs: [],
+        artist: null,
+        bookmarkVis: "weird",
+        bookmarkTag: "tag-one",
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.bookmarkVis).toBe("public");
+    expect(loaded.bookmarkTag).toBe("tag-one");
   });
 
   it("returns null for corrupt JSON", () => {

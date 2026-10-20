@@ -475,6 +475,99 @@ describe("App", () => {
     expect(paramsOf("/api/bookmarks")[0]).toMatchObject({ offset: "0" });
   });
 
+  it("restores the private bookmarks pile from the snapshot", async () => {
+    localStorage.setItem(
+      "pixtok_state_v2",
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        bookmarkVis: "private",
+        bookmarkTag: "",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+      })
+    );
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(6)
+    );
+    // Private pile = the app-API feed, not the public web page.
+    expect(requestCount("/api/bookmarks/private")).toBeGreaterThan(0);
+    expect(requestCount("/api/bookmarks")).toBe(0);
+    const active = container.querySelector(".mode-pill.active");
+    expect(active?.textContent).toBe("Private");
+  });
+
+  it("restores the bookmark tag filter from the snapshot", async () => {
+    server.use(
+      http.get("/api/bookmarks/tags", () =>
+        json({ public: [{ name: "tag-one", count: 3 }], private: [] })
+      )
+    );
+    localStorage.setItem(
+      "pixtok_state_v2",
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        bookmarkVis: "public",
+        bookmarkTag: "tag-one",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+      })
+    );
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(requestCount("/api/bookmarks")).toBeGreaterThan(0)
+    );
+    // The first page load already carries the restored folder.
+    expect(paramsOf("/api/bookmarks")[0]).toMatchObject({
+      tag: "tag-one",
+      offset: "0",
+    });
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll(".mode-pill")].find(
+          (b) => b.textContent === "tag-one"
+        )?.className
+      ).toContain("active")
+    );
+  });
+
+  it("persists the bookmarks visibility pill in the snapshot", async () => {
+    const { getByText, container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+    await fireEvent.click(container.querySelector(".burger-pill")!);
+    await fireEvent.click(getByText("Bookmarks"));
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(8)
+    );
+    await fireEvent.click(
+      [...container.querySelectorAll(".mode-pill")].find(
+        (b) => b.textContent === "Private"
+      )!
+    );
+    await waitFor(() => expect(requestCount("/api/bookmarks/private")).toBe(1));
+    await new Promise((r) => setTimeout(r, 650)); // snapshot debounce
+    const snap = JSON.parse(localStorage.getItem("pixtok_state_v2")!);
+    expect(snap.bookmarkVis).toBe("private");
+  });
+
   it("locks behind the gate and boots after unlocking", async () => {
     server.use(http.get("/api/gate/status", () => json({ locked: true })));
     const { container } = render(() => <App />);

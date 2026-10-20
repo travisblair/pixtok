@@ -168,6 +168,12 @@ export interface AppSnapshot {
   rankMode: string;
   newestR18: boolean;
   topMode: string;
+  // Bookmarks tab pill selections (public|private pile + the active tag
+  // folder) — navigation state like the tabs above, so a reload lands on
+  // the SAME pile instead of snapping back to Public/unfiltered. Absent in
+  // pre-fix v1 payloads: those load as public / no tag (the old default).
+  bookmarkVis: "public" | "private";
+  bookmarkTag: string;
   stack: PixivIllust[];
   artist: { id: number; name: string } | null;
   recs: PixivIllust[];
@@ -199,6 +205,11 @@ export function saveSnapshot(snap: SnapshotInput): void {
       rankMode: snap.rankMode,
       newestR18: snap.newestR18,
       topMode: snap.topMode,
+      bookmarkVis: snap.bookmarkVis === "private" ? "private" : "public",
+      // A tag folder only exists on the public list; don't carry a stale
+      // tag across a private pile save.
+      bookmarkTag:
+        snap.bookmarkVis === "private" ? "" : (snap.bookmarkTag ?? "").slice(0, 64),
       stack: snap.stack.slice(0, MAX_STACK_DEPTH),
       artist: snap.artist,
       recs: snap.recs.slice(0, MAX_SNAPSHOT_ITEMS),
@@ -271,6 +282,13 @@ export function loadSnapshot(): AppSnapshot | null {
       rankMode: parsed.rankMode ?? "day",
       newestR18: !!parsed.newestR18,
       topMode: parsed.topMode ?? "all",
+      bookmarkVis: parsed.bookmarkVis === "private" ? "private" : "public",
+      bookmarkTag:
+        parsed.bookmarkVis === "private"
+          ? ""
+          : typeof parsed.bookmarkTag === "string"
+            ? parsed.bookmarkTag.slice(0, 64)
+            : "",
       stack: (parsed.stack as unknown[]).filter(isRenderableIllustEntry),
       artist:
         parsed.artist &&

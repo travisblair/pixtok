@@ -49,6 +49,30 @@ test.describe("Reload persistence", () => {
     await expect.poll(() => mocks.userCalls.length).toBe(2);
   });
 
+  test("the private bookmarks pile survives a reload", async ({ page }) => {
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    await switchFeedViaDrawer(page, "Bookmarks");
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15_000 });
+    await page.locator(".mode-pill", { hasText: "Private" }).click();
+    await expect.poll(() => mocks.bookmarkPrivateCalls.length).toBe(1);
+    await expect(page.locator(".mode-pill.active")).toHaveText("Private");
+
+    // Snapshot debounce, then the jetsam-style reload.
+    await page.waitForTimeout(800);
+    await page.reload();
+
+    // The pill is restored (the old snapshot dropped it and the pile looked
+    // lost) and the private feed refetches fresh.
+    await expect(page.locator(".mode-pill.active")).toHaveText("Private", {
+      timeout: 15_000,
+    });
+    await expect(page.locator(".feed-card")).toHaveCount(6, { timeout: 15_000 });
+    await expect.poll(() => mocks.bookmarkPrivateCalls.length).toBe(2);
+  });
+
   test("a bfcache restore forces a clean reload (no frozen-heap resurrection)", async ({
     page,
   }) => {

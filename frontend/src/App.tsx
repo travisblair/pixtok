@@ -390,6 +390,10 @@ export default function App() {
       setRankMode(isRankingMode(snap.rankMode) ? snap.rankMode : "day");
       setNewestR18(!!snap.newestR18);
       setTopMode(snap.topMode === "r18" ? "r18" : "all");
+      // Bookmarks pills are navigation state too — a reload on the Private
+      // pile must not snap back to Public (the pile then looked lost).
+      setBookmarkVis(snap.bookmarkVis);
+      setBookmarkTag(snap.bookmarkTag);
 
       layers.restore(snap);
 
@@ -472,6 +476,8 @@ export default function App() {
     void rankMode();
     void newestR18();
     void topMode();
+    void bookmarkVis();
+    void bookmarkTag();
     void stack();
     void artist();
     void recs();
@@ -522,6 +528,8 @@ export default function App() {
       rankMode: rankMode(),
       newestR18: newestR18(),
       topMode: topMode(),
+      bookmarkVis: bookmarkVis(),
+      bookmarkTag: bookmarkTag(),
       ...layers.layerSnapshot(),
       recs: recs(),
       recsSource: recsSource(),
