@@ -139,6 +139,30 @@ func isCORSHeader(k string) bool {
 	return false
 }
 
+// loginProxyRewriteCap bounds a JSON/HTML body that must be buffered for
+// URL rewriting. Over the cap the proxy answers 502 instead of relaying
+// JSON that was cut in half (the old behavior sent a truncated body with
+// a Content-Length matching the truncation, so the client saw
+// complete-length but invalid JSON).
+const loginProxyRewriteCap = 2 << 20
+
+// loginProxyStreamCap bounds a streamed passthrough body; truncation past
+// it is logged (headers are already committed, so a status is impossible).
+const loginProxyStreamCap = 8 << 20
+
+// isHopByHopHeader reports whether k is connection-scoped (RFC 7230
+// §6.1) and therefore must not be copied from an upstream response onto
+// ours. Content-Length/Content-Encoding are handled separately because
+// this proxy caps and rewrites bodies.
+func isHopByHopHeader(k string) bool {
+	switch k {
+	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		return true
+	}
+	return false
+}
+
 // rewriteBodyURLs maps absolute pixiv URLs inside JSON response bodies
 // back onto our proxy paths. The login SPA replies with absolute URLs
 // (success.returnTo, 2FA redirects) — without this the browser would
@@ -363,16 +387,26 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 			resp.Header.Set("Location", rewriteLocation(loc))
 		}
 
+		// Copy upstream headers, minus the ones that describe the
+		// upstream connection rather than the response:
+		//   - Content-Length / Content-Encoding: bodies are capped and
+		//     sometimes rewritten, so these would desync the response
+		//     (the rewrite branch sets its own; passthrough is chunked).
+		//   - RFC 7230 hop-by-hop headers (plus every header named in
+		//     Connection): they are connection-scoped and a buggy or
+		//     hostile upstream must not influence OUR connection
+		//     semantics (review finding).
+		//   - Access-Control-*: the UPSTREAM's CORS posture; the login
+		//     SPA is same-origin through this proxy and needs no grants.
+		connectionNamed := map[string]bool{}
+		for _, f := range strings.Split(resp.Header.Get("Connection"), ",") {
+			if name := strings.TrimSpace(f); name != "" {
+				connectionNamed[http.CanonicalHeaderKey(name)] = true
+			}
+		}
 		for k, vs := range resp.Header {
-			// Content-Length and Content-Encoding must not be copied
-			// verbatim: bodies are truncated (2-8 MB) and rewritten below,
-			// so an upstream Content-Length would desync the response. The
-			// rewrite branch sets its own; the passthrough streams chunked.
-			// Access-Control-* is the UPSTREAM's CORS posture — copying it
-			// onto our origin is needless and could confuse browsers
-			// (reviewer finding). The login SPA is same-origin through
-			// this proxy and needs no CORS grants.
-			if k == "Content-Length" || k == "Content-Encoding" || isCORSHeader(k) {
+			if k == "Content-Length" || k == "Content-Encoding" ||
+				isHopByHopHeader(k) || connectionNamed[k] || isCORSHeader(k) {
 				continue
 			}
 			for _, v := range vs {
@@ -392,17 +426,41 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 		rewriteBody := strings.Contains(ct, "json") ||
 			(kind == "accounts" && strings.Contains(r.URL.Path, "/post-redirect") && strings.Contains(ct, "html"))
 		if rewriteBody {
-			body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-			if err == nil {
-				body = rewriteBodyURLs(body)
-				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-				w.WriteHeader(resp.StatusCode)
-				_, _ = w.Write(body)
+			// Read one byte past the cap so an oversized body is DETECTED
+			// rather than silently truncated into invalid JSON served
+			// with a matching (but lie-shaped) Content-Length.
+			body, err := io.ReadAll(io.LimitReader(resp.Body, loginProxyRewriteCap+1))
+			if err != nil {
+				log.Printf("ERROR login proxy: reading rewrite body: %v", err)
+				http.Error(w, "upstream read failed", http.StatusBadGateway)
 				return
 			}
+			if len(body) > loginProxyRewriteCap {
+				log.Printf("ERROR login proxy: %s body exceeds %d bytes — refusing to relay truncated JSON", r.URL.Path, loginProxyRewriteCap)
+				http.Error(w, "upstream response too large", http.StatusBadGateway)
+				return
+			}
+			body = rewriteBodyURLs(body)
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(body)
+			return
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, io.LimitReader(resp.Body, 8<<20))
+		written, err := io.Copy(w, io.LimitReader(resp.Body, loginProxyStreamCap))
+		if err != nil {
+			// Headers are already committed: log the truncation, never
+			// try to write a status into the body.
+			log.Printf("ERROR login proxy: stream failed after %d bytes: %v", written, err)
+			return
+		}
+		// One extra read tells us the cap cut the body — the client got a
+		// complete-looking 200 with a truncated page, which must at least
+		// be visible in the journal.
+		var extra [1]byte
+		if n, _ := resp.Body.Read(extra[:]); n > 0 {
+			log.Printf("WARN login proxy: stream truncated at the %d-byte cap (%s)", loginProxyStreamCap, r.URL.Path)
+		}
 	}
 
 	// px routes: the login flow's navigations (/api/auth/px/<kind>/...).
