@@ -95,3 +95,18 @@ func TestBookmarkIDsCacheErrorsNeverCached(t *testing.T) {
 		t.Fatal("failed fetch must not be cached")
 	}
 }
+
+// A bookmark walk that started under the previous account must not
+// deposit its ids after a credential swap reset the cache.
+func TestBookmarkIDsCacheResetDropsInflightWalk(t *testing.T) {
+	b := newBookmarkIDsCache(time.Minute)
+	_, _, call, lead := b.getOrStart("public|1")
+	if !lead {
+		t.Fatal("first caller must lead")
+	}
+	b.reset()
+	b.finish("public|1", call, []string{"old-account-work"}, nil)
+	if _, fresh, _, _ := b.getOrStart("public|1"); fresh {
+		t.Fatal("a walk started before the reset populated the new account's cache")
+	}
+}

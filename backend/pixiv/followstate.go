@@ -104,6 +104,20 @@ func (f *followStateCache) invalidate(id string) {
 	f.mu.Unlock()
 }
 
+// reset drops every cached value. Called on a credential swap: the cache
+// is keyed by artist id only, so values fetched under the previous
+// account would otherwise be served to the new one for a full TTL. The
+// epoch of every in-flight call is bumped so a detail fetch that started
+// under the old account cannot repopulate the cache after the swap.
+func (f *followStateCache) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id := range f.inflight {
+		f.epochs[id]++
+	}
+	f.items = make(map[string]followStateEntry)
+}
+
 // finish stores a successful result (errors are NEVER cached) and wakes
 // the followers. A result whose epoch was bumped by invalidate() is
 // dropped — it predates the user's own toggle. Either way the id's

@@ -342,6 +342,7 @@ func (c *Client) SetWebSession(phpsessid, csrfToken string) error {
 	}
 	c.phpSessID = phpsessid
 	c.csrfTokenCache = csrfToken
+	c.resetSessionCaches()
 	return nil
 }
 

@@ -28,6 +28,7 @@ type bookmarkIDsCall struct {
 	done chan struct{}
 	ids  []string
 	err  error
+	gen  uint64
 }
 
 type bookmarkIDsCache struct {
@@ -35,6 +36,10 @@ type bookmarkIDsCache struct {
 	ttl      time.Duration
 	items    map[string]bookmarkIDsEntry
 	inflight map[string]*bookmarkIDsCall
+	// gen identifies the credentials the cache was filled under. reset()
+	// bumps it so a walk that started under the previous account cannot
+	// deposit that account's ids into the new account's cache.
+	gen uint64
 }
 
 func newBookmarkIDsCache(ttl time.Duration) *bookmarkIDsCache {
@@ -59,9 +64,19 @@ func (b *bookmarkIDsCache) getOrStart(key string) (ids []string, fresh bool, cal
 	if c, ok := b.inflight[key]; ok {
 		return nil, false, c, false
 	}
-	c := &bookmarkIDsCall{done: make(chan struct{})}
+	c := &bookmarkIDsCall{done: make(chan struct{}), gen: b.gen}
 	b.inflight[key] = c
 	return nil, false, c, true
+}
+
+// reset drops every cached value; see followStateCache.reset. The
+// generation bump keeps an in-flight walk started under the old
+// credentials from being stored.
+func (b *bookmarkIDsCache) reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gen++
+	b.items = make(map[string]bookmarkIDsEntry)
 }
 
 // finish stores a successful result (errors are NEVER cached) and wakes
@@ -69,7 +84,7 @@ func (b *bookmarkIDsCache) getOrStart(key string) (ids []string, fresh bool, cal
 func (b *bookmarkIDsCache) finish(key string, call *bookmarkIDsCall, ids []string, err error) {
 	b.mu.Lock()
 	delete(b.inflight, key)
-	if err == nil {
+	if err == nil && call.gen == b.gen {
 		b.items[key] = bookmarkIDsEntry{ids: ids, expires: time.Now().Add(b.ttl)}
 	}
 	b.mu.Unlock()

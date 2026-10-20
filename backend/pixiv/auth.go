@@ -262,7 +262,24 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 	c.accessToken = accessToken
 	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-tokenExpirySkew)
 	c.mu.Unlock()
+	c.resetSessionCaches()
 	return nil
+}
+
+// resetSessionCaches drops every cache that was populated from the
+// credentialed account. The in-app login can pick a DIFFERENT pixiv
+// account, and both caches are keyed only by request shape / artist id —
+// nothing else invalidates them. Without this, account A's liked ids
+// (5 min) and follow state (30 min) are served to account B, and a 429
+// cooldown tripped under A suppresses B's follow buttons for 5 min.
+func (c *Client) resetSessionCaches() {
+	if c.followState != nil {
+		c.followState.reset()
+	}
+	if c.bookmarkIDs != nil {
+		c.bookmarkIDs.reset()
+	}
+	c.followCooldown.Store(0)
 }
 
 // AuthHealth probes both auth surfaces: the app-API token and the web
