@@ -99,7 +99,9 @@ test.describe("UX round", () => {
   test("tapping another artist name inside an artist view swaps to that artist", async ({
     page,
   }) => {
-    const mocks = await setupApiMocks(page);
+    // Artist 1001 is followed; every other id is not. That asymmetry is
+    // what makes a stale follow state across the swap detectable.
+    const mocks = await setupApiMocks(page, { followedIds: [1001] });
     await gotoApp(page);
     await expectMainFeedCount(page, 30);
 
@@ -107,6 +109,8 @@ test.describe("UX round", () => {
     await page.locator(".feed-card").first().locator(".card-artist a").click();
     await expect(page.locator(".artist-view")).toBeVisible();
     await expect.poll(() => mocks.userCalls.length).toBe(1);
+    const followBtn = page.locator(".artist-view .artist-follow:not(.small)");
+    await expect(followBtn).toHaveText("Following", { timeout: 5000 });
 
     // Tap a DIFFERENT artist's name on a card inside the view.
     const swapLink = page
@@ -126,6 +130,17 @@ test.describe("UX round", () => {
     await expect.poll(() => mocks.userCalls.length).toBe(2);
     expect(mocks.userCalls[1].id).toBe(swapId);
     await expect(page.locator(".artist-name-badge")).toHaveText(swapName);
+
+    // Follow state is keyed to the artist too. Regression: the header kept
+    // artist A's "Following" next to B's name, and the next tap POSTed
+    // unfollow for B — someone the viewer never followed.
+    await expect(followBtn).toHaveText("Follow", { timeout: 5000 });
+    await page.waitForTimeout(500); // let the slide-in settle before the tap
+    await followBtn.click();
+    await expect(followBtn).toHaveText("Following");
+    await expect.poll(() => mocks.followCalls.length).toBe(1);
+    expect(mocks.followCalls[0].id).toBe(swapId);
+    expect(mocks.unfollowCalls).toHaveLength(0);
   });
 
   test("gear opens settings; blocked tags filter the feed", async ({ page }) => {
