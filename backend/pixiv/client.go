@@ -118,23 +118,10 @@ const clientTimeout = 30 * time.Second
 const tlsHandshakeTimeout = 20 * time.Second
 
 func NewClient() (*Client, error) {
-	rt := os.Getenv("PIXIV_REFRESH_TOKEN")
+	rt := ReadEnvKey("PIXIV_REFRESH_TOKEN")
 	if rt == "" {
-		// Try reading from the .env next to the backend/binary.
-		data, err := os.ReadFile(envFilePath())
-		if err != nil {
-			return nil, fmt.Errorf("PIXIV_REFRESH_TOKEN not set and .env not found: %w", err)
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "PIXIV_REFRESH_TOKEN=") {
-				rt = strings.TrimPrefix(line, "PIXIV_REFRESH_TOKEN=")
-				break
-			}
-		}
-	}
-	if rt == "" {
-		return nil, fmt.Errorf("PIXIV_REFRESH_TOKEN not found")
+		return nil, fmt.Errorf("PIXIV_REFRESH_TOKEN not set in the environment or any .env candidate (%s)",
+			strings.Join(EnvCandidates(), ", "))
 	}
 
 	c := &Client{
@@ -154,29 +141,13 @@ func NewClient() (*Client, error) {
 		bookmarkIDs: newBookmarkIDsCache(bookmarkIDsTTL),
 	}
 
-	// Also try loading PHPSESSID and the csrf token for web AJAX — env
-	// first (mirrors the refresh token), .env file as fallback. These
-	// writes happen before the client is reachable by any request
-	// handler, so no lock is needed yet.
-	if v := os.Getenv("PIXIV_PHPSESSID"); v != "" {
+	// Also load PHPSESSID and the csrf token for web AJAX, through the
+	// same resolver as every other credential read.
+	if v := ReadEnvKey("PIXIV_PHPSESSID"); v != "" {
 		c.phpSessID = v
 	}
-	if v := os.Getenv("PIXTOK_CSRF_TOKEN"); v != "" {
+	if v := ReadEnvKey("PIXTOK_CSRF_TOKEN"); v != "" {
 		c.csrfTokenCache = v
-	}
-	if c.phpSessID == "" || c.csrfTokenCache == "" {
-		data, err := os.ReadFile(envFilePath())
-		if err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				if c.phpSessID == "" && strings.HasPrefix(line, "PIXIV_PHPSESSID=") {
-					c.phpSessID = strings.TrimPrefix(line, "PIXIV_PHPSESSID=")
-				}
-				if c.csrfTokenCache == "" && strings.HasPrefix(line, "PIXTOK_CSRF_TOKEN=") {
-					c.csrfTokenCache = strings.TrimPrefix(line, "PIXTOK_CSRF_TOKEN=")
-				}
-			}
-		}
 	}
 
 	if err := c.refresh(); err != nil {
@@ -300,33 +271,104 @@ func ValidID(id string) bool {
 // other).
 var envFileMu sync.Mutex
 
-// envFilePath resolves the .env the backend reads/writes: the first
-// candidate that already exists wins, otherwise the first candidate is
-// used as the create target. Binary-dir-relative first so a backend
-// started from any CWD still finds the same file (reviewer finding:
-// the old hardcoded "../.env" silently failed from other directories).
-func envFilePath() string {
-	// PIXTOK_ENV_FILE pins ONE file — no candidate search (reviewer
-	// finding: the search resolves to "some .env", which surprises
-	// operators). When set, it is the only candidate, read AND write.
+// EnvCandidates returns the .env paths to try, in order: next to the
+// binary (works no matter the CWD), then the dev layout (../.env when
+// running from backend/), then CWD. PIXTOK_ENV_FILE pins exactly ONE
+// file — no candidate search.
+//
+// This is the SINGLE resolver: every .env read, every write and the boot
+// permission check use the same ordered list (review finding: four
+// different precedence rules meant the permission check could inspect a
+// file other than the one that supplied the credential).
+func EnvCandidates() []string {
 	if v := os.Getenv("PIXTOK_ENV_FILE"); v != "" {
-		return v
+		return []string{v}
 	}
-	candidates := []string{}
+	var out []string
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
+		out = append(out,
 			filepath.Join(exeDir, ".env"),
 			filepath.Join(exeDir, "..", ".env"),
 		)
 	}
-	candidates = append(candidates, "../.env", ".env")
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+	return append(out, "../.env", ".env")
+}
+
+// envValue returns the value of KEY from .env text.
+func envValue(data, name string) (string, bool) {
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, name+"=") {
+			return strings.TrimPrefix(line, name+"="), true
 		}
 	}
+	return "", false
+}
+
+// ReadEnvKey reads KEY from the process environment first, then from the
+// first candidate file that CONTAINS the key. A file that exists but
+// lacks the key does not shadow a later one — that mismatch (reads
+// skipped to the next file, writes stopped at the first existing one) is
+// how a rotation could land in a file nothing ever read.
+func ReadEnvKey(name string) string {
+	return readEnvKeyFrom(EnvCandidates(), name)
+}
+
+func readEnvKeyFrom(candidates []string, name string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if v, ok := envValue(string(data), name); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// EnvFileForWrite resolves the file UpdateEnvFile should rewrite: the
+// first candidate that already CONTAINS one of the keys being written
+// (so a rotation lands where the credential lives), else the first
+// candidate that exists (the deployment's .env), else the first candidate
+// as the create target for a deployment bootstrapped from process env.
+func EnvFileForWrite(keys []string) string {
+	return envFileForWrite(EnvCandidates(), keys)
+}
+
+func envFileForWrite(candidates []string, keys []string) string {
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, key := range keys {
+			if _, ok := envValue(string(data), key); ok {
+				return path
+			}
+		}
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	if len(candidates) == 0 {
+		return ".env"
+	}
 	return candidates[0]
+}
+
+func envKeys(kv map[string]string) []string {
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func UpdateEnvFile(kv map[string]string) error {
@@ -342,7 +384,7 @@ func UpdateEnvFile(kv map[string]string) error {
 		}
 	}
 
-	path := envFilePath()
+	path := EnvFileForWrite(envKeys(kv))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {

@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,55 +128,41 @@ func (c *imageCache) reapLoop() {
 	}
 }
 
-// envFileCandidates returns the .env paths to try, in order: next to the
-// binary (works no matter the CWD), then the dev layout (../.env when
-// running from backend/), then CWD. Reviewer note: the old code was
-// CWD-relative only — starting the binary from another directory made
-// token writes land nowhere.
-func envFileCandidates() []string {
-	// PIXTOK_ENV_FILE pins ONE file — no candidate search (reviewer
-	// finding: the search resolves to "some .env", which surprises
-	// operators). When set, it is the only candidate, read AND write.
-	if v := os.Getenv("PIXTOK_ENV_FILE"); v != "" {
-		return []string{v}
-	}
-	var out []string
-	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		out = append(out,
-			filepath.Join(exeDir, ".env"),
-			filepath.Join(exeDir, "..", ".env"),
-		)
-	}
-	out = append(out, "../.env", ".env")
-	return out
-}
-
-// loadEnvKey reads KEY=value from the environment first, then from the
-// .env candidate paths.
+// loadEnvKey reads KEY=value through the ONE resolver in pixiv: the
+// process environment wins, then the first candidate .env file that
+// contains the key. Read, write and the boot permission check all share
+// pixiv.EnvCandidates(), so they can never disagree about which file
+// holds a credential.
 //
 // Precedence note (reviewer finding): the ENVIRONMENT wins. In-app login
-// persists fresh tokens to .env, but if the process environment already
-// carries PIXIV_REFRESH_TOKEN, that stale value continues to win on the
-// next boot. When running with env-var credentials, don't rely on .env
-// (or stop persisting to it).
+// persists fresh tokens to .env, but a refresh token already present in
+// the process environment keeps winning on the next boot. When running
+// with env-var credentials, don't rely on .env (or stop persisting to it).
 func loadEnvKey(name string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	for _, path := range envFileCandidates() {
-		data, err := os.ReadFile(path)
+	return pixiv.ReadEnvKey(name)
+}
+
+// checkEnvFilePermissions refuses to boot when any .env candidate that
+// could supply a credential is group/world-writable, and warns when one
+// is group/world-readable. EVERY existing candidate is checked, not just
+// the first: the resolver reads a key from the first file CONTAINING it,
+// so a later file can be the file that actually supplies the credential
+// (review finding: the old loop `break`ed at the first existing file and
+// could therefore inspect a file with no credentials in it).
+func checkEnvFilePermissions(candidates []string) error {
+	for _, p := range candidates {
+		fi, err := os.Stat(p)
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, name+"=") {
-				return strings.TrimPrefix(line, name+"=")
-			}
+		if fi.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("%s is group/world-writable (mode %04o) — refusing to boot: an attacker who can write this file owns the pixiv credential", p, fi.Mode().Perm())
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			log.Printf("WARNING: %s is group/world-readable (mode %04o) — chmod 600 it, it holds pixiv credentials", p, fi.Mode().Perm())
 		}
 	}
-	return ""
+	return nil
 }
 
 // publicHTTPSEnabled reports whether the deployment serves the app over
@@ -391,23 +377,15 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 }
 
 func main() {
-	// The .env file holds permanent pixiv credentials — check its
-	// permissions BEFORE anything writes to it (the old order let a
-	// rotated token or a fresh gate hash land in a world-writable file
-	// before the fatal check refused boot). The atomic rewrite writes
-	// new files 0600, but a pre-existing file may not be. Group/world-
-	// WRITABLE is fatal (fail-closed): anyone who can write the file
-	// owns the pixiv credential. Merely readable keeps the warning.
-	for _, p := range envFileCandidates() {
-		if fi, err := os.Stat(p); err == nil {
-			if fi.Mode().Perm()&0o022 != 0 {
-				log.Fatalf("%s is group/world-writable (mode %04o) — refusing to boot: an attacker who can write this file owns the pixiv credential", p, fi.Mode().Perm())
-			}
-			if fi.Mode().Perm()&0o077 != 0 {
-				log.Printf("WARNING: %s is group/world-readable (mode %04o) — chmod 600 it, it holds pixiv credentials", p, fi.Mode().Perm())
-			}
-			break // same precedence as loadEnvKey — first existing file wins
-		}
+	// The .env file holds permanent pixiv credentials — check the
+	// permissions of EVERY candidate that could supply one BEFORE
+	// anything writes to any of them (the old order let a rotated token
+	// or a fresh gate hash land in a world-writable file before the fatal
+	// check refused boot). Group/world-WRITABLE is fatal (fail-closed):
+	// anyone who can write the file owns the pixiv credential. Merely
+	// readable keeps the warning.
+	if err := checkEnvFilePermissions(pixiv.EnvCandidates()); err != nil {
+		log.Fatalf("env file: %v", err)
 	}
 
 	client, err := pixiv.NewClient()
