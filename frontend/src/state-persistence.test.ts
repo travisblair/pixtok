@@ -282,6 +282,70 @@ describe("saveSnapshot/loadSnapshot", () => {
     expect(loaded.searchTags).toEqual(["snow"]);
   });
 
+  it("deep-validates search works/users so a malformed entry can't throw out of boot()", () => {
+    // SearchScreen reads w.id at mount and u.previews.slice in the artist
+    // rows. Only the array CONTAINERS used to be checked, so null works /
+    // preview-less users passed validation and threw during boot — the
+    // gate catch re-locked the app and the bad state was never repaired.
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [],
+        recs: [],
+        artist: null,
+        searchStack: [
+          {
+            ...makeSearchState("snow"),
+            works: [null, 42, makeIllust({ id: 31 })],
+            popular: [{ nope: true }, makeIllust({ id: 32 })],
+            related: [{ name: 5 }, { name: "miku" }],
+            users: [
+              { id: 5, name: "no-previews", avatar: "b" }, // previews missing → []
+              { id: "6", name: "bad-id", avatar: "c" }, // dropped (id)
+              {
+                id: 7,
+                name: "ok",
+                avatar: "a",
+                previews: [null, makeIllust({ id: 33 })],
+              },
+            ],
+          },
+        ],
+        searchTags: ["snow"],
+      })
+    );
+    const s = loadSnapshot()!.searchStack[0];
+    expect(s.works.map((w) => w.id)).toEqual([31]);
+    expect(s.popular.map((w) => w.id)).toEqual([32]);
+    expect(s.related).toEqual([{ name: "miku" }]);
+    expect(s.users.map((u) => u.id)).toEqual([5, 7]);
+    expect(s.users[0].previews).toEqual([]);
+    expect(s.users[1].previews.map((p) => p.id)).toEqual([33]);
+  });
+
+  it("defaults malformed search filter fields instead of passing them through", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [],
+        recs: [],
+        artist: null,
+        searchStack: [
+          { word: "x", works: [], users: [], mode: "weird", page: "2", hasMore: 1 },
+        ],
+      })
+    );
+    const s = loadSnapshot()!.searchStack[0];
+    expect(s.mode).toBe("works");
+    expect(s.page).toBe(0);
+    expect(s.hasMore).toBe(false);
+    expect(s.order).toBe("date_d");
+  });
+
   it("returns null for corrupt JSON", () => {
     localStorage.setItem(KEY, "{not json");
     expect(loadSnapshot()).toBeNull();

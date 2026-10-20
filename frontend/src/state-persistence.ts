@@ -1,5 +1,6 @@
-import type { PixivIllust } from "./types";
+import type { PixivIllust, SearchUserResult } from "./types";
 import type { SearchState } from "./components/SearchScreen";
+import { DEFAULT_FILTERS } from "./components/SearchFilters";
 
 // Feed-tab membership for snapshot validation (mirrors the FeedType
 // union in App.tsx — a hand-edited or future-schema snapshot must not
@@ -29,6 +30,103 @@ function isRenderableIllustEntry(s: unknown): s is PixivIllust {
     typeof entry.image_urls === "object" &&
     typeof entry.image_urls.large === "string"
   );
+}
+
+/**
+ * Search layers restore their result arrays straight into SearchScreen,
+ * which reads `w.id` for its dedupe set and `u.previews.slice(...)` in the
+ * artist rows. Validating only the CONTAINERS let a null work or a
+ * user without previews through, and the throw escaped boot(): the gate
+ * catch re-locked the screen (reported as gate:unreachable) with no way to
+ * repair the saved state. Sanitize the entries; a layer whose contents are
+ * bad restores EMPTY and its mount auto-run refetches.
+ */
+function sanitizeSearchUser(v: unknown): SearchUserResult | null {
+  if (!v || typeof v !== "object") return null;
+  const u = v as {
+    id?: unknown;
+    name?: unknown;
+    avatar?: unknown;
+    premium?: unknown;
+    is_followed?: unknown;
+    previews?: unknown;
+  };
+  if (
+    typeof u.id !== "number" ||
+    typeof u.name !== "string" ||
+    typeof u.avatar !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: u.id,
+    name: u.name,
+    avatar: u.avatar,
+    premium: u.premium === true,
+    is_followed: u.is_followed === true,
+    previews: Array.isArray(u.previews)
+      ? u.previews.filter(isRenderableIllustEntry)
+      : [],
+  };
+}
+
+function sanitizeRelatedTag(
+  v: unknown
+): { name: string; translated_name?: string } | null {
+  if (!v || typeof v !== "object") return null;
+  const t = v as { name?: unknown; translated_name?: unknown };
+  if (typeof t.name !== "string") return null;
+  return typeof t.translated_name === "string"
+    ? { name: t.name, translated_name: t.translated_name }
+    : { name: t.name };
+}
+
+function sanitizeSearchState(v: unknown): SearchState | null {
+  if (!v || typeof v !== "object") return null;
+  const s = v as Record<string, unknown>;
+  // Containers required; anything else falls back to the filter defaults.
+  if (
+    typeof s.word !== "string" ||
+    !Array.isArray(s.works) ||
+    !Array.isArray(s.users)
+  ) {
+    return null;
+  }
+  return {
+    word: s.word,
+    mode: s.mode === "artists" ? "artists" : "works",
+    order: typeof s.order === "string" ? s.order : DEFAULT_FILTERS.order,
+    contentMode:
+      s.contentMode === "safe" || s.contentMode === "r18"
+        ? s.contentMode
+        : DEFAULT_FILTERS.contentMode,
+    workType:
+      s.workType === "illust" || s.workType === "ugoira"
+        ? s.workType
+        : DEFAULT_FILTERS.workType,
+    sMode: typeof s.sMode === "string" ? s.sMode : DEFAULT_FILTERS.sMode,
+    aiType: s.aiType === "1" ? "1" : DEFAULT_FILTERS.aiType,
+    dateMode: s.dateMode === "custom" ? "custom" : "all",
+    scd: typeof s.scd === "string" ? s.scd : "",
+    sce: typeof s.sce === "string" ? s.sce : "",
+    works: s.works.filter(isRenderableIllustEntry),
+    popular: Array.isArray(s.popular)
+      ? s.popular.filter(isRenderableIllustEntry)
+      : [],
+    related: Array.isArray(s.related)
+      ? s.related
+          .map(sanitizeRelatedTag)
+          .filter((t): t is { name: string } => t !== null)
+      : [],
+    users: s.users
+      .map(sanitizeSearchUser)
+      .filter((u): u is SearchUserResult => u !== null),
+    page:
+      typeof s.page === "number" && Number.isInteger(s.page) && s.page >= 0
+        ? s.page
+        : 0,
+    hasMore: s.hasMore === true,
+  };
 }
 
 /**
@@ -144,22 +242,14 @@ export function loadSnapshot(): AppSnapshot | null {
     // are parallel, and the restore in App.tsx maps tags[i] over the
     // VALIDATED stack.
     const searchStack: SearchState[] = Array.isArray(parsed.searchStack)
-      ? (parsed.searchStack.filter(
-          (s): s is SearchState =>
-            !!s &&
-            typeof s === "object" &&
-            typeof s.word === "string" &&
-            Array.isArray(s.works) &&
-            Array.isArray(s.users)
-        ) as SearchState[])
+      ? parsed.searchStack
+          .map(sanitizeSearchState)
+          .filter((s): s is SearchState => s !== null)
       : // Legacy single-search snapshots migrate into stack[0].
-        parsed.search &&
-        typeof parsed.search === "object" &&
-        typeof parsed.search.word === "string" &&
-        Array.isArray(parsed.search.works) &&
-        Array.isArray(parsed.search.users)
-        ? [parsed.search as SearchState]
-        : [];
+        (() => {
+          const legacy = sanitizeSearchState(parsed.search);
+          return legacy ? [legacy] : [];
+        })();
 
     const rawTags: (string | null)[] = Array.isArray(parsed.searchTags)
       ? parsed.searchTags

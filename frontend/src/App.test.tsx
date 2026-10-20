@@ -398,6 +398,67 @@ describe("App", () => {
     expect(requestCount("/api/search/artworks")).toBe(0);
   });
 
+  it("boots past a malformed restored search layer instead of re-locking the gate", async () => {
+    // A v1 snapshot whose search arrays carry junk (null works, a user with
+    // no previews, primitive popular/related entries). The old loader
+    // validated only the array containers, so SearchScreen threw during
+    // boot — the gate-status catch re-locked the screen as
+    // gate:unreachable, and every reload repeated it. The layer must
+    // restore sanitized (empty results) and refetch on mount.
+    localStorage.setItem(
+      "pixtok_state_v2",
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+        searchStack: [
+          {
+            word: "fantasy",
+            mode: "works",
+            order: "date_d",
+            contentMode: "all",
+            workType: "all",
+            sMode: "s_tag_full",
+            aiType: "0",
+            dateMode: "all",
+            scd: "",
+            sce: "",
+            works: [null, 42],
+            popular: [{}],
+            related: [null],
+            users: [{ id: 5, name: "NoPreviews" }],
+            page: 1,
+            hasMore: false,
+          },
+        ],
+        searchTags: [null],
+        layerOrder: ["search0"],
+      })
+    );
+    const { container } = render(() => <App />);
+    // The app booted: feed requested, no gate screen.
+    await waitFor(() =>
+      expect(requestCount("/api/street")).toBeGreaterThan(0)
+    );
+    expect(container.querySelector(".gate-screen")).toBeNull();
+    await waitFor(() =>
+      expect(container.querySelector(".search-screen")).not.toBeNull()
+    );
+    expect(
+      (container.querySelector(".search-input") as HTMLInputElement).value
+    ).toBe("fantasy");
+    // Empty restored results -> exactly one mount refetch.
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
+  });
+
   it("Bookmarks tab loads the user's bookmarked works", async () => {
     const { getByText, container } = render(() => <App />);
     await waitFor(() =>
