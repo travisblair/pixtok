@@ -1,5 +1,6 @@
-import type { PixivIllust } from "./types";
+import type { PixivIllust, SearchUserResult } from "./types";
 import type { SearchState } from "./components/SearchScreen";
+import { DEFAULT_FILTERS } from "./components/SearchFilters";
 
 // Feed-tab membership for snapshot validation (mirrors the FeedType
 // union in App.tsx — a hand-edited or future-schema snapshot must not
@@ -29,6 +30,103 @@ function isRenderableIllustEntry(s: unknown): s is PixivIllust {
     typeof entry.image_urls === "object" &&
     typeof entry.image_urls.large === "string"
   );
+}
+
+/**
+ * Search layers restore their result arrays straight into SearchScreen,
+ * which reads `w.id` for its dedupe set and `u.previews.slice(...)` in the
+ * artist rows. Validating only the CONTAINERS let a null work or a
+ * user without previews through, and the throw escaped boot(): the gate
+ * catch re-locked the screen (reported as gate:unreachable) with no way to
+ * repair the saved state. Sanitize the entries; a layer whose contents are
+ * bad restores EMPTY and its mount auto-run refetches.
+ */
+function sanitizeSearchUser(v: unknown): SearchUserResult | null {
+  if (!v || typeof v !== "object") return null;
+  const u = v as {
+    id?: unknown;
+    name?: unknown;
+    avatar?: unknown;
+    premium?: unknown;
+    is_followed?: unknown;
+    previews?: unknown;
+  };
+  if (
+    typeof u.id !== "number" ||
+    typeof u.name !== "string" ||
+    typeof u.avatar !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: u.id,
+    name: u.name,
+    avatar: u.avatar,
+    premium: u.premium === true,
+    is_followed: u.is_followed === true,
+    previews: Array.isArray(u.previews)
+      ? u.previews.filter(isRenderableIllustEntry)
+      : [],
+  };
+}
+
+function sanitizeRelatedTag(
+  v: unknown
+): { name: string; translated_name?: string } | null {
+  if (!v || typeof v !== "object") return null;
+  const t = v as { name?: unknown; translated_name?: unknown };
+  if (typeof t.name !== "string") return null;
+  return typeof t.translated_name === "string"
+    ? { name: t.name, translated_name: t.translated_name }
+    : { name: t.name };
+}
+
+function sanitizeSearchState(v: unknown): SearchState | null {
+  if (!v || typeof v !== "object") return null;
+  const s = v as Record<string, unknown>;
+  // Containers required; anything else falls back to the filter defaults.
+  if (
+    typeof s.word !== "string" ||
+    !Array.isArray(s.works) ||
+    !Array.isArray(s.users)
+  ) {
+    return null;
+  }
+  return {
+    word: s.word,
+    mode: s.mode === "artists" ? "artists" : "works",
+    order: typeof s.order === "string" ? s.order : DEFAULT_FILTERS.order,
+    contentMode:
+      s.contentMode === "safe" || s.contentMode === "r18"
+        ? s.contentMode
+        : DEFAULT_FILTERS.contentMode,
+    workType:
+      s.workType === "illust" || s.workType === "ugoira"
+        ? s.workType
+        : DEFAULT_FILTERS.workType,
+    sMode: typeof s.sMode === "string" ? s.sMode : DEFAULT_FILTERS.sMode,
+    aiType: s.aiType === "1" ? "1" : DEFAULT_FILTERS.aiType,
+    dateMode: s.dateMode === "custom" ? "custom" : "all",
+    scd: typeof s.scd === "string" ? s.scd : "",
+    sce: typeof s.sce === "string" ? s.sce : "",
+    works: s.works.filter(isRenderableIllustEntry),
+    popular: Array.isArray(s.popular)
+      ? s.popular.filter(isRenderableIllustEntry)
+      : [],
+    related: Array.isArray(s.related)
+      ? s.related
+          .map(sanitizeRelatedTag)
+          .filter((t): t is { name: string } => t !== null)
+      : [],
+    users: s.users
+      .map(sanitizeSearchUser)
+      .filter((u): u is SearchUserResult => u !== null),
+    page:
+      typeof s.page === "number" && Number.isInteger(s.page) && s.page >= 0
+        ? s.page
+        : 0,
+    hasMore: s.hasMore === true,
+  };
 }
 
 /**
@@ -70,6 +168,12 @@ export interface AppSnapshot {
   rankMode: string;
   newestR18: boolean;
   topMode: string;
+  // Bookmarks tab pill selections (public|private pile + the active tag
+  // folder) — navigation state like the tabs above, so a reload lands on
+  // the SAME pile instead of snapping back to Public/unfiltered. Absent in
+  // pre-fix v1 payloads: those load as public / no tag (the old default).
+  bookmarkVis: "public" | "private";
+  bookmarkTag: string;
   stack: PixivIllust[];
   artist: { id: number; name: string } | null;
   recs: PixivIllust[];
@@ -101,6 +205,11 @@ export function saveSnapshot(snap: SnapshotInput): void {
       rankMode: snap.rankMode,
       newestR18: snap.newestR18,
       topMode: snap.topMode,
+      bookmarkVis: snap.bookmarkVis === "private" ? "private" : "public",
+      // A tag folder only exists on the public list; don't carry a stale
+      // tag across a private pile save.
+      bookmarkTag:
+        snap.bookmarkVis === "private" ? "" : (snap.bookmarkTag ?? "").slice(0, 64),
       stack: snap.stack.slice(0, MAX_STACK_DEPTH),
       artist: snap.artist,
       recs: snap.recs.slice(0, MAX_SNAPSHOT_ITEMS),
@@ -144,22 +253,14 @@ export function loadSnapshot(): AppSnapshot | null {
     // are parallel, and the restore in App.tsx maps tags[i] over the
     // VALIDATED stack.
     const searchStack: SearchState[] = Array.isArray(parsed.searchStack)
-      ? (parsed.searchStack.filter(
-          (s): s is SearchState =>
-            !!s &&
-            typeof s === "object" &&
-            typeof s.word === "string" &&
-            Array.isArray(s.works) &&
-            Array.isArray(s.users)
-        ) as SearchState[])
+      ? parsed.searchStack
+          .map(sanitizeSearchState)
+          .filter((s): s is SearchState => s !== null)
       : // Legacy single-search snapshots migrate into stack[0].
-        parsed.search &&
-        typeof parsed.search === "object" &&
-        typeof parsed.search.word === "string" &&
-        Array.isArray(parsed.search.works) &&
-        Array.isArray(parsed.search.users)
-        ? [parsed.search as SearchState]
-        : [];
+        (() => {
+          const legacy = sanitizeSearchState(parsed.search);
+          return legacy ? [legacy] : [];
+        })();
 
     const rawTags: (string | null)[] = Array.isArray(parsed.searchTags)
       ? parsed.searchTags
@@ -181,6 +282,13 @@ export function loadSnapshot(): AppSnapshot | null {
       rankMode: parsed.rankMode ?? "day",
       newestR18: !!parsed.newestR18,
       topMode: parsed.topMode ?? "all",
+      bookmarkVis: parsed.bookmarkVis === "private" ? "private" : "public",
+      bookmarkTag:
+        parsed.bookmarkVis === "private"
+          ? ""
+          : typeof parsed.bookmarkTag === "string"
+            ? parsed.bookmarkTag.slice(0, 64)
+            : "",
       stack: (parsed.stack as unknown[]).filter(isRenderableIllustEntry),
       artist:
         parsed.artist &&

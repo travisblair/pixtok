@@ -1,4 +1,4 @@
-import { createSignal, onMount, onCleanup, Show } from "solid-js";
+import { createSignal, createEffect, onMount, onCleanup, Show } from "solid-js";
 import { logEvent, reportApiError } from "../api/client";
 import { follow, getFollowed, unfollow } from "../api/follow";
 
@@ -63,14 +63,19 @@ export default function FollowButton(props: {
   });
 
   async function load() {
+    // Capture the id this request answers for: an artist swap while it is
+    // in flight must not paint the PREVIOUS artist's state onto the new one.
+    const uid = props.userId;
     try {
-      const res = await getFollowed(props.userId);
-      logEvent("follow", "ok", { id: props.userId, followed: res.followed });
+      const res = await getFollowed(uid);
+      if (uid !== props.userId) return;
+      logEvent("follow", "ok", { id: uid, followed: res.followed });
       setFollowed(res.followed);
     } catch (err) {
+      if (uid !== props.userId) return; // superseded — its failure is moot
       reportApiError(err);
       logEvent("follow", "fail", {
-        id: props.userId,
+        id: uid,
         err: err instanceof Error ? err.message : String(err),
       });
       setFollowed(null); // unknown — hide the button
@@ -81,19 +86,42 @@ export default function FollowButton(props: {
     e.preventDefault();
     e.stopPropagation();
     if (busy() || followed() === null) return;
+    const uid = props.userId;
     const next = !followed();
     setFollowed(next);
     setBusy(true);
     try {
-      if (next) await follow(props.userId);
-      else await unfollow(props.userId);
+      if (next) await follow(uid);
+      else await unfollow(uid);
     } catch (err) {
+      if (uid !== props.userId) return; // swapped — the new artist owns the state
       reportApiError(err);
       setFollowed(!next); // revert — the tap was not authoritative
     } finally {
-      setBusy(false);
+      if (uid === props.userId) setBusy(false);
     }
   }
+
+  // ArtistView keeps ONE instance across artist swaps (App renders a single
+  // ArtistView under <Show>), so props.userId changes without a remount.
+  // Reset the state with it: leaving the old boolean in place showed
+  // artist A's "Following" next to artist B's name, and the next tap POSTed
+  // the inverse for B — an unfollow for a user who may never have been
+  // followed.
+  let lastUserId: number | undefined;
+  createEffect(() => {
+    const uid = props.userId;
+    if (lastUserId !== undefined && lastUserId !== uid) {
+      logEvent("follow", "swap", { from: lastUserId, to: uid });
+      setFollowed(null); // hide until the new id answers (no stale label)
+      setBusy(false);
+      // Always refetch: the lazy variant's observer disconnected after its
+      // first load, so waiting for another intersection would leave the
+      // swapped button hidden forever.
+      void load();
+    }
+    lastUserId = uid;
+  });
 
   const button = (
     <Show when={followed() !== null}>

@@ -44,7 +44,6 @@ export const STREET_NEXT = makeFeedOf(10, 5000);
 export const TOP = makeFeedOf(30, 1000);
 export const RECOMMENDED = makeFeedOf(5, 500);
 export const WORK_RECS = makeFeedOf(5, 500);
-export const RELATED = makeFeedOf(8, 900);
 export const NEXT_PAGE = makeFeedOf(10, 100);
 export const USER_ILLUSTS = makeFeedOf(6, 600);
 export const BOOKMARK_PAGE = makeFeedOf(8, 4000);
@@ -250,7 +249,10 @@ export const handlers = [
   }),
   http.get("/api/illust/:id/related", ({ params }) => {
     if (!validId(String(params.id))) return err("invalid illust id", 400);
-    return json(RELATED);
+    // Echo the anchor id into the batch ids: every plausible anchor returns
+    // 200 with a same-shaped list, so only id-derived data can prove the
+    // view was anchored on the card that was actually tapped.
+    return json(makeFeedOf(8, 900 + Number(params.id)));
   }),
   // POST only — account-mutating routes reject GETs (handlers.go).
   http.post("/api/illust/:id/like", ({ params }) => {

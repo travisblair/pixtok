@@ -90,9 +90,47 @@ export function clearLikeStates() {
 // session-only filtering.
 const [blockedTags, setBlockedTagsRaw] = createSignal<string[]>([]);
 
-/** Replaces the working list (used by App's initial fetch). */
+// Local edits made BEFORE the boot seed answered. The seed is server truth
+// for everything else, but it is a snapshot of the DB from before those
+// edits: replacing the working list with it dropped a just-added block and
+// resurrected a just-removed one (the "ghost revert" — the pill vanished
+// and the feed reloaded unfiltered). Merge the seed with the edits
+// instead; tombstoned removals keep the merge from resurrecting them.
+let blockedSeedApplied = false;
+const pendingAdds = new Set<string>();
+const pendingRemovals = new Set<string>();
+
+function normalizeBlockedTags(tags: readonly unknown[]): string[] {
+  const out: string[] = [];
+  for (const t of tags) {
+    if (typeof t !== "string") continue;
+    const v = t.trim().toLowerCase();
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+/** Applies the boot GET /prefs/blocked-tags seed (server truth, merged). */
 export function setBlockedTagsList(tags: string[]) {
-  setBlockedTagsRaw(tags);
+  const server = normalizeBlockedTags(tags);
+  if (blockedSeedApplied) {
+    setBlockedTagsRaw(server);
+    return;
+  }
+  blockedSeedApplied = true;
+  const edited = pendingAdds.size > 0 || pendingRemovals.size > 0;
+  let merged = server;
+  if (edited) {
+    const set = new Set([...server, ...blockedTags(), ...pendingAdds]);
+    for (const t of pendingRemovals) set.delete(t);
+    merged = [...set];
+  }
+  setBlockedTagsRaw(merged);
+  pendingAdds.clear();
+  pendingRemovals.clear();
+  // The edit's own PUT carried only the pre-seed working list, so it may
+  // have dropped tags the seed still had. Write the merged truth back.
+  if (edited) void persistBlockedTags(merged).catch(reportApiError);
 }
 
 function updateBlockedTags(updater: (prev: string[]) => string[]): string[] {
@@ -108,16 +146,28 @@ function updateBlockedTags(updater: (prev: string[]) => string[]): string[] {
 export function addBlockedTag(tag: string) {
   const t = tag.trim().toLowerCase();
   if (!t) return;
+  if (!blockedSeedApplied) {
+    pendingAdds.add(t);
+    pendingRemovals.delete(t); // re-added within the window — not a removal
+  }
   updateBlockedTags((prev) => (prev.includes(t) ? prev : [...prev, t]));
 }
 
 export function removeBlockedTag(tag: string) {
-  updateBlockedTags((prev) => prev.filter((t) => t !== tag.toLowerCase()));
+  const t = tag.trim().toLowerCase();
+  if (!blockedSeedApplied) {
+    pendingRemovals.add(t);
+    pendingAdds.delete(t);
+  }
+  updateBlockedTags((prev) => prev.filter((x) => x !== t));
 }
 
 /** Test hook — reset between unit tests so state can't leak across them. */
 export function clearBlockedTags() {
   setBlockedTagsRaw([]);
+  blockedSeedApplied = false;
+  pendingAdds.clear();
+  pendingRemovals.clear();
 }
 
 // ── Image quality (data saver) ─────────────────────────────────────────
