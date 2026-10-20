@@ -115,6 +115,54 @@ const pkceTTL = 10 * time.Minute
 // same slow path as the zip it describes.
 const ugoiraMetaWriteDeadline = 60 * time.Second
 const imageWriteDeadline = 120 * time.Second
+
+// Slow-handler write budgets (review finding M2). serverWriteTimeout
+// (15s) bounds the ENTIRE handler cycle, upstream calls included, so a
+// handler that legitimately chains 30s upstream calls had its response
+// killed mid-flight: the login callback could persist a rotated refresh
+// token AFTER the browser saw a failure (split brain), and cold boots
+// lost bookmark hearts. Each affected handler therefore overrides its
+// own write deadline to: (sum of its SEQUENTIAL upstream client
+// timeouts) + a write margin, clamped to maxSlowHandlerWriteDeadline so
+// one response can never hold the connection open indefinitely.
+//
+// upstreamCallBudget mirrors pixiv.clientTimeout (30s, unexported in
+// that package); it is duplicated here because the deadline is a
+// server-side concern and must stay in sync if that client changes.
+const (
+	upstreamCallBudget          = 30 * time.Second
+	handlerWriteMargin          = 10 * time.Second
+	maxSlowHandlerWriteDeadline = 90 * time.Second
+
+	// handlePkceCallback: ExchangePkce (30s) then ScrapeCsrfFor→webGet
+	// (30s) = 60s of sequential upstream work, then token/session
+	// persistence and the redirect. The deadline must cover that whole
+	// chain, or the redirect is never written (70s).
+	authCallbackWriteDeadline = 2*upstreamCallBudget + handlerWriteMargin
+
+	// /api/auth/status: AuthHealth = refresh (30s) then webGet (30s),
+	// sequential, before the JSON body (70s).
+	authStatusWriteDeadline = 2*upstreamCallBudget + handlerWriteMargin
+
+	// /api/street: GetStreet retries once on 400/401 = 2 × 30s (70s).
+	streetWriteDeadline = 2*upstreamCallBudget + handlerWriteMargin
+
+	// Single-call routes (/api/search/artworks, /api/search/users,
+	// /api/next): one 30s upstream call + margin (40s).
+	singleCallWriteDeadline = upstreamCallBudget + handlerWriteMargin
+)
+
+// setSlowHandlerWriteDeadline raises this response's write deadline past
+// the global 15s. http.ResponseController reaches the real connection
+// through statusRecorder.Unwrap (see main.go); a bare recorder that does
+// not support deadlines (httptest) reports ErrNotSupported, which is a
+// test-only condition worth a log line, never a failed request.
+func setSlowHandlerWriteDeadline(w http.ResponseWriter, budget time.Duration, route string) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget)); err != nil {
+		log.Printf("WARNING %s write deadline: %v", route, err)
+	}
+}
+
 const pkceMaxEntries = 32
 
 func (s *pkceStore) put(state, verifier string) {
@@ -208,6 +256,9 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Budget: refresh (30s) + webGet (30s) + 10s margin = 70s — see
+		// authStatusWriteDeadline.
+		setSlowHandlerWriteDeadline(w, authStatusWriteDeadline, "/api/auth/status")
 		appOK, webOK := api.AuthHealth()
 		writeJSON(w, map[string]bool{"app_api": appOK, "web_session": webOK})
 	})
@@ -273,6 +324,9 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Budget: GetStreet retries once on 400/401, so 2 × 30s + 10s
+		// margin = 70s — see streetWriteDeadline.
+		setSlowHandlerWriteDeadline(w, streetWriteDeadline, "/api/street")
 		nextParams, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
 		if err != nil {
 			http.Error(w, "invalid body", http.StatusBadRequest)
@@ -422,6 +476,16 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			}
 			pages = n
 		}
+		// Budget: two visibility pools × `pages` sequential calls × 30s
+		// each + 10s margin — 370s at the default 6 pages, so clamp to
+		// the 90s ceiling. CachedBookmarkIDs makes repeat boots
+		// immediate; a cold walk that outlives 90s is deliberately cut
+		// rather than held open forever.
+		budget := time.Duration(2*pages)*upstreamCallBudget + handlerWriteMargin
+		if budget > maxSlowHandlerWriteDeadline {
+			budget = maxSlowHandlerWriteDeadline
+		}
+		setSlowHandlerWriteDeadline(w, budget, "/api/bookmarks/ids")
 		// Both visibility pools: pixtok likes are private; the site's
 		// heart makes public ones. Merge so hearts are right either way.
 		// Cached: repeat boots (and iOS reload spirals) must not re-walk
@@ -588,6 +652,9 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 	})
 
 	mux.HandleFunc("GET /api/search/artworks", func(w http.ResponseWriter, r *http.Request) {
+		// Budget: one 30s upstream SearchArtworks call + 10s margin = 40s
+		// — see singleCallWriteDeadline.
+		setSlowHandlerWriteDeadline(w, singleCallWriteDeadline, "/api/search/artworks")
 		word := r.URL.Query().Get("word")
 		opts := pixiv.SearchOpts{
 			Order:  r.URL.Query().Get("order"),
@@ -659,6 +726,9 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 	})
 
 	mux.HandleFunc("GET /api/search/users", func(w http.ResponseWriter, r *http.Request) {
+		// Budget: one 30s upstream SearchUsers call + 10s margin = 40s —
+		// see singleCallWriteDeadline.
+		setSlowHandlerWriteDeadline(w, singleCallWriteDeadline, "/api/search/users")
 		nick := r.URL.Query().Get("nick")
 		sMode := r.URL.Query().Get("s_mode")
 		if sMode == "" {
@@ -835,6 +905,9 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			http.Error(w, "missing url param", http.StatusBadRequest)
 			return
 		}
+		// Budget: one 30s upstream ProxyNext call + 10s margin = 40s —
+		// see singleCallWriteDeadline.
+		setSlowHandlerWriteDeadline(w, singleCallWriteDeadline, "/api/next")
 
 		body, err := api.ProxyNext(nextURL)
 		if err != nil {
