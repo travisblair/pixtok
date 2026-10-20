@@ -492,6 +492,43 @@ describe("UgoiraPlayer", () => {
     expect(requestCount(META_PATH)).toBe(2);
   });
 
+  it("a failed poster can be retried: the retry still plays the animation", async () => {
+    // Regression: toggle() on an idle-after-poster-failure card starts the
+    // frame load and the poster retry TOGETHER. They used to share one
+    // generation counter, so the poster retry invalidated the frame load:
+    // the frame load discarded itself at its seq guard without resetting
+    // status, leaving the spinner up forever — and the error badge (cleared
+    // by the frame load) left no retry affordance at all.
+    server.use(
+      http.get("/api/img", ({ request }) => {
+        const target = new URL(request.url).searchParams.get("url") ?? "";
+        // The poster keeps failing; the zip is fine.
+        if (target.includes("img-zip-ugoira")) {
+          return new HttpResponse(ugoiraZip(), {
+            headers: { "Content-Type": "application/zip" },
+          });
+        }
+        return new HttpResponse("upstream error\n", { status: 502 });
+      })
+    );
+    const { container } = renderPlayer();
+    // Mount's poster fetch fails → the retry badge.
+    await pumpUntil(
+      () => container.querySelector(".ugoira-badge") !== null,
+      "poster error badge"
+    );
+
+    // Tap the badge: both loads retry. The poster keeps failing, but the
+    // frames must still reach playback (and take the UI over).
+    fireEvent.click(container.querySelector(".ugoira-badge")!);
+    await pumpUntil(
+      () => statusText(container) === "playing",
+      "status playing after the retry"
+    );
+    expect(requestCount(META_PATH)).toBe(1);
+    expect(container.querySelector(".ugoira-spinner")).toBeNull();
+  });
+
   it("a frame missing from the zip surfaces the error badge", async () => {
     serveImages({ zip: ugoiraZip({ "000000.jpg": new Uint8Array([1]) }) });
     const { container } = renderPlayer();
