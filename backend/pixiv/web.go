@@ -435,6 +435,11 @@ func (c *Client) GetUgoiraMeta(illustID string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
+		// A 404 is permanent (deleted work): wrap ErrNotFound so the
+		// handler can answer 404 instead of a 502 the client retries.
+		if resp.StatusCode == 404 {
+			return nil, fmt.Errorf("%w (ugoira meta HTTP 404)", ErrNotFound)
+		}
 		return nil, fmt.Errorf("ugoira meta returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return body, nil
@@ -572,6 +577,11 @@ func (c *Client) GetWorkRecommend(illustID string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
+		// A 404 is permanent (deleted work): wrap ErrNotFound so the
+		// handler can answer 404 instead of a 502 the client retries.
+		if resp.StatusCode == 404 {
+			return nil, fmt.Errorf("%w (work recommend HTTP 404)", ErrNotFound)
+		}
 		return nil, fmt.Errorf("work recommend returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return body, nil

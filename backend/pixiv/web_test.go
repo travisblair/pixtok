@@ -1,6 +1,7 @@
 package pixiv
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,5 +48,34 @@ func TestSetWebSessionPersistsBothKeys(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf(".env missing %q:\n%s", want, raw)
 		}
+	}
+}
+
+// Regression (review 1017-1 F-13): the ugoira-meta and recs handlers
+// already map ErrNotFound to 404, but neither method ever produced it —
+// a deleted work answered 502 "upstream error", which clients retry for
+// a permanent condition.
+func TestWorkDetailMethodsWrapNotFound(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{"ugoira meta", func(c *Client) error { _, err := c.GetUgoiraMeta("123"); return err }},
+		{"work recommend", func(c *Client) error { _, err := c.GetWorkRecommend("123"); return err }},
+	}
+	for _, tc := range cases {
+		c := newStreetClient(&countTransport{status: 404, respBody: "not found"})
+		if err := tc.call(c); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s: err = %v, want ErrNotFound", tc.name, err)
+		}
+	}
+
+	// A transient failure must stay an upstream error, not a 404.
+	c := newStreetClient(&countTransport{status: 500, respBody: "boom"})
+	if _, err := c.GetUgoiraMeta("123"); errors.Is(err, ErrNotFound) {
+		t.Fatal("a 500 was reported as not found")
+	}
+	if _, err := c.GetWorkRecommend("123"); errors.Is(err, ErrNotFound) {
+		t.Fatal("a 500 was reported as not found")
 	}
 }
