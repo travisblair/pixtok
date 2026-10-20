@@ -118,6 +118,23 @@ const clientTimeout = 30 * time.Second
 // Pi Zero's render-storm bursts starved queued handshakes).
 const tlsHandshakeTimeout = 20 * time.Second
 
+// newSharedHTTPClient builds the credential-bearing upstream client: the
+// one used for token refresh, PKCE exchange and every web-AJAX call. It
+// never follows redirects — Go strips Authorization/Cookie across hosts
+// but not custom headers (x-csrf-token) and re-sends the BODY on 307/308,
+// so a redirect from Pixiv would hand credentials to another host.
+// Redirect-following proxy paths use newValidatedClient instead, which
+// re-validates every hop.
+func newSharedHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   clientTimeout,
+		Transport: newPixivTransport(),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 func NewClient() (*Client, error) {
 	rt := ReadEnvKey("PIXIV_REFRESH_TOKEN")
 	if rt == "" {
@@ -126,11 +143,8 @@ func NewClient() (*Client, error) {
 	}
 
 	c := &Client{
-		refreshToken: rt,
-		http: &http.Client{
-			Timeout:   clientTimeout,
-			Transport: newPixivTransport(),
-		},
+		refreshToken:  rt,
+		http:          newSharedHTTPClient(),
 		upstreamSlots: make(chan struct{}, maxUpstreamConcurrency),
 		// Follow state changes rarely and the frontend asks constantly —
 		// 30 minutes keeps the per-card fetch bursts off pixiv's rate
