@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { logEvent, reportApiError, setOnGateLocked, setOnRequestError } from "./api/client";
 import { getStreet, getNewest, getNewestNext, getNextPage, getTop, getTopIllust, getRecommended } from "./api/feeds";
 import { getBookmarkIds, getBookmarkTags, getBookmarks, getBookmarksNext, getBookmarksPrivate } from "./api/bookmarks";
@@ -495,6 +495,24 @@ export default function App() {
       saveSnapshot(buildSnapshotState());
     }, 500);
   });
+
+  // A blocked-tag change must apply to what is ALREADY on screen: the boot
+  // seed lands after the first page rendered, and Settings/tag-popup edits
+  // happen while the current page is visible. Without this the filter only
+  // took effect on the next feed load — a blocked work stayed on screen
+  // under a "Blocked #tag" toast.
+  createEffect(
+    on(
+      blockedTags,
+      (tags) => {
+        if (tags.length === 0) return;
+        setIllusts((prev) =>
+          prev.filter((i) => filterBlockedTags([i], tags).length > 0)
+        );
+      },
+      { defer: true }
+    )
+  );
 
   /** The full current state, as the debounced saver would write it. */
   function buildSnapshotState() {

@@ -1003,7 +1003,7 @@ describe("App", () => {
     );
   });
 
-  it("settings live in the drawer; adding a blocked tag filters the feed on reload", async () => {
+  it("adding a blocked tag while the boot seed is in flight survives the seed", async () => {
     // Street feed: one work tagged swimsuit.
     server.use(
       http.post("/api/street", () =>
@@ -1013,26 +1013,27 @@ describe("App", () => {
             makeIllust({ id: 999, tags: [{ name: "swimsuit" }] }),
           ])
         )
+      ),
+      // Hold the boot seed open so the user edits the list WHILE it is in
+      // flight. A seed arriving later used to REPLACE the working list with
+      // the server's pre-edit snapshot: the pill vanished and the feed
+      // reloaded unfiltered (the ghost revert). It must merge.
+      http.get(
+        "/api/prefs/blocked-tags",
+        () =>
+          new Promise<Response>((resolve) => {
+            releaseSeed = resolve;
+          })
       )
     );
-    // The boot seed (GET blocked-tags) must land before the user adds a
-    // tag: a seed arriving later would REPLACE the working list with
-    // the server's old [] (the app treats boot as server truth).
-    const seeded = nextMockedResponse(
-      (r) =>
-        r.method === "GET" &&
-        new URL(r.url).pathname === "/api/prefs/blocked-tags"
-    );
+    let releaseSeed!: (r: Response) => void;
     const { container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
-    await seeded;
-    // response:mocked fires before the caller's fetch promise resolves;
-    // one macrotask turn lets App's .then seed the store.
-    await new Promise((r) => setTimeout(r, 0));
 
-    // Open settings from the drawer.
+    // Open settings from the drawer and add the tag while the seed is
+    // still in flight.
     await fireEvent.click(container.querySelector(".burger-pill")!);
     await fireEvent.click(
       [...container.querySelectorAll(".drawer-item")].find(
@@ -1049,8 +1050,16 @@ describe("App", () => {
       "#swimsuit"
     );
 
-    // Switch to Ranking and back to Home — fresh street load,
-    // swimsuit work filtered out.
+    // The seed lands last, carrying the server's pre-edit list — it must
+    // not clobber the edit.
+    releaseSeed(json({ tags: [] }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(container.querySelector(".blocked-tag-pill")?.textContent).toBe(
+      "#swimsuit"
+    );
+
+    // Switch to Ranking and back to Home — fresh street load, swimsuit
+    // work filtered out.
     await fireEvent.click(container.querySelector(".burger-pill")!);
     await fireEvent.click(
       [...container.querySelectorAll(".drawer-item")].find(
@@ -1066,6 +1075,39 @@ describe("App", () => {
         (b) => b.textContent === "Home"
       )!
     );
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(29)
+    );
+  });
+
+  it("a boot tag seed filters the page already on screen", async () => {
+    // The seed arrives after the first street page rendered. The blocked
+    // work must disappear without waiting for the next feed load — the
+    // seed's own tags never re-filtered an already-rendered page.
+    server.use(
+      http.post("/api/street", () =>
+        json(
+          makeFeed([
+            ...makeFeedOf(29, 1).illusts.map((i) => ({ ...i, tags: [] })),
+            makeIllust({ id: 999, tags: [{ name: "swimsuit" }] }),
+          ])
+        )
+      ),
+      http.get(
+        "/api/prefs/blocked-tags",
+        () =>
+          new Promise<Response>((resolve) => {
+            releaseSeed = resolve;
+          })
+      )
+    );
+    let releaseSeed!: (r: Response) => void;
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+
+    releaseSeed(json({ tags: ["swimsuit"] }));
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(29)
     );
