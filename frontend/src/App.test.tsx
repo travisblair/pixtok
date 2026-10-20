@@ -1062,6 +1062,18 @@ describe("App", () => {
         container.querySelectorAll(".related-view .feed-card").length
       ).toBe(9) // anchor + 8 related
     );
+
+    // The anchor id is the wire contract, and the handler echoes it into
+    // the batch: a hardcoded/stack[0] anchor would request a different id
+    // AND render a different set of titles.
+    expect(requestsTo("/api/illust/1/related")).toHaveLength(1);
+    const titles = [
+      ...container.querySelectorAll(".related-view .card-title"),
+    ].map((t) => t.textContent);
+    expect(titles).toEqual([
+      "Illust 1", // the tapped card is the stack's anchor
+      ...Array.from({ length: 8 }, (_, i) => `Illust ${901 + i}`),
+    ]);
   });
 
   it("first stack open shows the one-time hint; Got it dismisses it forever", async () => {
