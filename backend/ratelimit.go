@@ -37,6 +37,24 @@ const globalMultiplier = 4
 // the global ceiling still bounds the aggregate.
 const maxSources = 256
 
+// maxSourceTableBytes bounds the table by MEMORY, not just entry count:
+// 256 entries of long hostile keys would otherwise pin megabytes on a
+// Pi with a 120 MB memory cap. Keys are capped at maxSourceKeyBytes by
+// sourceKey (an IP string), so this is a belt-and-braces bound against
+// future key sources.
+const maxSourceTableBytes = 16 << 10
+
+// maxSourceKeyBytes is the longest key sourceKey will produce. A longer
+// X-Forwarded-For element is not an IP and is rejected outright rather
+// than truncated into a colliding key.
+const maxSourceKeyBytes = 64
+
+// maxXFFBytes caps how much of X-Forwarded-For is parsed at all. The
+// header can be as large as MaxHeaderBytes; the RIGHTMOST maxXFFBytes
+// bytes are kept when it is longer, so the element the proxy appended
+// (the one we key on) always survives intact.
+const maxXFFBytes = 256
+
 type tier int
 
 const (
@@ -110,6 +128,7 @@ func (st *sourceTiers) bucket(t tier) *bucket { return &st.buckets[t] }
 type sourceTable struct {
 	mu      sync.Mutex
 	entries map[string]*sourceTiers
+	bytes   int // total bytes of retained keys
 }
 
 func (st *sourceTable) forSource(key string, now func() time.Time) *sourceTiers {
@@ -118,19 +137,39 @@ func (st *sourceTable) forSource(key string, now func() time.Time) *sourceTiers 
 	if t, ok := st.entries[key]; ok {
 		return t
 	}
-	if len(st.entries) >= maxSources {
-		// Arbitrary eviction (bounded table, single-user app): the
-		// evicted source gets a fresh bucket, which only matters to
-		// someone trying to exhaust the table itself — and the global
-		// ceiling still bounds them.
+	// Bounded by BOTH entry count and retained key bytes. Arbitrary
+	// eviction (bounded table, single-user app): the evicted source gets
+	// a fresh bucket, which only matters to someone exhausting the table
+	// itself — and the global ceiling still bounds them.
+	for len(st.entries) > 0 &&
+		(len(st.entries) >= maxSources || st.bytes+len(key) > maxSourceTableBytes) {
 		for k := range st.entries {
 			delete(st.entries, k)
+			st.bytes -= len(k)
 			break
 		}
 	}
-	t := newSourceTiers(now)
-	st.entries[key] = t
-	return t
+	st.entries[key] = newSourceTiers(now)
+	st.bytes += len(key)
+	return st.entries[key]
+}
+
+// peerHost returns the address of the immediate peer (no port).
+func peerHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+// isLoopbackHost reports whether host is a loopback literal or name.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // sourceKey identifies the CLIENT behind the request. The backend only
@@ -138,19 +177,37 @@ func (st *sourceTable) forSource(key string, now func() time.Time) *sourceTiers 
 // source arrives in X-Forwarded-For — but ONLY from a loopback peer is
 // that header trusted (a direct client can forge it; its RemoteAddr is
 // the key instead).
+//
+// The RIGHTMOST element is used, and it must parse as an IP. A proxy
+// that APPENDS the peer it saw (Go's httputil.ReverseProxy does:
+// "prior, clientIP") leaves caller-supplied text to the left; keying on
+// the first element let a caller rotate the header per request and mint
+// unlimited buckets (per-source limits never engage, and the shared
+// global ceiling 429s the owner). Anything that does not parse falls back
+// to the peer address — one shared bucket, never a free pass.
 func sourceKey(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+	peer := peerHost(r.RemoteAddr)
+	if !isLoopbackHost(peer) {
+		return peer
 	}
-	if host == "127.0.0.1" || host == "::1" {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
-				return first
-			}
+	xff := r.Header.Get("X-Forwarded-For")
+	if len(xff) > maxXFFBytes {
+		// Keep the rightmost bytes: that is where the trusted last hop
+		// appended its element. Cutting the left can only mangle
+		// elements we would never key on.
+		xff = xff[len(xff)-maxXFFBytes:]
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		cand := strings.TrimSpace(parts[i])
+		if cand == "" || len(cand) > maxSourceKeyBytes {
+			continue
+		}
+		if ip := net.ParseIP(cand); ip != nil {
+			return ip.String()
 		}
 	}
-	return host
+	return peer
 }
 
 type rateLimiter struct {
