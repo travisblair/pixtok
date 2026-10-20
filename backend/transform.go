@@ -119,6 +119,20 @@ func (f *flexID) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// upstreamError turns pixiv's 200-with-{"error":true} envelope into an
+// error. The whole web-AJAX family serves it for an expired session or a
+// rate limit; decoding it as an empty body would render "no works"
+// instead of surfacing the failure (and leave the journal clean).
+func upstreamError(surface string, isError bool, message string) error {
+	if !isError {
+		return nil
+	}
+	if message == "" {
+		message = "pixiv reported an error"
+	}
+	return fmt.Errorf("%s: %s", surface, message)
+}
+
 // applyTagTranslations fills TranslatedName on works' tags from a
 // response-level tagTranslation map. Works without a mapping keep their
 // raw name (the FE chip just renders no translation line).
@@ -139,7 +153,10 @@ func applyTagTranslations(works []illust, tr tagTranslationMap) {
 // (the Illustrations tab firehose) to the standard FeedResponse format.
 func transformTopIllust(raw []byte) ([]byte, error) {
 	var src struct {
-		Body struct {
+		// Pixiv error envelope (expired session, rate limit).
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+		Body    struct {
 			Thumbnails struct {
 				Illust []struct {
 					ID           flexID `json:"id"`
@@ -163,6 +180,9 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 	}
 
 	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, err
+	}
+	if err := upstreamError("top illust", src.Error, src.Message); err != nil {
 		return nil, err
 	}
 
@@ -267,12 +287,8 @@ func transformStreet(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &src); err != nil {
 		return nil, err
 	}
-	if src.Error {
-		msg := src.Message
-		if msg == "" {
-			msg = "pixiv reported an error"
-		}
-		return nil, fmt.Errorf("street: %s", msg)
+	if err := upstreamError("street", src.Error, src.Message); err != nil {
+		return nil, err
 	}
 
 	out := feedResponse{Illusts: make([]illust, 0, 60)}
@@ -518,12 +534,18 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 // responses (the site's per-work "Related works") to FeedResponse.
 func transformWorkRecommend(raw []byte) ([]byte, error) {
 	var src struct {
-		Body struct {
+		// Pixiv error envelope (expired session, rate limit).
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+		Body    struct {
 			Illusts []webIllust `json:"illusts"`
 		} `json:"body"`
 	}
 
 	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, err
+	}
+	if err := upstreamError("work recommend", src.Error, src.Message); err != nil {
 		return nil, err
 	}
 
@@ -537,13 +559,19 @@ func transformWorkRecommend(raw []byte) ([]byte, error) {
 // continuation through the same proxy.
 func transformNewest(raw []byte, r18 bool) ([]byte, error) {
 	var src struct {
-		Body struct {
+		// Pixiv error envelope (expired session, rate limit).
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+		Body    struct {
 			Illusts []webIllust `json:"illusts"`
 			LastID  string      `json:"lastId"`
 		} `json:"body"`
 	}
 
 	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, err
+	}
+	if err := upstreamError("newest", src.Error, src.Message); err != nil {
 		return nil, err
 	}
 
