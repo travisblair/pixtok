@@ -162,6 +162,70 @@ func TestStreetTreatsEmptyCursorAsEndOfFeed(t *testing.T) {
 	}
 }
 
+// Regression (review 1017-1 F-22): a work whose id arrives as JSON null
+// (or is missing) decoded to "", and the frontend normalizes "" to 0 —
+// an unopenable, unlikable card that still occupied a feed slot.
+func TestWorksWithNullIDAreDropped(t *testing.T) {
+	t.Run("newest", func(t *testing.T) {
+		raw := `{"error":false,"body":{"illusts":[
+			{"id":null,"title":"poison","userId":"9","url":"https://i.pximg.net/c/250x250_80_a2/img-master/img/1/x_p0_square1200.jpg"},
+			{"id":"222","title":"ok","userId":"9","url":"https://i.pximg.net/c/250x250_80_a2/img-master/img/1/y_p0_square1200.jpg"},
+			{"id":"333","title":"no user","url":"https://i.pximg.net/c/250x250_80_a2/img-master/img/1/z_p0_square1200.jpg"}
+		],"lastId":"222"}}`
+		out, err := transformNewest([]byte(raw), false)
+		if err != nil {
+			t.Fatalf("transformNewest: %v", err)
+		}
+		assertIllustIDs(t, out, []string{"222"})
+	})
+
+	t.Run("street", func(t *testing.T) {
+		raw := `{"error":false,"body":{"contents":[
+			{"kind":"illust","thumbnails":[{"id":null,"userId":"9"}]},
+			{"kind":"illust","thumbnails":[{"id":"444","userId":"8","type":"illust"}]}
+		]}}`
+		out, err := transformStreet([]byte(raw))
+		if err != nil {
+			t.Fatalf("transformStreet: %v", err)
+		}
+		assertIllustIDs(t, out, []string{"444"})
+	})
+
+	t.Run("top illust", func(t *testing.T) {
+		raw := `{"error":false,"body":{"thumbnails":{"illust":[
+			{"id":null,"userId":"9"},
+			{"id":"555","userId":"8","urls":{"large":"https://i.pximg.net/l"}}
+		]}}}`
+		out, err := transformTopIllust([]byte(raw))
+		if err != nil {
+			t.Fatalf("transformTopIllust: %v", err)
+		}
+		assertIllustIDs(t, out, []string{"555"})
+	})
+}
+
+// assertIllustIDs decodes a feedResponse and requires exactly want, in
+// order, and no empty ids.
+func assertIllustIDs(t *testing.T, out []byte, want []string) {
+	t.Helper()
+	var got feedResponse
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal feed: %v", err)
+	}
+	if len(got.Illusts) != len(want) {
+		ids := make([]string, 0, len(got.Illusts))
+		for _, ill := range got.Illusts {
+			ids = append(ids, ill.ID)
+		}
+		t.Fatalf("illust ids = %v, want %v (a null-id card survived)", ids, want)
+	}
+	for i, id := range want {
+		if got.Illusts[i].ID != id {
+			t.Fatalf("illust[%d].id = %q, want %q", i, got.Illusts[i].ID, id)
+		}
+	}
+}
+
 // The empty-page shapes must still marshal to a non-nil illusts array —
 // the wire contract the frontend depends on.
 func TestEmptyFeedKeepsIllustsArray(t *testing.T) {

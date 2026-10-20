@@ -192,6 +192,11 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 		if len(out.Illusts) >= 30 {
 			break
 		}
+		// See mapWebIllusts: a null/missing id would reach the client as
+		// id 0.
+		if srcIll.ID == "" || srcIll.UserID == "" {
+			continue
+		}
 		ill := illust{
 			ID:             string(srcIll.ID),
 			Title:          srcIll.Title,
@@ -301,6 +306,12 @@ func transformStreet(raw []byte) ([]byte, error) {
 			continue
 		}
 		thumb := block.Thumbnails[0]
+
+		// See mapWebIllusts: a null/missing id would reach the client as
+		// id 0 (an unopenable, unlikable card).
+		if thumb.ID == "" || thumb.UserID == "" {
+			continue
+		}
 
 		// Street thumbnails carry a `type` string (illust/manga — ugoira
 		// works are labelled illust there) and, when present, the
@@ -453,6 +464,13 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 	for _, item := range items {
 		if len(out) >= maxWorks {
 			break
+		}
+		// A null/missing work id decodes to "" (json null into a
+		// json.Number is a no-op) and the client normalizes "" to 0 —
+		// producing a card that requests /api/illust/0 and likes
+		// illust_id=0. Drop the entry instead of poisoning the feed.
+		if item.ID == "" || item.UserID == "" {
+			continue
 		}
 		// Web AJAX works carry NO type string — illustType is the
 		// authoritative discriminator (0=illust, 1=manga, 2=ugoira).
