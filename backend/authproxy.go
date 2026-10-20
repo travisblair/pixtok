@@ -572,6 +572,14 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 // request's cookie jar (it lives on our origin now), scrape + persist
 // the bound csrf token, and land the user back in the app.
 func handlePkceCallback(w http.ResponseWriter, r *http.Request, api pixivAPI, pkce *pkceStore) {
+	// Budget: ExchangePkce (30s) then ScrapeCsrfFor→webGet (30s) = 60s
+	// of SEQUENTIAL upstream work, then token/session persistence and
+	// the redirect — 2 × 30s + 10s margin = 70s (authCallbackWriteDeadline).
+	// The global 15s WriteTimeout used to kill this response after the
+	// exchange had already rotated the refresh token, so the browser
+	// reported failure while the next boot was logged in. The deadline
+	// must cover the whole chain or the redirect is never written.
+	setSlowHandlerWriteDeadline(w, authCallbackWriteDeadline, "login callback")
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "missing code", http.StatusBadRequest)
