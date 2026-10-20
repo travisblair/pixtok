@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -397,6 +398,26 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
+// validateListenAddr enforces the loopback-only posture the docs and
+// SECURITY.md promise: the reverse proxy (Vite/tailscale serve/Funnel) is
+// the only exposed listener and it dials 127.0.0.1. A non-loopback bind
+// puts a plaintext-HTTP backend on the LAN, so it refuses to boot unless
+// PIXTOK_ALLOW_PUBLIC_LISTEN=true records that the operator means it (the
+// caller then warns loudly). Returns whether the bind is loopback.
+func validateListenAddr(addr string, allowPublic bool) (bool, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, fmt.Errorf("PIXTOK_LISTEN %q is not host:port: %w", addr, err)
+	}
+	if isLoopbackHost(host) {
+		return true, nil
+	}
+	if allowPublic {
+		return false, nil
+	}
+	return false, fmt.Errorf("PIXTOK_LISTEN %q binds a non-loopback interface — refusing to boot: keep the backend on 127.0.0.1 and let the reverse proxy expose it (set PIXTOK_ALLOW_PUBLIC_LISTEN=true to override deliberately)", addr)
+}
+
 func main() {
 	// The .env file holds permanent pixiv credentials — check the
 	// permissions of EVERY candidate that could supply one BEFORE
@@ -426,9 +447,20 @@ func main() {
 	}
 
 	// Loopback only — the Vite dev proxy (and only it) should reach us.
+	// A non-loopback PIXTOK_LISTEN refuses to boot unless explicitly
+	// overridden (see validateListenAddr); the override warns loudly
+	// because the backend speaks plaintext HTTP.
 	addr := loadEnvKey("PIXTOK_LISTEN")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
+	}
+	allowPublicListen := loadEnvKey("PIXTOK_ALLOW_PUBLIC_LISTEN") == "true"
+	listenLoopback, err := validateListenAddr(addr, allowPublicListen)
+	if err != nil {
+		log.Fatalf("listen config: %v", err)
+	}
+	if !listenLoopback {
+		log.Printf("WARNING: PIXTOK_LISTEN=%s binds a NON-LOOPBACK interface — this backend serves plaintext HTTP and is now reachable beyond this host. The reverse proxy (serve/Funnel) is the intended exposure point; PIXTOK_ALLOW_PUBLIC_LISTEN=true acknowledged the override.", addr)
 	}
 	apiKey := loadEnvKey("PIXTOK_API_KEY")
 	if apiKey == "" {
