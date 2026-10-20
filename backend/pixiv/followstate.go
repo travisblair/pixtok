@@ -26,7 +26,9 @@ const followStateTTL = 30 * time.Minute
 // invalidate() so the new state is visible immediately instead of up
 // to TTL later. The per-id epoch makes an invalidation race-safe
 // against an in-flight fetch: a call that STARTED before the
-// invalidation cannot resurrect the stale value when it finishes.
+// invalidation cannot resurrect the stale value when it finishes, and
+// callers waiting on that call re-fetch instead of rendering its
+// pre-toggle answer.
 type followStateEntry struct {
 	value   bool
 	expires time.Time
@@ -42,6 +44,11 @@ type followStateCall struct {
 	value bool
 	err   error
 	epoch uint64
+	// superseded: invalidate() landed while this call was in flight, so
+	// its value predates the user's own toggle. finish() drops the cache
+	// write AND flags the ticket so followers re-fetch instead of
+	// rendering the stale answer.
+	superseded bool
 }
 
 type followStateCache struct {
@@ -125,7 +132,11 @@ func (f *followStateCache) reset() {
 // call, and once the call is done no later call needs it.
 func (f *followStateCache) finish(id string, call *followStateCall, value bool, err error) {
 	f.mu.Lock()
-	delete(f.inflight, id)
+	// Only the CURRENT ticket may unregister itself — a superseded call
+	// finishing must not delete a newer ticket for the same id.
+	if f.inflight[id] == call {
+		delete(f.inflight, id)
+	}
 	if err == nil && f.epochs[id] == call.epoch {
 		f.items[id] = followStateEntry{value: value, expires: time.Now().Add(f.ttl)}
 		// Lazy sweep: a long browse session can accumulate thousands of
@@ -140,6 +151,11 @@ func (f *followStateCache) finish(id string, call *followStateCall, value bool, 
 				}
 			}
 		}
+	} else if err == nil {
+		// invalidate() landed mid-flight: this answer predates the
+		// user's own toggle. Beyond dropping the cache write, mark the
+		// ticket so followers do not render it either.
+		call.superseded = true
 	}
 	// Delete the marker unconditionally: it exists only to supersede
 	// THIS call, and once the call is finished no later call needs

@@ -326,6 +326,11 @@ func (c *Client) SetFollow(userID string, restrict string, follow bool) error {
 	return nil
 }
 
+// followStateRetries bounds the post-invalidation re-fetch: an answer
+// that predates the user's own toggle is discarded once, then whatever
+// the re-fetch returns is served (a toggle storm must not loop here).
+const followStateRetries = 1
+
 // IsFollowed returns the current follow state from /v1/user/detail,
 // served through the follow-state cache (TTL + single-flight). A nil
 // cache (test clients) degrades to a direct fetch.
@@ -336,19 +341,28 @@ func (c *Client) IsFollowed(userID string) (bool, error) {
 	if c.followState == nil {
 		return c.fetchFollowState(userID)
 	}
-	value, fresh, call, lead := c.followState.getOrStart(userID)
-	if fresh {
-		return value, nil
+	for attempt := 0; ; attempt++ {
+		value, fresh, call, lead := c.followState.getOrStart(userID)
+		if fresh {
+			return value, nil
+		}
+		if lead {
+			v, err := c.fetchFollowState(userID)
+			c.followState.finish(userID, call, v, err)
+			return v, err
+		}
+		// Follower: the leader's finish() closes done after storing the
+		// result — the close is the happens-before edge for these reads.
+		<-call.done
+		// A caller that joined a call started BEFORE invalidate() would
+		// otherwise render the pre-toggle value: the epoch guard keeps
+		// that value out of the cache but the ticket still carries it.
+		// Re-enter (the ticket is gone, so this leads a fresh fetch)
+		// and answer with the toggled state.
+		if !call.superseded || attempt >= followStateRetries {
+			return call.value, call.err
+		}
 	}
-	if lead {
-		v, err := c.fetchFollowState(userID)
-		c.followState.finish(userID, call, v, err)
-		return v, err
-	}
-	// Follower: the leader's finish() closes done after storing the
-	// result — the close is the happens-before edge for these reads.
-	<-call.done
-	return call.value, call.err
 }
 
 func (c *Client) fetchFollowState(userID string) (bool, error) {
