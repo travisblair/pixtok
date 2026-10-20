@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/travisblair/pixtok/pixiv"
 )
@@ -233,14 +234,57 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
 }
 
+// maxLogFieldBytes caps every attacker-controlled field written into a
+// journal line. Method/path/Origin/Host arrive from the wire, and
+// MaxHeaderBytes only bounds the whole header block — without this cap a
+// single request can write a multi-MB line and fill the Pi's SD card
+// (measured: a 100 KB path produced a 100,046-byte line).
+const maxLogFieldBytes = 200
+
+// maxRequestPathBytes refuses absurd request paths with 414 before any
+// handler or the REQ logger sees them. No route this app serves needs a
+// longer path; pagination data rides the query string.
+const maxRequestPathBytes = 2048
+
+// logField makes an attacker-controlled value safe for a journal line:
+// control bytes are replaced (a decoded %0A in a path would otherwise
+// forge whole log records) and the length is capped on a rune boundary.
+func logField(s string) string {
+	s = sanitizeLogText(s)
+	if len(s) <= maxLogFieldBytes {
+		return s
+	}
+	cut := maxLogFieldBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
+// requestPathLimit turns an over-long request path into a 414 before any
+// downstream work. It sits INSIDE the rate limiter so a flood of
+// over-long URIs still spends tokens instead of getting free 414s.
+func requestPathLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.URL.Path) > maxRequestPathBytes {
+			log.Printf("WARN request path too long (%d bytes) — 414", len(r.URL.Path))
+			http.Error(w, "request URI too long", http.StatusRequestURITooLong)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // logRequests logs method + path + status for every request (path only —
 // never query strings or bodies, so tokens/credentials never hit the log).
+// Both fields are attacker-controlled, so both are sanitized and capped;
+// %q keeps each field on one clearly-delimited journal line.
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
-		log.Printf("REQ %s %s -> %d (%s)", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
+		log.Printf("REQ %s %q -> %d (%s)", logField(r.Method), logField(r.URL.Path), rec.status, time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -309,6 +353,41 @@ func cacheConfigFromEnv() (time.Duration, int, int64) {
 		}
 	}
 	return ttl, entries, maxBytes
+}
+
+// Server timeouts. The write timeout covers the WHOLE handler cycle; slow
+// relay routes override it per response (see handlers.go). The header cap
+// is deliberately small: the default 1 MB lets a single request carry a
+// ~1 MB Origin/path into the log path.
+const (
+	serverReadTimeout    = 10 * time.Second
+	serverWriteTimeout   = 15 * time.Second
+	serverIdleTimeout    = 60 * time.Second
+	serverMaxHeaderBytes = 32 << 10
+)
+
+// middlewareChain is THE middleware order for the server, extracted from
+// main() so a test can pin it. Notes on the two load-bearing positions:
+//   - logRequests wraps the rate limiter (every request, including 429s,
+//     gets a REQ line) but its fields are sanitized and capped.
+//   - originCheck sits INSIDE the rate limiter: a cross-origin mutation
+//     must spend a token before it is rejected, or rejects are a free
+//     unbounded journal-write amplifier.
+func middlewareChain(h http.Handler, rl *rateLimiter) http.Handler {
+	return securityHeaders(logRequests(rl.middleware(requestPathLimit(originCheck(h)))))
+}
+
+// newHTTPServer builds the listener config. Extracted so tests can pin
+// the timeouts and the header cap.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:           addr,
+		Handler:        handler,
+		ReadTimeout:    serverReadTimeout,
+		WriteTimeout:   serverWriteTimeout,
+		IdleTimeout:    serverIdleTimeout,
+		MaxHeaderBytes: serverMaxHeaderBytes,
+	}
 }
 
 func main() {
@@ -433,21 +512,7 @@ func main() {
 
 	rl := newRateLimiter(nil)
 
-	// Slow relay routes (/api/img, ugoira meta) override WriteTimeout
-	// per-response via SetWriteDeadline — see handlers.go.
-	const (
-		serverReadTimeout  = 10 * time.Second
-		serverWriteTimeout = 15 * time.Second
-		serverIdleTimeout  = 60 * time.Second
-	)
-
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      originCheck(securityHeaders(logRequests(rl.middleware(handler)))),
-		ReadTimeout:  serverReadTimeout,
-		WriteTimeout: serverWriteTimeout,
-		IdleTimeout:  serverIdleTimeout,
-	}
+	srv := newHTTPServer(addr, middlewareChain(handler, rl))
 
 	// Graceful stop on SIGINT/SIGTERM (reviewer finding): drain
 	// in-flight requests and close the prefs DB instead of dying
