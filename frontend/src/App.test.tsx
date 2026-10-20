@@ -1587,6 +1587,34 @@ describe("App", () => {
       ).toContain("data:image/gif");
     });
 
+    it("persists the committed search query, not an unsubmitted draft", async () => {
+      const { container, getByText } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await fireEvent.click(container.querySelector(".burger-pill")!);
+      await fireEvent.click(getByText("🔍 Search"));
+      await waitFor(() =>
+        expect(container.querySelector(".search-screen")).not.toBeNull()
+      );
+      const input = container.querySelector(".search-input") as HTMLInputElement;
+      await fireEvent.input(input, { target: { value: "fantasy" } });
+      await fireEvent.submit(input.closest("form")!);
+      await waitFor(() =>
+        expect(
+          container.querySelectorAll(".search-screen .feed-card").length
+        ).toBe(3)
+      );
+
+      // Abandon a draft afterwards. It used to be reported as the query and
+      // persisted: the next boot promoted "draft" while showing fantasy's
+      // results, and never refetched.
+      await fireEvent.input(input, { target: { value: "draft" } });
+      await new Promise((r) => setTimeout(r, 650)); // snapshot debounce
+      const snap = JSON.parse(localStorage.getItem("pixtok_state_v2")!);
+      expect(snap.searchStack[0].word).toBe("fantasy");
+    });
+
     it("opening a search page during a close animation keeps the new top layer alive", async () => {
       // Regression: opening during the 260ms slide-out used to count the
       // exiting layer when computing the new layer's key index — the

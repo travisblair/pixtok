@@ -187,6 +187,14 @@ export default function SearchScreen(props: {
         if (fresh) {
           setError(true);
           // A failed fresh search must not leave the PREVIOUS query's
+          // results on screen under the new query: the cards then contradict
+          // the search bar, and the snapshot persisted that mismatched pair
+          // (word = new query, works = old query) for every following boot.
+          setWorks([]);
+          setPopular([]);
+          setRelated([]);
+          setUsers([]);
+          // A failed fresh search must not leave the PREVIOUS query's
           // pagination live: hasMore/page still described the old result
           // set, so the sentinel could fetch page N+1 of the NEW query
           // and append it to the OLD query's results.
@@ -273,7 +281,12 @@ export default function SearchScreen(props: {
   // Report state for snapshot persistence (debounced at the App level).
   createEffect(() => {
     props.onState?.({
-      word: word(),
+      // The COMMITTED query, never the live input: a draft typed but not
+      // submitted used to be persisted as the query while the results still
+      // belonged to the previous search — the restore then promoted the
+      // draft and showed the old cards under it (and never refetched).
+      // Not tracking `word` here also avoids a snapshot write per keystroke.
+      word: query(),
       mode: mode(),
       order: order(),
       contentMode: contentMode(),
