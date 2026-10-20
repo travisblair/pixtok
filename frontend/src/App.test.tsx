@@ -1484,6 +1484,109 @@ describe("App", () => {
       expect(input.value).toBe("snow");
     });
 
+    it("a covered search layer unloads its popular strip", async () => {
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed([
+              makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+              makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+            ])
+          )
+        ),
+        http.get("/api/search/artworks", () =>
+          json({
+            illusts: makeFeedOf(3, 2000).illusts,
+            total: 3,
+            last_page: 1,
+            page: 1,
+            next_url: null,
+            popular: makeFeedOf(2, 3000).illusts,
+            related_tags: [],
+          })
+        )
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      // The top layer's strip loads through the proxy.
+      await waitFor(() =>
+        expect(
+          container.querySelector(".search-popular-item img")?.getAttribute("src")
+        ).toContain("/api/img")
+      );
+
+      // Cover it with another tag page: the covered layer's strip must drop
+      // to the placeholder (it used to stay fully decoded underneath).
+      await tapChip(container, "rain");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+      const covered = container.querySelectorAll(".search-screen")[0];
+      await waitFor(() =>
+        expect(
+          covered.querySelector(".search-popular-item img")?.getAttribute("src")
+        ).toContain("data:image/gif")
+      );
+    });
+
+    it("a search layer covered by an artist page unloads avatars and previews", async () => {
+      server.use(
+        http.get("/api/search/users", () =>
+          json({
+            users: [
+              {
+                id: 77,
+                name: "User One",
+                avatar: "https://i.pximg.net/user-profile/img/1.jpg",
+                premium: false,
+                is_followed: false,
+                previews: makeFeedOf(3, 6000).illusts,
+              },
+            ],
+            total: 1,
+            page: 1,
+            next_url: null,
+          })
+        )
+      );
+      const { container, getByText } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await fireEvent.click(container.querySelector(".burger-pill")!);
+      await fireEvent.click(getByText("🔍 Search"));
+      await waitFor(() =>
+        expect(container.querySelector(".search-screen")).not.toBeNull()
+      );
+      const input = container.querySelector(".search-input") as HTMLInputElement;
+      await fireEvent.input(input, { target: { value: "fantasy" } });
+      await fireEvent.submit(input.closest("form")!);
+      await fireEvent.click(getByText("Artists"));
+      await waitFor(() =>
+        expect(container.querySelector(".search-user-row")).not.toBeNull()
+      );
+      const avatar = () =>
+        container.querySelector(".search-user-avatar")!.getAttribute("src");
+      await waitFor(() => expect(avatar()).toContain("/api/img"));
+
+      // Artist page on top → the search layer is covered; its avatar and
+      // previews must release their bitmaps.
+      await fireEvent.click(container.querySelector(".search-user-main")!);
+      await waitFor(() =>
+        expect(container.querySelector(".artist-view")).not.toBeNull()
+      );
+      await waitFor(() => expect(avatar()).toContain("data:image/gif"));
+      expect(
+        container.querySelector(".search-user-preview img")?.getAttribute("src")
+      ).toContain("data:image/gif");
+    });
+
     it("opening a search page during a close animation keeps the new top layer alive", async () => {
       // Regression: opening during the 260ms slide-out used to count the
       // exiting layer when computing the new layer's key index — the

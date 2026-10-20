@@ -46,6 +46,14 @@ export interface SearchUserRef {
   avatar: string;
 }
 
+// The 1px GIF data URI FeedCard uses for suppressed images. A covered
+// search layer must release its own images too — its page-1 popular strip
+// and (per artist row) an avatar plus three previews are full decodes, and
+// the 10-layer cap made a stack of search pages the exact jetsam class the
+// suppression system exists for.
+const PIXEL =
+  "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+
 /**
  * Full-screen search layer — the site's search pages, without the forced
  * tag-vs-user pre-selection: one input, Works results by default,
@@ -306,6 +314,12 @@ export default function SearchScreen(props: {
 
   const imgUrl = (u: string | undefined) =>
     u ? `/api/img?url=${encodeURIComponent(u)}` : "";
+  // Independent of visibility: a covered OR closing layer owns no image
+  // windows (see FeedCard's suppressImages rationale).
+  const suppressed = () => !!props.obscured || !!props.closing;
+  /** Image src honoring layer suppression (placeholder, no request). */
+  const imageSrc = (u: string | undefined) =>
+    suppressed() ? PIXEL : imgUrl(u);
 
   return (
     <div
@@ -403,7 +417,9 @@ export default function SearchScreen(props: {
                     aria-label={ill.title}
                   >
                     <img
-                      src={imgUrl(ill.image_urls.square_medium ?? ill.image_urls.large)}
+                      src={imageSrc(
+                        ill.image_urls.square_medium ?? ill.image_urls.large
+                      )}
                       alt={ill.title}
                       loading="lazy"
                     />
@@ -457,7 +473,11 @@ export default function SearchScreen(props: {
                     })
                   }
                 >
-                  <img class="search-user-avatar" src={imgUrl(u.avatar)} alt={u.name} />
+                  <img
+                    class="search-user-avatar"
+                    src={imageSrc(u.avatar)}
+                    alt={u.name}
+                  />
                   <span class="search-user-name">{u.name}</span>
                 </button>
                 <div class="search-user-previews">
@@ -470,7 +490,9 @@ export default function SearchScreen(props: {
                         aria-label={p.title}
                       >
                         <img
-                          src={imgUrl(p.image_urls.square_medium ?? p.image_urls.large)}
+                          src={imageSrc(
+                            p.image_urls.square_medium ?? p.image_urls.large
+                          )}
                           alt={p.title}
                           loading="lazy"
                         />
