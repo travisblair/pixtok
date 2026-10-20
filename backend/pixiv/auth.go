@@ -22,6 +22,24 @@ const tokenRetryBackoff = 30 * time.Second
 // upstream expiry so a slow Pi never serves a token that dies mid-flight.
 const tokenExpirySkew = 5 * time.Minute
 
+// tokenMinExpiresIn: upstream lifetimes below this are rewritten to the
+// normal 3600. The skew is subtracted AFTER the upstream value, so the
+// old <=300 guard left 301..599s lifetimes deriving an expiresAt one
+// second to four minutes out — every request then re-entered refresh(),
+// rotating the refresh token and rewriting .env at ~1Hz. Pixiv normally
+// returns 3600; a value this far below it is a broken response, not a
+// legitimately short-lived token.
+const tokenMinExpiresIn = 600
+
+// normalizeExpiresIn maps a pathological token lifetime to the normal
+// 3600 so the derived expiry cannot land in the past.
+func normalizeExpiresIn(expiresIn int) int {
+	if expiresIn < tokenMinExpiresIn {
+		return 3600
+	}
+	return expiresIn
+}
+
 const (
 	authURL   = "https://oauth.secure.pixiv.net/auth/token"
 	clientID  = "MOBrBDS8blbauoSck0ZfDbtuzpyT"
@@ -33,9 +51,24 @@ func (c *Client) refresh() error {
 	// everyone else either already sees a valid token or waits here.
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
+	return c.refreshLocked(false)
+}
 
+// forceRefresh runs the token round-trip even when the cached expiry
+// says the access token is still valid. Health probes need pixiv's
+// answer, not "a token was fetched recently".
+func (c *Client) forceRefresh() error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	return c.refreshLocked(true)
+}
+
+// refreshLocked performs the token-endpoint round trip. Callers hold
+// refreshMu — it single-flights the network call and serializes the
+// commit with SetTokens (the other writer of the same credential).
+func (c *Client) refreshLocked(force bool) error {
 	c.mu.Lock()
-	if !time.Now().After(c.expiresAt) {
+	if !force && !time.Now().After(c.expiresAt) {
 		c.mu.Unlock() // another goroutine refreshed while we waited
 		return nil
 	}
@@ -109,10 +142,7 @@ func (c *Client) refresh() error {
 		return fmt.Errorf("token response omitted access_token")
 	}
 
-	expiresIn := tr.ExpiresIn
-	if expiresIn <= 300 {
-		expiresIn = 3600 // defensive: never land in the past on a bad response
-	}
+	expiresIn := normalizeExpiresIn(tr.ExpiresIn)
 
 	// Persist a rotated refresh token BEFORE committing it to memory
 	// (reviewer finding): the refresh token is the durable credential —
@@ -206,9 +236,18 @@ func (c *Client) ExchangePkce(code, codeVerifier string) (string, string, int, e
 // persists the refresh token to .env (the access token is transient —
 // the client refreshes on demand).
 func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) error {
-	if expiresIn <= 300 {
-		expiresIn = 3600
-	}
+	// Serialize against refresh(): both write the same durable
+	// credential, and refresh() snapshots the refresh token BEFORE its
+	// network call (it has to — the body needs it). Without a shared
+	// lock an in-flight refresh lands AFTER the login and commits the
+	// PREVIOUS account's rotated token to .env and memory, silently
+	// reverting the login that just succeeded. refreshMu is the lock
+	// refresh() already holds for its whole round trip, so taking it
+	// here makes the login the last writer.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	expiresIn = normalizeExpiresIn(expiresIn)
 	// Persist BEFORE committing to memory — the same invariant as
 	// refresh(): memory must never get ahead of disk. On a failed write
 	// the running client keeps the old pair and the caller surfaces the
@@ -223,17 +262,42 @@ func (c *Client) SetTokens(refreshToken, accessToken string, expiresIn int) erro
 	c.accessToken = accessToken
 	c.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).Add(-tokenExpirySkew)
 	c.mu.Unlock()
+	c.resetSessionCaches()
 	return nil
 }
 
-// AuthHealth probes both auth surfaces: the app-API token (a refresh
-// round-trip means the permanent token is still valid) and the web
-// session (/ajax/user/extra 200s with account data for a live session —
-// unlike /ajax/top/illust, which serves anonymously even when dead).
+// resetSessionCaches drops every cache that was populated from the
+// credentialed account. The in-app login can pick a DIFFERENT pixiv
+// account, and both caches are keyed only by request shape / artist id —
+// nothing else invalidates them. Without this, account A's liked ids
+// (5 min) and follow state (30 min) are served to account B, and a 429
+// cooldown tripped under A suppresses B's follow buttons for 5 min.
+func (c *Client) resetSessionCaches() {
+	if c.followState != nil {
+		c.followState.reset()
+	}
+	if c.bookmarkIDs != nil {
+		c.bookmarkIDs.reset()
+	}
+	c.followCooldown.Store(0)
+}
+
+// AuthHealth probes both auth surfaces: the app-API token and the web
+// session.
+//
+// The app probe is a REAL token round-trip. The cached expiry only says
+// "a token was fetched recently", so the old short-circuit reported a
+// revoked credential as healthy — and it also reported healthy during
+// the 30s failure backoff, which is indistinguishable from a valid
+// window.
+//
+// The web probe parses the body: pixiv answers 200 {"error":true} for
+// an expired PHPSESSID (the envelope every transform here handles), so
+// a bare status check called a dead session connected.
 func (c *Client) AuthHealth() (appOK bool, webOK bool) {
-	appOK = c.refresh() == nil
-	_, err := c.webGet("https://www.pixiv.net/ajax/user/extra?is_smartphone=0&lang=en")
-	webOK = err == nil
+	appOK = c.forceRefresh() == nil
+	body, err := c.webGet("https://www.pixiv.net/ajax/user/extra?is_smartphone=0&lang=en")
+	webOK = err == nil && !webErrorEnvelope(body)
 	return appOK, webOK
 }
 

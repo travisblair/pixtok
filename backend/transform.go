@@ -119,6 +119,20 @@ func (f *flexID) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// upstreamError turns pixiv's 200-with-{"error":true} envelope into an
+// error. The whole web-AJAX family serves it for an expired session or a
+// rate limit; decoding it as an empty body would render "no works"
+// instead of surfacing the failure (and leave the journal clean).
+func upstreamError(surface string, isError bool, message string) error {
+	if !isError {
+		return nil
+	}
+	if message == "" {
+		message = "pixiv reported an error"
+	}
+	return fmt.Errorf("%s: %s", surface, message)
+}
+
 // applyTagTranslations fills TranslatedName on works' tags from a
 // response-level tagTranslation map. Works without a mapping keep their
 // raw name (the FE chip just renders no translation line).
@@ -139,7 +153,10 @@ func applyTagTranslations(works []illust, tr tagTranslationMap) {
 // (the Illustrations tab firehose) to the standard FeedResponse format.
 func transformTopIllust(raw []byte) ([]byte, error) {
 	var src struct {
-		Body struct {
+		// Pixiv error envelope (expired session, rate limit).
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+		Body    struct {
 			Thumbnails struct {
 				Illust []struct {
 					ID           flexID `json:"id"`
@@ -165,12 +182,20 @@ func transformTopIllust(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &src); err != nil {
 		return nil, err
 	}
+	if err := upstreamError("top illust", src.Error, src.Message); err != nil {
+		return nil, err
+	}
 
 	out := feedResponse{Illusts: make([]illust, 0, 30)}
 
 	for _, srcIll := range src.Body.Thumbnails.Illust {
 		if len(out.Illusts) >= 30 {
 			break
+		}
+		// See mapWebIllusts: a null/missing id would reach the client as
+		// id 0.
+		if srcIll.ID == "" || srcIll.UserID == "" {
+			continue
 		}
 		ill := illust{
 			ID:             string(srcIll.ID),
@@ -267,12 +292,8 @@ func transformStreet(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &src); err != nil {
 		return nil, err
 	}
-	if src.Error {
-		msg := src.Message
-		if msg == "" {
-			msg = "pixiv reported an error"
-		}
-		return nil, fmt.Errorf("street: %s", msg)
+	if err := upstreamError("street", src.Error, src.Message); err != nil {
+		return nil, err
 	}
 
 	out := feedResponse{Illusts: make([]illust, 0, 60)}
@@ -285,6 +306,12 @@ func transformStreet(raw []byte) ([]byte, error) {
 			continue
 		}
 		thumb := block.Thumbnails[0]
+
+		// See mapWebIllusts: a null/missing id would reach the client as
+		// id 0 (an unopenable, unlikable card).
+		if thumb.ID == "" || thumb.UserID == "" {
+			continue
+		}
 
 		// Street thumbnails carry a `type` string (illust/manga — ugoira
 		// works are labelled illust there) and, when present, the
@@ -345,8 +372,11 @@ func transformStreet(raw []byte) ([]byte, error) {
 		out.Illusts = append(out.Illusts, ill)
 	}
 
-	if len(src.Body.NextParams) > 0 && string(src.Body.NextParams) != "null" {
-		next := string(src.Body.NextParams)
+	// Only literal "null" used to end pagination, so an empty cursor
+	// object was echoed back as next_url and the client POSTed {} again
+	// forever, re-fetching page 1. Treat both as the terminal page.
+	next := strings.TrimSpace(string(src.Body.NextParams))
+	if next != "" && next != "null" && next != "{}" {
 		out.NextURL = &next
 	}
 
@@ -435,6 +465,13 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 		if len(out) >= maxWorks {
 			break
 		}
+		// A null/missing work id decodes to "" (json null into a
+		// json.Number is a no-op) and the client normalizes "" to 0 —
+		// producing a card that requests /api/illust/0 and likes
+		// illust_id=0. Drop the entry instead of poisoning the feed.
+		if item.ID == "" || item.UserID == "" {
+			continue
+		}
 		// Web AJAX works carry NO type string — illustType is the
 		// authoritative discriminator (0=illust, 1=manga, 2=ugoira).
 		// The old fallback only mapped 1→manga and dropped 2 into
@@ -518,12 +555,18 @@ func mapWebIllusts(items []webIllust, maxWorks int) []illust {
 // responses (the site's per-work "Related works") to FeedResponse.
 func transformWorkRecommend(raw []byte) ([]byte, error) {
 	var src struct {
-		Body struct {
+		// Pixiv error envelope (expired session, rate limit).
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+		Body    struct {
 			Illusts []webIllust `json:"illusts"`
 		} `json:"body"`
 	}
 
 	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, err
+	}
+	if err := upstreamError("work recommend", src.Error, src.Message); err != nil {
 		return nil, err
 	}
 
@@ -537,13 +580,19 @@ func transformWorkRecommend(raw []byte) ([]byte, error) {
 // continuation through the same proxy.
 func transformNewest(raw []byte, r18 bool) ([]byte, error) {
 	var src struct {
-		Body struct {
+		// Pixiv error envelope (expired session, rate limit).
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+		Body    struct {
 			Illusts []webIllust `json:"illusts"`
 			LastID  string      `json:"lastId"`
 		} `json:"body"`
 	}
 
 	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, err
+	}
+	if err := upstreamError("newest", src.Error, src.Message); err != nil {
 		return nil, err
 	}
 
@@ -696,9 +745,23 @@ func transformSearchUsers(raw []byte) (searchUsersResponse, error) {
 		byID[string(work.ID)] = work
 	}
 
-	out := searchUsersResponse{Total: src.Body.Page.Total}
+	// Both arrays are emitted as [] rather than null: the search screen
+	// dereferences them unguarded (users().length, u.previews.slice), and
+	// a nil slice marshals to null. A zero-result artist search is a
+	// normal outcome, not a broken payload.
+	out := searchUsersResponse{
+		Users: make([]userSearchResult, 0, len(src.Body.Users)),
+		Total: src.Body.Page.Total,
+	}
 	for _, user := range src.Body.Users {
-		row := userSearchResult{ID: string(user.UserID), Name: user.Name, Avatar: user.Image, Premium: user.Premium, IsFollowed: user.IsFollowed}
+		row := userSearchResult{
+			ID:         string(user.UserID),
+			Name:       user.Name,
+			Avatar:     user.Image,
+			Premium:    user.Premium,
+			IsFollowed: user.IsFollowed,
+			Previews:   make([]illust, 0, 3),
+		}
 		if ids, ok := src.Body.Page.WorkIDs[string(user.UserID)]; ok {
 			previews := make([]webIllust, 0, 3)
 			for _, wid := range ids {

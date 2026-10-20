@@ -165,19 +165,38 @@ func (c *Client) GetBookmarkIDs(restrict string, maxPages int) ([]string, error)
 			return nil, err
 		}
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("bookmarks returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+			// A typed status error (not a formatted string) so the
+			// bookmark cache can recognize a 429 without matching on
+			// error text. Error() renders identically to the old
+			// "bookmarks returned %d: %s".
+			return nil, &statusError{op: "bookmarks", status: resp.StatusCode, body: truncate(string(body), 200)}
 		}
 		var parsed struct {
-			Illusts []struct {
+			// Pointer so a 200 without the key (error envelope, truncated
+			// body, shape change) is distinguishable from a legitimately
+			// empty list: the zero value would be cached as "no
+			// bookmarks" and make every like look unliked for the TTL.
+			Illusts *[]struct {
 				ID json.Number `json:"id"`
 			} `json:"illusts"`
 			NextURL string `json:"next_url"`
+			Error   bool   `json:"error"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
 			return nil, err
 		}
-		for _, work := range parsed.Illusts {
-			ids = append(ids, work.ID.String())
+		if parsed.Error {
+			return nil, fmt.Errorf("bookmarks response carried an error envelope")
+		}
+		if parsed.Illusts == nil {
+			return nil, fmt.Errorf("bookmarks response missing illusts")
+		}
+		for _, work := range *parsed.Illusts {
+			// A null/missing id is not a bookmark — never hand the client
+			// an id it would normalize to 0.
+			if id := work.ID.String(); id != "" {
+				ids = append(ids, id)
+			}
 		}
 		next = parsed.NextURL
 		// The next URL comes from the upstream response, not the client —
@@ -307,6 +326,11 @@ func (c *Client) SetFollow(userID string, restrict string, follow bool) error {
 	return nil
 }
 
+// followStateRetries bounds the post-invalidation re-fetch: an answer
+// that predates the user's own toggle is discarded once, then whatever
+// the re-fetch returns is served (a toggle storm must not loop here).
+const followStateRetries = 1
+
 // IsFollowed returns the current follow state from /v1/user/detail,
 // served through the follow-state cache (TTL + single-flight). A nil
 // cache (test clients) degrades to a direct fetch.
@@ -317,19 +341,28 @@ func (c *Client) IsFollowed(userID string) (bool, error) {
 	if c.followState == nil {
 		return c.fetchFollowState(userID)
 	}
-	value, fresh, call, lead := c.followState.getOrStart(userID)
-	if fresh {
-		return value, nil
+	for attempt := 0; ; attempt++ {
+		value, fresh, call, lead := c.followState.getOrStart(userID)
+		if fresh {
+			return value, nil
+		}
+		if lead {
+			v, err := c.fetchFollowState(userID)
+			c.followState.finish(userID, call, v, err)
+			return v, err
+		}
+		// Follower: the leader's finish() closes done after storing the
+		// result — the close is the happens-before edge for these reads.
+		<-call.done
+		// A caller that joined a call started BEFORE invalidate() would
+		// otherwise render the pre-toggle value: the epoch guard keeps
+		// that value out of the cache but the ticket still carries it.
+		// Re-enter (the ticket is gone, so this leads a fresh fetch)
+		// and answer with the toggled state.
+		if !call.superseded || attempt >= followStateRetries {
+			return call.value, call.err
+		}
 	}
-	if lead {
-		v, err := c.fetchFollowState(userID)
-		c.followState.finish(userID, call, v, err)
-		return v, err
-	}
-	// Follower: the leader's finish() closes done after storing the
-	// result — the close is the happens-before edge for these reads.
-	<-call.done
-	return call.value, call.err
 }
 
 func (c *Client) fetchFollowState(userID string) (bool, error) {
@@ -357,12 +390,24 @@ func (c *Client) fetchFollowState(userID string) (bool, error) {
 		return false, fmt.Errorf("user detail returned %d", resp.StatusCode)
 	}
 	var out struct {
-		User struct {
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+		// Pointer so a 200 without the user object (error envelope,
+		// truncated body, shape change) is distinguishable from an
+		// explicit is_followed=false. The zero value would be cached for
+		// the whole TTL and un-follow every artist the user follows.
+		User *struct {
 			IsFollowed bool `json:"is_followed"`
 		} `json:"user"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return false, err
+	}
+	if out.Error {
+		return false, fmt.Errorf("user detail: %s", out.Message)
+	}
+	if out.User == nil {
+		return false, fmt.Errorf("user detail response missing user")
 	}
 	return out.User.IsFollowed, nil
 }

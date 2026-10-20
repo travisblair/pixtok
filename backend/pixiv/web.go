@@ -1,6 +1,7 @@
 package pixiv
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -176,6 +177,20 @@ func (c *Client) webGet(u string) ([]byte, error) {
 	return body, nil
 }
 
+// webErrorEnvelope reports whether a web-AJAX body is pixiv's
+// 200-with-error envelope (expired session, rate limit, shape change).
+// A body that is not a JSON object counts as an error too: a Cloudflare
+// interstitial is not a live session.
+func webErrorEnvelope(body []byte) bool {
+	var env struct {
+		Error bool `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return true
+	}
+	return env.Error
+}
+
 // webSession returns the current PHPSESSID + csrf token under one lock.
 // SetWebSession swaps BOTH mid-flight (in-app login capture) while feed
 // requests read them — unsynchronized reads were a data race. Callers
@@ -221,32 +236,31 @@ func (c *Client) invalidateCsrf() {
 	c.sessionMu.Unlock()
 }
 
-// csrfToken returns (and caches) the x-csrf-token needed for street POSTs.
-// The token is SESSION-BOUND: it must be fetched with the same PHPSESSID
-// that will make the street calls, or pixiv 400s with a login-again error.
-// The homepage HTML is Cloudflare-walled for non-browser clients, but the
-// user profile page is not — it embeds the same session-bound token in its
-// preloaded state.
-func (c *Client) csrfToken() (string, error) {
+// csrfToken returns the session id the token belongs to, plus the token.
+// The PAIR matters: the token is SESSION-BOUND and must ride the same
+// PHPSESSID it was scraped with. A login capture can swap the session
+// between two separate reads, so callers must send the returned session
+// id rather than re-reading c.webSessionID() — cookie B with token A
+// 400s and costs an extra profile-page fetch.
+func (c *Client) csrfToken() (string, string, error) {
 	// webSession() returns (phpSessID, csrfTokenCache) — the CACHE is the
 	// token. Regression (Aug 26): the web-session-race refactor read the
 	// first value and sent the PHPSESSID itself as x-csrf-token; pixiv
 	// 400s that pairing with a login-again error.
-	_, tok := c.webSession()
+	sessID, tok := c.webSession()
 	if tok != "" {
-		return tok, nil
+		return sessID, tok, nil
 	}
-	sessID := c.webSessionID()
 	tok, err := c.fetchCsrfToken(sessID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	// Guard against a lost update: a login capture completing while this
 	// fetch was in flight already swapped in the NEW session — committing
 	// the pre-fetch pair would silently resurrect the old one in memory
 	// (disk holds the new session; the next restart would flip back).
 	c.setWebCacheIfCurrent(sessID, tok)
-	return tok, nil
+	return sessID, tok, nil
 }
 
 // csrfTokenRE matches the session-bound token in the profile page's
@@ -308,12 +322,27 @@ func (c *Client) ScrapeCsrfFor(phpsessid string) (string, error) {
 
 // SetWebSession hot-swaps the web session (PHPSESSID + its bound csrf
 // token) into the running client and persists both to .env.
+//
+// Persist BEFORE committing, like the app token: if the .env write fails
+// (read-only FS, full disk) the process must not serve a session disk
+// has never seen — a restart would resurrect the old, usually dead
+// PHPSESSID and every web-AJAX surface breaks until the next login.
+// sessionMu is held across the write so two overlapping logins cannot
+// interleave their disk and memory halves in opposite orders (envFileMu
+// serializes each write, not the cache+disk pair).
 func (c *Client) SetWebSession(phpsessid, csrfToken string) error {
-	c.setWebCache(phpsessid, csrfToken)
-	return UpdateEnvFile(map[string]string{
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	if err := UpdateEnvFile(map[string]string{
 		"PIXIV_PHPSESSID":   phpsessid,
 		"PIXTOK_CSRF_TOKEN": csrfToken,
-	})
+	}); err != nil {
+		return err
+	}
+	c.phpSessID = phpsessid
+	c.csrfTokenCache = csrfToken
+	c.resetSessionCaches()
+	return nil
 }
 
 // GetStreet fetches the modern personalized homepage feed. nextParams is
@@ -324,7 +353,7 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 	}
 
 	do := func() ([]byte, error) {
-		token, err := c.csrfToken()
+		sessID, token, err := c.csrfToken()
 		if err != nil {
 			return nil, err
 		}
@@ -335,7 +364,7 @@ func (c *Client) GetStreet(nextParams string) ([]byte, error) {
 		}
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
 		req.Header.Set("x-csrf-token", token)
-		req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
+		req.Header.Set("Cookie", "PHPSESSID="+sessID)
 		req.Header.Set("User-Agent", webUA)
 		req.Header.Set("Referer", homeURL)
 		// Pixiv's CSRF check pairs the token with Origin/Accept — the site
@@ -405,6 +434,11 @@ func (c *Client) GetUgoiraMeta(illustID string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
+		// A 404 is permanent (deleted work): wrap ErrNotFound so the
+		// handler can answer 404 instead of a 502 the client retries.
+		if resp.StatusCode == 404 {
+			return nil, fmt.Errorf("%w (ugoira meta HTTP 404)", ErrNotFound)
+		}
 		return nil, fmt.Errorf("ugoira meta returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return body, nil
@@ -421,15 +455,18 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 	if order != "desc" && order != "asc" {
 		return nil, fmt.Errorf("%w: invalid order", ErrInvalidParam)
 	}
-	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
-	if !ValidID(uid) {
-		return nil, fmt.Errorf("cannot resolve user id from web session")
-	}
-
 	do := func() ([]byte, error) {
-		token, err := c.csrfToken()
+		sessID, token, err := c.csrfToken()
 		if err != nil {
 			return nil, err
+		}
+		// The uid is the session's owner: it must come from the same
+		// session snapshot as the token/cookie, or a login capture
+		// mid-flight would walk the OLD account's bookmarks with the NEW
+		// account's credentials.
+		uid := strings.SplitN(sessID, "_", 2)[0]
+		if !ValidID(uid) {
+			return nil, fmt.Errorf("cannot resolve user id from web session")
 		}
 		u := fmt.Sprintf("https://www.pixiv.net/ajax/user/%s/illusts/bookmarks?tag=%s&offset=%d&limit=%d&rest=show&order=%s&mode=all&lang=en",
 			uid, url.QueryEscape(tag), offset, limit, order)
@@ -438,7 +475,7 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 			return nil, err
 		}
 		req.Header.Set("x-csrf-token", token)
-		req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
+		req.Header.Set("Cookie", "PHPSESSID="+sessID)
 		req.Header.Set("User-Agent", webUA)
 		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
 		req.Header.Set("Accept", "application/json")
@@ -470,14 +507,14 @@ func (c *Client) GetBookmarkPage(tag string, offset, limit int, order string) ([
 // GetBookmarkTags fetches the user's bookmark-tag list (web AJAX,
 // crawl-verified): body.public/private arrays of {tag, cnt}.
 func (c *Client) GetBookmarkTags() ([]byte, error) {
-	uid := strings.SplitN(c.webSessionID(), "_", 2)[0]
-	if !ValidID(uid) {
-		return nil, fmt.Errorf("cannot resolve user id from web session")
-	}
 	do := func() ([]byte, error) {
-		token, err := c.csrfToken()
+		sessID, token, err := c.csrfToken()
 		if err != nil {
 			return nil, err
+		}
+		uid := strings.SplitN(sessID, "_", 2)[0]
+		if !ValidID(uid) {
+			return nil, fmt.Errorf("cannot resolve user id from web session")
 		}
 		u := fmt.Sprintf("https://www.pixiv.net/ajax/user/%s/illusts/bookmark/tags?lang=en", uid)
 		req, err := http.NewRequest("GET", u, nil)
@@ -485,7 +522,7 @@ func (c *Client) GetBookmarkTags() ([]byte, error) {
 			return nil, err
 		}
 		req.Header.Set("x-csrf-token", token)
-		req.Header.Set("Cookie", "PHPSESSID="+c.webSessionID())
+		req.Header.Set("Cookie", "PHPSESSID="+sessID)
 		req.Header.Set("User-Agent", webUA)
 		req.Header.Set("Referer", "https://www.pixiv.net/en/users/"+uid+"/bookmarks/artworks")
 		req.Header.Set("Accept", "application/json")
@@ -542,6 +579,11 @@ func (c *Client) GetWorkRecommend(illustID string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
+		// A 404 is permanent (deleted work): wrap ErrNotFound so the
+		// handler can answer 404 instead of a 502 the client retries.
+		if resp.StatusCode == 404 {
+			return nil, fmt.Errorf("%w (work recommend HTTP 404)", ErrNotFound)
+		}
 		return nil, fmt.Errorf("work recommend returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return body, nil

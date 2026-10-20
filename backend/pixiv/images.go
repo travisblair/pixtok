@@ -130,7 +130,13 @@ func (c *Client) ProxyImageStream(imgURL string, w http.ResponseWriter) ([]byte,
 	head := make([]byte, bufSize)
 	n, err := io.ReadFull(resp.Body, head)
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		return head[:n], contentType, nil
+		// Three-index slice: cap is clamped to the bytes actually read.
+		// Without it a 100 KB image delivered with an unknown length
+		// (chunked, or gzip decompressed by the transport) hands the
+		// image cache a slice backed by the full 5 MiB ceiling buffer —
+		// and the cache accounts len(), not cap(), so ~300 such entries
+		// pin 1.5 GiB on a GOMEMLIMIT=80MiB Pi.
+		return head[:n:n], contentType, nil
 	}
 	if err != nil {
 		return nil, "", fmt.Errorf("read image body: %w", err)
