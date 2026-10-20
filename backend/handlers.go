@@ -150,6 +150,26 @@ func (s *pkceStore) take(state string) (string, bool) {
 	return e.verifier, true
 }
 
+// peek reports whether state names a live flow WITHOUT consuming it.
+// The proxy legs check this on every request: the login-flow cookie's
+// value is client-supplied, so "the cookie exists" only proves the
+// caller can write a header — it must also name a flow THIS server
+// started (and has not expired) before the gate-exempt login legs will
+// relay anything upstream.
+func (s *pkceStore) peek(state string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[state]
+	if !ok {
+		return false
+	}
+	if time.Now().After(e.expires) {
+		delete(s.entries, state) // expired: it can never be used again
+		return false
+	}
+	return true
+}
+
 func randomB64(bytes int) (string, error) {
 	buf := make([]byte, bytes)
 	if _, err := rand.Read(buf); err != nil {
@@ -818,6 +838,14 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 
 		body, err := api.ProxyNext(nextURL)
 		if err != nil {
+			if errors.Is(err, pixiv.ErrInvalidParam) {
+				// Client-supplied URL refused by the allowlist — 400,
+				// and log the rejected value (sanitized + capped) so a
+				// broken feed URL is diagnosable from the journal.
+				log.Printf("WARN /api/next rejected url=%q", logField(nextURL))
+				http.Error(w, "url not allowed", http.StatusBadRequest)
+				return
+			}
 			log.Printf("ERROR proxy: %v", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return

@@ -2,18 +2,21 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
 // rateLimit bounds a runaway or compromised client even when it holds
-// valid gate credentials. Buckets are GLOBAL (the backend only ever sees
-// 127.0.0.1 through the Vite proxy / Tailscale serve / Funnel — per-IP
-// would collapse into one bucket anyway, and trusting X-Forwarded-For
-// from a tunnel we can't verify is worse).
+// valid gate credentials. Buckets are per SOURCE plus a process-wide
+// ceiling: the backend only ever sees loopback through the Vite proxy /
+// tailscale serve / Funnel, so the client address comes from the XFF
+// element the proxy appended (rightmost), trusted only from a loopback
+// peer.
 func TestRateLimitImagesTier(t *testing.T) {
 	lim := newRateLimiter(nil)
 	h := lim.middleware(noContentHandler())
@@ -230,5 +233,107 @@ func TestRateLimitGlobalCeiling(t *testing.T) {
 	// A fresh source passes ITS bucket but trips the global ceiling.
 	if rr := hitGetXFF(h, img, fmt.Sprintf("10.1.0.%d", globalMultiplier+1)); rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("over-global request = %d, want 429", rr.Code)
+	}
+}
+
+// ── Source key: rightmost XFF element, IP-only, bounded (review M6) ───
+
+// A proxy that APPENDS the peer it saw leaves caller-supplied text to
+// the left of X-Forwarded-For. Keying on the leftmost element let a
+// caller rotate the header per request and mint unlimited buckets; the
+// key must be the RIGHTMOST element (what the trusted last hop added).
+func TestSourceKeyUsesRightmostXFFElement(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://pixtok.test/api/x", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.7")
+	if got := sourceKey(req); got != "198.51.100.7" {
+		t.Fatalf("sourceKey = %q, want the rightmost element 198.51.100.7", got)
+	}
+
+	// Rotating the caller-controlled left part must not change the key.
+	req.Header.Set("X-Forwarded-For", "10.0.0.1, 10.0.0.2, 198.51.100.7")
+	if got := sourceKey(req); got != "198.51.100.7" {
+		t.Fatalf("rotated left part changed the key: %q", got)
+	}
+}
+
+// Middleware-level proof: rotating the leftmost element per request must
+// NOT buy extra buckets — the per-source limiter still trips at its cap.
+func TestRateLimitRotatedXFFLeftPartDoesNotBypass(t *testing.T) {
+	lim := newRateLimiter(nil)
+	h := lim.middleware(noContentHandler())
+	img := "/api/img?url=https%3A%2F%2Fi.pximg.net%2Fimg%2F1.jpg"
+
+	for i := 0; i < imagesPerMinute; i++ {
+		xff := fmt.Sprintf("10.9.9.%d, 203.0.113.50", i%250+1)
+		if rr := hitGetXFF(h, img, xff); rr.Code != http.StatusNoContent {
+			t.Fatalf("request %d = %d, want 204", i+1, rr.Code)
+		}
+	}
+	// A different left part, same appended element → same bucket → 429.
+	if rr := hitGetXFF(h, img, "192.0.2.77, 203.0.113.50"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("rotated leftmost element bought a fresh bucket: %d, want 429", rr.Code)
+	}
+	// A genuinely different appended element still gets its own budget.
+	if rr := hitGetXFF(h, img, "192.0.2.77, 203.0.113.51"); rr.Code != http.StatusNoContent {
+		t.Fatalf("distinct source = %d, want 204", rr.Code)
+	}
+}
+
+// Anything that does not parse as an IP falls back to the peer address:
+// no free bucket, no error string as a key.
+func TestSourceKeyRejectsNonIPAndFallsBackToPeer(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://pixtok.test/api/x", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("X-Forwarded-For", "attacker.example, not-an-ip")
+	if got := sourceKey(req); got != "127.0.0.1" {
+		t.Fatalf("sourceKey = %q, want the loopback peer fallback", got)
+	}
+
+	// A hostname is not an address either.
+	req.Header.Set("X-Forwarded-For", "evil.example")
+	if got := sourceKey(req); got != "127.0.0.1" {
+		t.Fatalf("hostname accepted as a key: %q", got)
+	}
+}
+
+// A 1 MiB X-Forwarded-For must yield a short, valid key — not a 1 MiB
+// string retained in the bucket table.
+func TestSourceKeyCapsOversizedXFF(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://pixtok.test/api/x", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("X-Forwarded-For", strings.Repeat("9", 1<<20)+", 203.0.113.44")
+
+	got := sourceKey(req)
+	if len(got) > maxSourceKeyBytes {
+		t.Fatalf("key length = %d, want <= %d", len(got), maxSourceKeyBytes)
+	}
+	if net.ParseIP(got) == nil {
+		t.Fatalf("key %q is not an IP", got)
+	}
+}
+
+// The source table is bounded by BYTES as well as entries: a flood of
+// long keys must not pin memory on a 120 MB Pi.
+func TestSourceTableBoundedByBytes(t *testing.T) {
+	st := &sourceTable{entries: make(map[string]*sourceTiers)}
+	now := time.Now
+	prefix := strings.Repeat("k", maxSourceKeyBytes)
+	for i := 0; i < 5000; i++ {
+		st.forSource(prefix+strconv.Itoa(i), now)
+	}
+	if st.bytes > maxSourceTableBytes {
+		t.Fatalf("table holds %d bytes of keys, want <= %d", st.bytes, maxSourceTableBytes)
+	}
+	if len(st.entries) > maxSources {
+		t.Fatalf("table holds %d entries, want <= %d", len(st.entries), maxSources)
+	}
+	// The accounting must match the map (evictions subtract).
+	var sum int
+	for k := range st.entries {
+		sum += len(k)
+	}
+	if sum != st.bytes {
+		t.Fatalf("byte accounting drifted: tracked %d, actual %d", st.bytes, sum)
 	}
 }

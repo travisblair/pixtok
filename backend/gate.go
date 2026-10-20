@@ -45,6 +45,9 @@ type gate struct {
 	failures     int
 	lastFailTime time.Time
 	slots        chan struct{}
+	// tarpitCap caps one tarpit sleep (default tarpitMaxSleep; a field so
+	// a test can drive the highest tier without sleeping 25 seconds).
+	tarpitCap time.Duration
 	// hashSlots bounds CONCURRENT bcrypt compares: the sleep slot above
 	// is only taken after the compare, so it can never bound the compare
 	// itself. Without this budget a wrong-password flood runs unbounded
@@ -59,7 +62,11 @@ type gate struct {
 // fails loudly. Security-sensitive configuration must never silently
 // degrade.
 func newGate(passwordHash string, allowPlaintext bool) (*gate, error) {
-	g := &gate{slots: make(chan struct{}, 10), hashSlots: make(chan struct{}, 8)}
+	g := &gate{
+		slots:     make(chan struct{}, 10),
+		hashSlots: make(chan struct{}, 8),
+		tarpitCap: tarpitMaxSleep,
+	}
 	if passwordHash == "" {
 		return g, nil // no password configured — gate disabled
 	}
@@ -120,25 +127,30 @@ func (g *gate) failureDelay() time.Duration {
 	}
 }
 
-// tarpitMaxSleep caps a single tarpit sleep: the sleep runs BEFORE the
-// 401 is written, and the server kills a handler cycle that outlives
-// the connection's write deadline — an uncapped 30s/60s sleep could
-// only ever write its 401 to a dead connection (exactly what the
-// reorder that dropped the old 10s cap reintroduced). 25s keeps the
-// 401 under the WriteTimeout with margin for the write itself; the
-// longer tiers collapse onto the cap.
+// tarpitMaxSleep caps one tarpit sleep. The sleep runs BEFORE the 401 is
+// written, and http.Server.WriteTimeout is armed when the request headers
+// are read — so a sleep past that deadline would deliver EOF instead of
+// 401 (the pre-fix 15s tier equalled the 15s server write timeout, and the
+// 25s cap exceeded it: verified, the client saw a transport error). The
+// handler therefore pushes its own write deadline past the sleep (see the
+// SetWriteDeadline call in the gate handler); the cap still exists so a
+// single wrong-password request cannot pin a goroutine for a minute.
 const tarpitMaxSleep = 25 * time.Second
+
+// tarpitWriteMargin is added to the per-response write deadline the tarpit
+// installs before sleeping: the deadline must outlive the sleep plus the
+// write of the 401 itself.
+const tarpitWriteMargin = 5 * time.Second
 
 // tarpitSleep returns the effective sleep before a failed attempt's
 // 401: zero when the spacing guard skips the tarpit (the previous
 // failure was ≥2s ago — a slow human retry is not a burst) or when no
-// delay tier applies, otherwise the tier delay capped at
-// tarpitMaxSleep so the 401 stays under the WriteTimeout.
-func tarpitSleep(delay time.Duration, sinceLast time.Duration) time.Duration {
+// delay tier applies, otherwise the tier delay capped at cap.
+func tarpitSleep(delay, sinceLast, cap time.Duration) time.Duration {
 	if delay <= 0 || sinceLast >= 2*time.Second {
 		return 0
 	}
-	return min(delay, tarpitMaxSleep)
+	return min(delay, cap)
 }
 
 // gateFailureDecay: failures older than this stop counting against the
@@ -310,10 +322,16 @@ func registerGateRoutes(mux *http.ServeMux, g *gate) {
 		delay := g.failureDelay()
 		g.mu.Unlock()
 
-		// Slow successive failures additionally, capped so the 401 stays
-		// deliverable (see tarpitMaxSleep). Spaced-out retries skip the
-		// sleep entirely.
-		if sleep := tarpitSleep(delay, sinceLast); sleep > 0 {
+		// Slow successive failures additionally. The 401 comes AFTER the
+		// sleep, so the response's own write deadline must be pushed past
+		// it: the server armed WriteTimeout when the headers arrived, and
+		// any tier longer than that budget would otherwise kill the
+		// connection mid-sleep and answer EOF instead of 401.
+		if sleep := tarpitSleep(delay, sinceLast, g.tarpitCap); sleep > 0 {
+			rc := http.NewResponseController(w)
+			if err := rc.SetWriteDeadline(time.Now().Add(sleep + tarpitWriteMargin)); err != nil {
+				log.Printf("WARNING gate tarpit: no per-response write deadline (%v) — a long sleep may lose its 401", err)
+			}
 			time.Sleep(sleep)
 		}
 

@@ -2,6 +2,7 @@ package pixiv
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -836,6 +837,35 @@ func TestUpstreamSlotsReleasedOnTransportError(t *testing.T) {
 		if _, err := c.doGet("https://app-api.pixiv.net/v1/test"); err == nil {
 			t.Fatalf("call %d = nil error, want boom", i)
 		}
+	}
+}
+
+// A waiter blocked on the upstream slot must give up when its request
+// context is canceled (review L5): otherwise a disconnected browser's
+// goroutine sits behind a slow upstream until the 30s timeout.
+func TestUpstreamSlotWaitHonorsContext(t *testing.T) {
+	rt := &countingTransport{}
+	c := gatedTestClient(1, rt)
+	c.upstreamSlots <- struct{}{} // occupy the only slot
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, err := c.doGetCtx(ctx, "https://app-api.pixiv.net/v1/test")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("doGetCtx with canceled ctx = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("slot wait ignored cancellation (%v)", elapsed)
+	}
+	if got := rt.max.Load(); got != 0 {
+		t.Fatalf("canceled call reached the upstream %d time(s)", got)
+	}
+
+	// Release the held slot: a live call proceeds normally.
+	<-c.upstreamSlots
+	if _, err := c.doGet("https://app-api.pixiv.net/v1/test"); err != nil {
+		t.Fatalf("doGet after release = %v", err)
 	}
 }
 

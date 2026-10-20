@@ -1,6 +1,7 @@
 package pixiv
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -117,32 +118,33 @@ const clientTimeout = 30 * time.Second
 // Pi Zero's render-storm bursts starved queued handshakes).
 const tlsHandshakeTimeout = 20 * time.Second
 
-func NewClient() (*Client, error) {
-	rt := os.Getenv("PIXIV_REFRESH_TOKEN")
-	if rt == "" {
-		// Try reading from the .env next to the backend/binary.
-		data, err := os.ReadFile(envFilePath())
-		if err != nil {
-			return nil, fmt.Errorf("PIXIV_REFRESH_TOKEN not set and .env not found: %w", err)
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "PIXIV_REFRESH_TOKEN=") {
-				rt = strings.TrimPrefix(line, "PIXIV_REFRESH_TOKEN=")
-				break
-			}
-		}
+// newSharedHTTPClient builds the credential-bearing upstream client: the
+// one used for token refresh, PKCE exchange and every web-AJAX call. It
+// never follows redirects — Go strips Authorization/Cookie across hosts
+// but not custom headers (x-csrf-token) and re-sends the BODY on 307/308,
+// so a redirect from Pixiv would hand credentials to another host.
+// Redirect-following proxy paths use newValidatedClient instead, which
+// re-validates every hop.
+func newSharedHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   clientTimeout,
+		Transport: newPixivTransport(),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
+}
+
+func NewClient() (*Client, error) {
+	rt := ReadEnvKey("PIXIV_REFRESH_TOKEN")
 	if rt == "" {
-		return nil, fmt.Errorf("PIXIV_REFRESH_TOKEN not found")
+		return nil, fmt.Errorf("PIXIV_REFRESH_TOKEN not set in the environment or any .env candidate (%s)",
+			strings.Join(EnvCandidates(), ", "))
 	}
 
 	c := &Client{
-		refreshToken: rt,
-		http: &http.Client{
-			Timeout:   clientTimeout,
-			Transport: newPixivTransport(),
-		},
+		refreshToken:  rt,
+		http:          newSharedHTTPClient(),
 		upstreamSlots: make(chan struct{}, maxUpstreamConcurrency),
 		// Follow state changes rarely and the frontend asks constantly —
 		// 30 minutes keeps the per-card fetch bursts off pixiv's rate
@@ -154,29 +156,13 @@ func NewClient() (*Client, error) {
 		bookmarkIDs: newBookmarkIDsCache(bookmarkIDsTTL),
 	}
 
-	// Also try loading PHPSESSID and the csrf token for web AJAX — env
-	// first (mirrors the refresh token), .env file as fallback. These
-	// writes happen before the client is reachable by any request
-	// handler, so no lock is needed yet.
-	if v := os.Getenv("PIXIV_PHPSESSID"); v != "" {
+	// Also load PHPSESSID and the csrf token for web AJAX, through the
+	// same resolver as every other credential read.
+	if v := ReadEnvKey("PIXIV_PHPSESSID"); v != "" {
 		c.phpSessID = v
 	}
-	if v := os.Getenv("PIXTOK_CSRF_TOKEN"); v != "" {
+	if v := ReadEnvKey("PIXTOK_CSRF_TOKEN"); v != "" {
 		c.csrfTokenCache = v
-	}
-	if c.phpSessID == "" || c.csrfTokenCache == "" {
-		data, err := os.ReadFile(envFilePath())
-		if err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				if c.phpSessID == "" && strings.HasPrefix(line, "PIXIV_PHPSESSID=") {
-					c.phpSessID = strings.TrimPrefix(line, "PIXIV_PHPSESSID=")
-				}
-				if c.csrfTokenCache == "" && strings.HasPrefix(line, "PIXTOK_CSRF_TOKEN=") {
-					c.csrfTokenCache = strings.TrimPrefix(line, "PIXTOK_CSRF_TOKEN=")
-				}
-			}
-		}
 	}
 
 	if err := c.refresh(); err != nil {
@@ -249,15 +235,32 @@ func (c *Client) doWith(cl *http.Client, req *http.Request) (*http.Response, err
 	// CPU-bound part is the TLS handshake, and this bounds the number of
 	// them in flight. JSON bodies drain in microseconds after the gate
 	// releases; the authproxy's streamed login flow is a single request.
+	//
+	// Acquisition selects on the request context: without it a waiter
+	// blocked behind a slow upstream kept a goroutine alive after the
+	// browser had gone (and across shutdown). A canceled caller gets its
+	// context error instead of a slot.
 	if c.upstreamSlots != nil {
-		c.upstreamSlots <- struct{}{}
+		select {
+		case c.upstreamSlots <- struct{}{}:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 		defer func() { <-c.upstreamSlots }()
 	}
 	return cl.Do(req)
 }
 
 func (c *Client) doGet(u string) ([]byte, error) {
-	req, err := http.NewRequest("GET", u, nil)
+	return c.doGetCtx(context.Background(), u)
+}
+
+// doGetCtx is doGet with a caller-supplied context, so a request-driven
+// call (browser disconnect, shutdown) cancels the upstream fetch and any
+// wait for an upstream slot. Callers that have an *http.Request in hand
+// should pass r.Context().
+func (c *Client) doGetCtx(ctx context.Context, u string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -300,33 +303,104 @@ func ValidID(id string) bool {
 // other).
 var envFileMu sync.Mutex
 
-// envFilePath resolves the .env the backend reads/writes: the first
-// candidate that already exists wins, otherwise the first candidate is
-// used as the create target. Binary-dir-relative first so a backend
-// started from any CWD still finds the same file (reviewer finding:
-// the old hardcoded "../.env" silently failed from other directories).
-func envFilePath() string {
-	// PIXTOK_ENV_FILE pins ONE file — no candidate search (reviewer
-	// finding: the search resolves to "some .env", which surprises
-	// operators). When set, it is the only candidate, read AND write.
+// EnvCandidates returns the .env paths to try, in order: next to the
+// binary (works no matter the CWD), then the dev layout (../.env when
+// running from backend/), then CWD. PIXTOK_ENV_FILE pins exactly ONE
+// file — no candidate search.
+//
+// This is the SINGLE resolver: every .env read, every write and the boot
+// permission check use the same ordered list (review finding: four
+// different precedence rules meant the permission check could inspect a
+// file other than the one that supplied the credential).
+func EnvCandidates() []string {
 	if v := os.Getenv("PIXTOK_ENV_FILE"); v != "" {
-		return v
+		return []string{v}
 	}
-	candidates := []string{}
+	var out []string
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
+		out = append(out,
 			filepath.Join(exeDir, ".env"),
 			filepath.Join(exeDir, "..", ".env"),
 		)
 	}
-	candidates = append(candidates, "../.env", ".env")
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+	return append(out, "../.env", ".env")
+}
+
+// envValue returns the value of KEY from .env text.
+func envValue(data, name string) (string, bool) {
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, name+"=") {
+			return strings.TrimPrefix(line, name+"="), true
 		}
 	}
+	return "", false
+}
+
+// ReadEnvKey reads KEY from the process environment first, then from the
+// first candidate file that CONTAINS the key. A file that exists but
+// lacks the key does not shadow a later one — that mismatch (reads
+// skipped to the next file, writes stopped at the first existing one) is
+// how a rotation could land in a file nothing ever read.
+func ReadEnvKey(name string) string {
+	return readEnvKeyFrom(EnvCandidates(), name)
+}
+
+func readEnvKeyFrom(candidates []string, name string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if v, ok := envValue(string(data), name); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// EnvFileForWrite resolves the file UpdateEnvFile should rewrite: the
+// first candidate that already CONTAINS one of the keys being written
+// (so a rotation lands where the credential lives), else the first
+// candidate that exists (the deployment's .env), else the first candidate
+// as the create target for a deployment bootstrapped from process env.
+func EnvFileForWrite(keys []string) string {
+	return envFileForWrite(EnvCandidates(), keys)
+}
+
+func envFileForWrite(candidates []string, keys []string) string {
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, key := range keys {
+			if _, ok := envValue(string(data), key); ok {
+				return path
+			}
+		}
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	if len(candidates) == 0 {
+		return ".env"
+	}
 	return candidates[0]
+}
+
+func envKeys(kv map[string]string) []string {
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func UpdateEnvFile(kv map[string]string) error {
@@ -342,7 +416,7 @@ func UpdateEnvFile(kv map[string]string) error {
 		}
 	}
 
-	path := envFilePath()
+	path := EnvFileForWrite(envKeys(kv))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
