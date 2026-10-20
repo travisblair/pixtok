@@ -1440,8 +1440,31 @@ func withProxyTargets(t *testing.T, targets map[string]string) {
 	t.Cleanup(func() { authProxyTargets = old })
 }
 
-func withFlowCookie(req *http.Request) *http.Request {
-	req.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: "1"})
+// startLoginFlow drives the real pkce/start route and returns the LIVE
+// login-flow cookie value. The proxy legs require the cookie to name a
+// flow in the server-side store (H1), so tests must start one exactly
+// like a browser does.
+func startLoginFlow(t *testing.T, h http.Handler) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/pkce/start", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("pkce/start = %d, want 302", rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == loginFlowCookie && c.Value != "" {
+			return c.Value
+		}
+	}
+	t.Fatal("pkce/start did not set the login-flow cookie")
+	return ""
+}
+
+func withFlowCookie(t *testing.T, h http.Handler, req *http.Request) *http.Request {
+	t.Helper()
+	req.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: startLoginFlow(t, h)})
 	return req
 }
 
@@ -1481,7 +1504,7 @@ func TestAuthProxyStripsPixtokCookies(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
+	req := withFlowCookie(t, h, httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
 	req.AddCookie(&http.Cookie{Name: gateCookie, Value: "app-session-token"})
 	req.AddCookie(&http.Cookie{Name: "PHPSESSID", Value: "upstreamsession123"})
 	req.Header.Set("X-Api-Key", "secret")
@@ -1528,7 +1551,7 @@ func TestAuthProxyAppSessionCookieScoping(t *testing.T) {
 		{"/api/auth/px/accounts/login", false},
 		{"/api/auth/px/www/account-selected", false},
 	} {
-		req := withFlowCookie(httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader("x=1")))
+		req := withFlowCookie(t, h, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader("x=1")))
 		req.AddCookie(&http.Cookie{Name: "app_api_session_id", Value: "appsess123"})
 		req.Header.Set("X-Api-Key", "secret")
 		rr := httptest.NewRecorder()
@@ -1552,7 +1575,7 @@ func TestAuthProxyRewritesCookiesAndLocations(t *testing.T) {
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
 	// GET the login page: cookie must come back host-only.
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
+	req := withFlowCookie(t, h, httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
 	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1569,7 +1592,7 @@ func TestAuthProxyRewritesCookiesAndLocations(t *testing.T) {
 	}
 
 	// POST the login: the redirect must be rewritten onto our proxy path.
-	req2 := withFlowCookie(httptest.NewRequest(http.MethodPost, "/api/auth/px/accounts/login", strings.NewReader("pixiv_id=x&password=y")))
+	req2 := withFlowCookie(t, h, httptest.NewRequest(http.MethodPost, "/api/auth/px/accounts/login", strings.NewReader("pixiv_id=x&password=y")))
 	req2.Header.Set("X-Api-Key", "secret")
 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr2 := httptest.NewRecorder()
@@ -1604,7 +1627,7 @@ func TestAjaxLoginProxiedAndBodyRewritten(t *testing.T) {
 	// With the flow cookie → proxied to accounts. The OUTER returnTo is
 	// rewritten onto our proxy path; the percent-encoded INNER return_to
 	// must stay untouched (pixiv validates its host server-side).
-	req2 := withFlowCookie(httptest.NewRequest(http.MethodPost, "/ajax/login?lang=en", strings.NewReader("login_id=x&password=y")))
+	req2 := withFlowCookie(t, h, httptest.NewRequest(http.MethodPost, "/ajax/login?lang=en", strings.NewReader("login_id=x&password=y")))
 	req2.Header.Set("X-Api-Key", "secret")
 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr2 := httptest.NewRecorder()
@@ -1630,7 +1653,7 @@ func TestPostRedirectHTMLRewritten(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/post-redirect?return_to=x", nil))
+	req := withFlowCookie(t, h, httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/post-redirect?return_to=x", nil))
 	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1774,21 +1797,34 @@ func TestPkceCallbackCompletesServerSide(t *testing.T) {
 	}
 }
 
-func TestPkceCallbackRejectsUnknownFlow(t *testing.T) {
+func TestPkceCallbackVerifierIsSingleUse(t *testing.T) {
 	_, targets := fakePixivUpstream(t)
 	withProxyTargets(t, targets)
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	// Flow cookie value "1" was never issued by pkce/start → the store
-	// has no verifier for it.
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet,
-		"/api/auth/px/app/web/v1/users/auth/pixiv/callback?state=pixivs-own-state&code=x", nil))
-	req.Header.Set("X-Api-Key", "secret")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("unknown flow = %d, want 400", rr.Code)
+	// The verifier is single-use: replaying the SAME live flow cookie at
+	// the callback fails closed (400), it does not exchange a second
+	// code with a verifier that was already spent.
+	flowID := startLoginFlow(t, h)
+	first := httptest.NewRequest(http.MethodGet,
+		"/api/auth/px/app/web/v1/users/auth/pixiv/callback?state=s&code=c1", nil)
+	first.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: flowID})
+	first.Header.Set("X-Api-Key", "secret")
+	r1 := httptest.NewRecorder()
+	h.ServeHTTP(r1, first)
+	if r1.Code != http.StatusFound {
+		t.Fatalf("first callback = %d, want 302 (body: %s)", r1.Code, r1.Body.String())
+	}
+
+	second := httptest.NewRequest(http.MethodGet,
+		"/api/auth/px/app/web/v1/users/auth/pixiv/callback?state=s&code=c2", nil)
+	second.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: flowID})
+	second.Header.Set("X-Api-Key", "secret")
+	r2 := httptest.NewRecorder()
+	h.ServeHTTP(r2, second)
+	if r2.Code != http.StatusForbidden {
+		t.Fatalf("replayed callback = %d, want 403 (flow consumed → proxy refuses)", r2.Code)
 	}
 }
 

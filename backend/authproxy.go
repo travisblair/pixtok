@@ -214,12 +214,20 @@ func isURLBoundary(b byte) bool {
 
 // registerAuthProxy wires the proxied-login routes. /api/auth/px/* is
 // hit by browser NAVIGATIONS during the login flow — gated by the
-// login-flow cookie set at /api/auth/pkce/start (only someone who
-// started a flow through the key-gated start route gets proxy access;
-// and the flow cookie expires in 10 minutes).
+// login-flow cookie set at /api/auth/pkce/start: the cookie value must
+// be a LIVE entry in the server-side pkce store, so only someone who
+// started a flow through the start route gets proxy access (and entries
+// expire with pkceTTL).
 // authProxyClientTimeout: login-flow proxy responses are relayed to the
 // browser, never followed server-side, so 30s is ample for a navigation.
 const authProxyClientTimeout = 30 * time.Second
+
+// loginProxyMaxConcurrent bounds CONCURRENT login-proxy upstream calls.
+// The proxy legs are gate-exempt, and the auth proxy uses its own
+// http.Client (not pixiv.Client), so without this bound a caller could
+// drive unbounded simultaneous TLS handshakes at Pixiv — the exact
+// 502-storm condition pixiv.Client.upstreamSlots exists to prevent.
+const loginProxyMaxConcurrent = 4
 
 func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// CRITICAL: never follow redirects server-side. Each upstream
@@ -234,6 +242,9 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 			return http.ErrUseLastResponse
 		},
 	}
+	// Per-server (not package-level) so one test server's saturated
+	// slots can never stall another's.
+	slots := make(chan struct{}, loginProxyMaxConcurrent)
 
 	// serveProxy forwards one request to the given upstream kind, applies
 	// the cookie/Location rewrites, and rewrites absolute pixiv URLs inside
@@ -241,7 +252,11 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// 2FA URLs — the browser must follow them back through this proxy).
 	serveProxy := func(kind, rest string, w http.ResponseWriter, r *http.Request) {
 		c, err := r.Cookie(loginFlowCookie)
-		if err != nil || c.Value == "" {
+		if err != nil || c.Value == "" || !pkce.peek(c.Value) {
+			// A non-empty cookie is NOT proof of a flow: its value is
+			// entirely caller-controlled. Requiring a live store entry
+			// is what stops these gate-exempt legs from being an
+			// unauthenticated relay into Pixiv's login endpoints.
 			http.Error(w, "login flow not started", http.StatusForbidden)
 			return
 		}
@@ -271,7 +286,21 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 		// Cap proxied request bodies — a flow-cookie holder should not be
 		// able to stream unbounded data through us into Pixiv.
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		req, err := http.NewRequest(r.Method, authProxyTargets[kind]+rest, r.Body)
+		// Bounded upstream concurrency (see loginProxyMaxConcurrent).
+		// Acquisition honors the request context: a browser that gave up
+		// (or a shutdown) must not queue a goroutine behind a slow slot.
+		// The slot is held for the whole relay — the bound is the point,
+		// and a single-user login flow has no second leg to starve.
+		select {
+		case slots <- struct{}{}:
+		case <-r.Context().Done():
+			http.Error(w, "request canceled", http.StatusRequestTimeout)
+			return
+		}
+		defer func() { <-slots }()
+		// Request context (L5): a client disconnect cancels the upstream
+		// call instead of letting it run to the 30s timeout.
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, authProxyTargets[kind]+rest, r.Body)
 		if err != nil {
 			http.Error(w, "proxy build failed", http.StatusBadGateway)
 			return

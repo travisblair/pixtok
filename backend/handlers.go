@@ -150,6 +150,26 @@ func (s *pkceStore) take(state string) (string, bool) {
 	return e.verifier, true
 }
 
+// peek reports whether state names a live flow WITHOUT consuming it.
+// The proxy legs check this on every request: the login-flow cookie's
+// value is client-supplied, so "the cookie exists" only proves the
+// caller can write a header — it must also name a flow THIS server
+// started (and has not expired) before the gate-exempt login legs will
+// relay anything upstream.
+func (s *pkceStore) peek(state string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[state]
+	if !ok {
+		return false
+	}
+	if time.Now().After(e.expires) {
+		delete(s.entries, state) // expired: it can never be used again
+		return false
+	}
+	return true
+}
+
 func randomB64(bytes int) (string, error) {
 	buf := make([]byte, bytes)
 	if _, err := rand.Read(buf); err != nil {
