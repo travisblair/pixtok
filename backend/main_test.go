@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -3041,5 +3042,39 @@ func TestImgStreamCommittedErrorLogsWithoutErroring(t *testing.T) {
 	}
 	if strings.Contains(rr.Body.String(), "upstream error") {
 		t.Fatalf("body = %q, must not contain http.Error text", rr.Body.String())
+	}
+}
+
+// /api/next must answer 400 (not 502) for a URL the pagination allowlist
+// refuses: it is a client error, and logging it as an upstream failure
+// hid broken feed URLs (review L6).
+func TestNextRejectsDisallowedURLWith400(t *testing.T) {
+	out := captureLog(t)
+	f := &fakeAPI{proxyNextFn: func(u string) ([]byte, error) {
+		return nil, fmt.Errorf("%w: next_url path not allowed", pixiv.ErrInvalidParam)
+	}}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+
+	bad := "https://app-api.pixiv.net/v1/user/detail?user_id=1"
+	rr := doReq(t, h, http.MethodGet, "/api/next?url="+url.QueryEscape(bad), "secret")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("/api/next disallowed url = %d, want 400", rr.Code)
+	}
+	got := out()
+	if !strings.Contains(got, "WARN /api/next rejected") {
+		t.Fatalf("rejected URL not logged: %q", got)
+	}
+	if !strings.Contains(got, "app-api.pixiv.net/v1/user/detail") {
+		t.Fatalf("log line does not name the rejected URL: %q", got)
+	}
+
+	// A genuine upstream failure still maps to 502.
+	f2 := &fakeAPI{proxyNextFn: func(u string) ([]byte, error) {
+		return nil, fmt.Errorf("proxy returned 500")
+	}}
+	h2 := newServer(f2, newImageCache(time.Hour, 10, 512<<20), "secret")
+	rr2 := doReq(t, h2, http.MethodGet, "/api/next?url="+url.QueryEscape(bad), "secret")
+	if rr2.Code != http.StatusBadGateway {
+		t.Fatalf("/api/next upstream error = %d, want 502", rr2.Code)
 	}
 }

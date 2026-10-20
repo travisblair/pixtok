@@ -838,6 +838,14 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 
 		body, err := api.ProxyNext(nextURL)
 		if err != nil {
+			if errors.Is(err, pixiv.ErrInvalidParam) {
+				// Client-supplied URL refused by the allowlist — 400,
+				// and log the rejected value (sanitized + capped) so a
+				// broken feed URL is diagnosable from the journal.
+				log.Printf("WARN /api/next rejected url=%q", logField(nextURL))
+				http.Error(w, "url not allowed", http.StatusBadRequest)
+				return
+			}
 			log.Printf("ERROR proxy: %v", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return

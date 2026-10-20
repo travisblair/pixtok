@@ -37,6 +37,26 @@ func validAPIHost(raw string) bool {
 	return port == "" || port == "443"
 }
 
+// nextURLPaths are the app-API pagination endpoints this app actually
+// hands back as next_url. /api/next signs a GET with the owner's bearer
+// token, so it must be a pagination relay — not a generic app-API proxy
+// (which is what it was: any authenticated caller, or an XSS on the app
+// origin, could read endpoints the UI never exposes).
+var nextURLPaths = map[string]bool{
+	"/v1/illust/ranking":        true,
+	"/v1/illust/recommended":    true,
+	"/v2/illust/related":        true,
+	"/v1/user/illusts":          true,
+	"/v1/user/bookmarks/illust": true,
+}
+
+// nextURLPathAllowed matches EXACTLY: pagination URLs carry no subpath,
+// and a prefix match would accept "/v1/illust/ranking/../user/detail"
+// (the upstream normalizes dot segments).
+func nextURLPathAllowed(path string) bool {
+	return nextURLPaths[path]
+}
+
 // rankingModes is the full whitelist of app-API /v1/illust/ranking modes
 // (the same lists ranking.php serves). Anything else is rejected here and
 // never forwarded upstream.
@@ -239,9 +259,18 @@ func (c *Client) BookmarkDelete(illustID string) error {
 
 func (c *Client) ProxyNext(nextURL string) ([]byte, error) {
 	// next_url values come from the CLIENT — enforce the allowlist so
-	// /api/next can't be turned into an SSRF token-exfil machine.
+	// /api/next can't be turned into an SSRF token-exfil machine, and
+	// restrict it to the pagination endpoints the UI receives so it is
+	// not a generic bearer-signed app-API proxy.
 	if !validAPIHost(nextURL) {
-		return nil, fmt.Errorf("next_url host not allowed")
+		return nil, fmt.Errorf("%w: next_url host not allowed", ErrInvalidParam)
+	}
+	u, err := url.Parse(nextURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: unparseable next_url", ErrInvalidParam)
+	}
+	if !nextURLPathAllowed(u.Path) {
+		return nil, fmt.Errorf("%w: next_url path %q is not a pagination endpoint", ErrInvalidParam, u.Path)
 	}
 
 	req, err := http.NewRequest("GET", nextURL, nil)
