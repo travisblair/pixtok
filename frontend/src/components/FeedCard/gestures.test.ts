@@ -64,6 +64,18 @@ describe("createTapTracker", () => {
     expect(onSingleTap).not.toHaveBeenCalled();
   });
 
+  it("two taps ~20px apart (normal finger drift) still fire onDoubleTap", () => {
+    const { tracker, onSingleTap, onDoubleTap } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(150);
+    tracker.onTouchStart(gesture([at(120, 108)]));
+    tracker.onTouchEnd(gesture([], [at(120, 108)]));
+    expect(onDoubleTap).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(TAP_WINDOW_MS * 3);
+    expect(onSingleTap).not.toHaveBeenCalled();
+  });
+
   it("a second tap outside the slop is two singles, not a double", () => {
     const { tracker, onSingleTap, onDoubleTap } = makeTracker();
     tracker.onTouchStart(gesture([at(100, 100)]));
@@ -197,6 +209,21 @@ describe("createPinchDetector", () => {
     const move = gesture([at(0), at(400)]);
     detector.onTouchMove(move);
     expect(move.preventDefault).toHaveBeenCalled();
+  });
+
+  it("preventDefaults the 2-finger touchstart but never a 1-finger one", () => {
+    // iOS Safari commits to native pinch-zoom on the second finger's
+    // touchstart; preventDefault there is the only block. The 1-finger
+    // touchstart must stay unprevented so feed scroll + slider swipes
+    // remain native.
+    const { detector } = makePinch();
+    const twoFinger = gesture([at(150), at(250)]);
+    detector.onTouchStart(twoFinger);
+    expect(twoFinger.preventDefault).toHaveBeenCalled();
+
+    const oneFinger = gesture([at(150)]);
+    detector.onTouchStart(oneFinger);
+    expect(oneFinger.preventDefault).not.toHaveBeenCalled();
   });
 
   it("touchend resets so the next gesture can fire again", () => {

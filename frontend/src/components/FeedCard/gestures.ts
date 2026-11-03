@@ -39,6 +39,15 @@ export interface GestureEventLike {
 
 export const TAP_WINDOW_MS = 300;
 export const TAP_SLOP_PX = 10;
+/**
+ * Distance between the TWO taps of a double-tap. Deliberately looser
+ * than TAP_SLOP_PX: a finger never lands on the same pixel twice — real
+ * double-taps land ~10-30px apart. If the between-taps check reuses the
+ * 10px in-tap slop, most real double-taps are rejected, and the rejected
+ * second tap first DELIVERS the deferred single (stack opens) and then
+ * arms its own single (same work pushed again → "already open" refusal).
+ */
+export const DOUBLE_TAP_SLOP_PX = 30;
 /** How long after a touch tap synthetic clicks are swallowed. */
 export const CLICK_SUPPRESS_MS = 600;
 export const PINCH_THRESHOLD_PX = 70;
@@ -53,12 +62,17 @@ export interface TapTrackerOptions {
   /** True when the touch started on an interactive child — never a tap. */
   isIgnored?: (target: EventTarget | null) => boolean;
   windowMs?: number;
+  /** Max finger movement WITHIN one tap (moved → not a tap). */
   slopPx?: number;
+  /** Max distance BETWEEN the two taps of a double-tap (see the
+   *  DOUBLE_TAP_SLOP_PX comment). */
+  doubleTapSlopPx?: number;
 }
 
 export function createTapTracker(opts: TapTrackerOptions) {
   const windowMs = opts.windowMs ?? TAP_WINDOW_MS;
   const slopPx = opts.slopPx ?? TAP_SLOP_PX;
+  const doubleTapSlop = opts.doubleTapSlopPx ?? DOUBLE_TAP_SLOP_PX;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pending = false;
@@ -148,7 +162,7 @@ export function createTapTracker(opts: TapTrackerOptions) {
     if (
       lastTapAt !== 0 &&
       now - lastTapAt <= windowMs &&
-      Math.hypot(x - lastX, y - lastY) <= slopPx
+      Math.hypot(x - lastX, y - lastY) <= doubleTapSlop
     ) {
       cancelPending();
       opts.onDoubleTap(x, y);
@@ -248,6 +262,13 @@ export function createPinchDetector(opts: PinchDetectorOptions) {
       reset();
       return;
     }
+    // iOS-specific: Safari commits to native pinch-zoom the moment the
+    // second finger lands — it fires touchcancel and the page never sees
+    // the gesture. preventDefault on the 2-finger touchstart stops the
+    // recognition, so the listener MUST be passive:false (FeedCard wires
+    // it that way). One-finger touchstarts are never prevented (feed
+    // scroll + slider swipes stay native).
+    e.preventDefault?.();
     active = true;
     firedOn = false;
     firedOff = false;

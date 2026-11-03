@@ -10,28 +10,33 @@ import { gotoApp, expectMainFeedCount } from "./fixtures/ui-helpers.js";
  * by the existing specs, which must keep passing untouched.
  */
 
-async function tap(page, selector, times = 1) {
+async function tap(page, selector, times = 1, { offsetPx = 0 } = {}) {
   await page.evaluate(
-    ({ selector, times }) => {
+    ({ selector, times, offsetPx }) => {
       const el = document.querySelector(selector);
       if (!el) throw new Error(`no element for ${selector}`);
       const rect = el.getBoundingClientRect();
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;
-      const makeTouch = () =>
-        new Touch({
+      const makeTouch = (tapIndex) => {
+        // A real double-tap never lands on the same pixel twice; simulate
+        // finger drift on the second tap so the between-taps slop path
+        // is exercised.
+        const x0 = x + (tapIndex > 0 ? offsetPx : 0);
+        return new Touch({
           identifier: 1,
           target: el,
-          clientX: x,
+          clientX: x0,
           clientY: y,
-          screenX: x,
+          screenX: x0,
           screenY: y,
-          pageX: x,
+          pageX: x0,
           pageY: y,
           radiusX: 2,
           radiusY: 2,
           force: 1,
         });
+      };
       const fire = (type, active, changed) =>
         el.dispatchEvent(
           new TouchEvent(type, {
@@ -43,12 +48,12 @@ async function tap(page, selector, times = 1) {
           })
         );
       for (let i = 0; i < times; i++) {
-        const t = makeTouch();
+        const t = makeTouch(i);
         fire("touchstart", [t], [t]);
         fire("touchend", [], [t]);
       }
     },
-    { selector, times }
+    { selector, times, offsetPx }
   );
 }
 
@@ -82,6 +87,29 @@ test.describe("Double-tap to like", () => {
     expect(mocks.unlikeCalls).toHaveLength(1);
     expect(mocks.likeCalls).toHaveLength(1);
     await expect(page.locator(".related-view")).toHaveCount(0);
+  });
+
+  test("strip card: double-tap with ~20px finger drift still likes, no stack, no already-open toast", async ({
+    page,
+  }) => {
+    // Regression: real double-taps land 10-30px apart. The old 10px
+    // between-taps slop rejected them — the first single opened the
+    // stack and the second pushed the same work ("already open").
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    const card = page.locator(".feed-card").first();
+    const heart = card.locator(".like-btn");
+    await expect(heart).toHaveText("🤍");
+
+    await tap(page, ".feed-card .card-image", 2, { offsetPx: 20 });
+
+    await expect(heart).toHaveText("❤️");
+    expect(mocks.likeCalls).toHaveLength(1);
+    expect(mocks.unlikeCalls).toHaveLength(0);
+    await expect(page.locator(".related-view")).toHaveCount(0);
+    await expect(page.locator(".toast")).toHaveCount(0);
   });
 
   test("one touch tap still opens the stack — deferred, not immediate", async ({

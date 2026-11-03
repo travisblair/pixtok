@@ -183,7 +183,12 @@ export default function FeedCard(props: {
       pinch.onTouchCancel();
     };
     container?.addEventListener("scroll", onContainerScroll, { passive: true });
-    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    // touchstart is passive:FALSE: the pinch detector preventDefaults the
+    // 2-finger touchstart (the only way to stop iOS Safari's native
+    // pinch-zoom, which otherwise fires touchcancel and swallows the
+    // gesture). One-finger starts are never prevented, so feed scroll
+    // and slider swipes stay native.
+    el.addEventListener("touchstart", onTouchStart, { passive: false });
     el.addEventListener("touchmove", onTouchMove, { passive: false });
     el.addEventListener("touchend", onTouchEnd, { passive: true });
     el.addEventListener("touchcancel", onTouchCancel, { passive: true });
