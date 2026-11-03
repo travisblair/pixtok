@@ -12,12 +12,14 @@ import { reportApiError } from "../api/client";
  * queue calls them directly, never through a card's toggleLike, so the
  * bookmarks tab's unlike-removes-the-card handler can't fire.
  *
- * The queue is strictly serial and paced: default 1600ms between
- * upstream calls (unlike → wait → like → wait → next work). Any
- * non-200 stops the whole queue; no retries (house rule — retrying
- * rate-limited endpoints draws attention). A work whose delete
- * succeeded but re-add failed is the LOSS WINDOW: it is reported as
- * kind "add" so the UI can say "bookmark removed, re-add manually".
+ * The queue is strictly serial and paced: each work's two calls fire
+ * back-to-back (unlike → like — a move is one logical operation, and a
+ * pair of calls on the same work reads as a single move upstream), then
+ * the throttle gap lands BETWEEN works (default 1600ms). Any non-200
+ * stops the whole queue; no retries (house rule — retrying rate-limited
+ * endpoints draws attention). A work whose delete succeeded but re-add
+ * failed is the LOSS WINDOW: it is reported as kind "add" so the UI can
+ * say "bookmark removed, re-add manually".
  */
 
 export const DEFAULT_MOVE_PACE_MS = 1600;
@@ -38,8 +40,9 @@ export interface MoveResult {
 }
 
 export interface BookmarkMoverOptions {
-  /** Milliseconds between upstream calls. Tests pass ~50; production
-   *  uses DEFAULT_MOVE_PACE_MS. */
+  /** Milliseconds BETWEEN works (the unlike→like pair fires
+   *  back-to-back). Tests pass ~50; production uses
+   *  DEFAULT_MOVE_PACE_MS. */
   paceMs?: number;
   /** Always fired when a run finishes (success, failure or cancel). */
   onDone?: (result: MoveResult) => void;
@@ -144,10 +147,9 @@ export function useBookmarkMover(options: BookmarkMoverOptions = {}) {
         break;
       }
 
-      // Pace between the two upstream calls of the SAME work too — the
-      // probe's shape is unlike → wait → like.
-      await wait(paceMs);
-
+      // No wait here: the delete+add pair is one move. The throttle gap
+      // lives BETWEEN works (below) — strictly one upstream request in
+      // flight at all times either way.
       try {
         await likeWork(id);
       } catch (err) {

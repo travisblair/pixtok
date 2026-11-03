@@ -45,7 +45,7 @@ describe("useBookmarkMover", () => {
     vi.useRealTimers();
   });
 
-  it("runs unlike → paced like per work, strictly serial, in id order", async () => {
+  it("runs unlike → like back-to-back per work, paced between works, strictly serial", async () => {
     const events: string[] = [];
     let inFlight = 0;
     let maxInFlight = 0;
@@ -64,17 +64,13 @@ describe("useBookmarkMover", () => {
     const { api } = setup({ onDone: done });
     const running = api.run([11, 22]);
 
-    // First upstream call happens synchronously; the like waits for pace.
+    // First upstream call happens synchronously; the like follows as
+    // soon as the unlike resolves (no wait inside the pair).
     expect(events).toEqual(["unlike:11"]);
     await flush();
-    expect(events).toEqual(["unlike:11"]);
-
-    await vi.advanceTimersByTimeAsync(PACE);
     expect(events).toEqual(["unlike:11", "like:11"]);
 
-    await vi.advanceTimersByTimeAsync(PACE);
-    expect(events).toEqual(["unlike:11", "like:11", "unlike:22"]);
-
+    // The throttle gap lands between works, not inside the pair.
     await vi.advanceTimersByTimeAsync(PACE);
     await flush();
     expect(events).toEqual(["unlike:11", "like:11", "unlike:22", "like:22"]);
@@ -121,8 +117,7 @@ describe("useBookmarkMover", () => {
     const { api } = setup({ onDone: done });
 
     const running = api.run([1, 2]);
-    await flush(); // unlike 1 resolves, paces
-    await vi.advanceTimersByTimeAsync(PACE); // like 1 fires and rejects
+    await flush(); // unlike 1 resolves, like 1 fires and rejects
     await running;
 
     expect(unlikeMock).toHaveBeenCalledTimes(1); // work 2 never started
@@ -141,9 +136,8 @@ describe("useBookmarkMover", () => {
     const { api } = setup({ onDone: done });
 
     const running = api.run([1, 2, 3]);
-    await flush(); // unlike 1
-    await vi.advanceTimersByTimeAsync(PACE); // like 1
-    await flush(); // liked, now pacing before work 2
+    await flush(); // unlike 1 resolves
+    await flush(); // like 1 fires and resolves; the between-works wait starts
 
     api.cancel();
     await vi.advanceTimersByTimeAsync(PACE);
@@ -167,14 +161,13 @@ describe("useBookmarkMover", () => {
     const running = api.run([1, 2]);
 
     expect(api.progress()).toEqual({ done: 0, total: 2 });
-    await flush();
-    await vi.advanceTimersByTimeAsync(PACE);
-    await flush();
+    await flush(); // unlike 1
+    await flush(); // like 1
     expect(api.progress()).toEqual({ done: 1, total: 2 });
 
-    await vi.advanceTimersByTimeAsync(PACE);
+    await vi.advanceTimersByTimeAsync(PACE); // between works
     await flush();
-    await vi.advanceTimersByTimeAsync(PACE);
+    await flush();
     await running;
     expect(api.progress()).toEqual({ done: 2, total: 2 });
   });

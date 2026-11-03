@@ -9,9 +9,9 @@ import {
 /**
  * Bookmarks tab → PUBLIC pile → move works to private. The queue calls
  * the existing /api/illust/:id/{unlike,like} routes serially: delete
- * (v1) then re-add (v2 restrict=private), paced at the production
- * 1600ms. The spec asserts the mocked WIRE ORDER and counts — no test
- * seam for pacing (2 works ≈ 5s, acceptable).
+ * (v1) then re-add (v2 restrict=private), back-to-back per work, paced
+ * 1600ms BETWEEN works. The spec asserts the mocked WIRE ORDER and
+ * counts — no test seam for pacing (2 works ≈ 5s, acceptable).
  */
 
 async function openPublicBookmarks(page) {
