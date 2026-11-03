@@ -2868,6 +2868,7 @@ func TestPrefsRoutesEnforceMethodBodyCapAndTrim(t *testing.T) {
 		"/api/prefs/feed-view-mode",
 		"/api/prefs/artist-view-mode",
 		"/api/prefs/image-size",
+		"/api/prefs/max-stack-depth",
 	}
 	for _, path := range paths {
 		// 405 on unhandled methods.
@@ -2910,6 +2911,126 @@ func TestPrefsRoutesEnforceMethodBodyCapAndTrim(t *testing.T) {
 	}
 	if v, err := store.GetFeedViewMode(); err != nil || v != "grid" {
 		t.Fatalf("stored value = %q, %v; want grid (trimmed)", v, err)
+	}
+}
+
+// Max stack depth — ONE pref governs both the related-stack cap and the
+// stacked-search-page cap. PUT normalizes 0 → default (10); out-of-range
+// and non-numeric values are client errors (400), never silent defaults.
+func TestPrefsMaxStackDepthValidationAndRoundtrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "prefs.db")
+	store, err := openPrefs(dbPath)
+	if err != nil {
+		t.Fatalf("open prefs: %v", err)
+	}
+	mux := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerPrefs(mux, store)
+	h := apiKeyGate("secret", mux)
+
+	get := func(handler http.Handler) (int, int) {
+		req := httptest.NewRequest(http.MethodGet, "/api/prefs/max-stack-depth", nil)
+		req.Header.Set("X-Api-Key", "secret")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		var out struct {
+			Value int `json:"value"`
+		}
+		if rr.Code == http.StatusOK {
+			if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+				t.Fatalf("parse GET: %v", err)
+			}
+		}
+		return rr.Code, out.Value
+	}
+
+	// Never-set reads as the default.
+	if code, v := get(h); code != http.StatusOK || v != DefaultMaxStackDepth {
+		t.Fatalf("default GET = %d/%d, want 200/%d", code, v, DefaultMaxStackDepth)
+	}
+
+	cases := []struct {
+		name   string
+		body   string
+		status int
+		want   int
+	}{
+		{"zero normalizes to default", `{"value":0}`, http.StatusOK, DefaultMaxStackDepth},
+		{"minimum", `{"value":1}`, http.StatusOK, 1},
+		{"maximum", `{"value":30}`, http.StatusOK, 30},
+		{"above maximum", `{"value":31}`, http.StatusBadRequest, 0},
+		{"negative", `{"value":-1}`, http.StatusBadRequest, 0},
+		{"non-numeric", `{"value":"abc"}`, http.StatusBadRequest, 0},
+		{"fractional", `{"value":1.5}`, http.StatusBadRequest, 0},
+		{"missing value", `{}`, http.StatusBadRequest, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut, "/api/prefs/max-stack-depth", strings.NewReader(tc.body))
+			req.Header.Set("X-Api-Key", "secret")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != tc.status {
+				t.Fatalf("PUT %s = %d (body: %s), want %d", tc.body, rr.Code, rr.Body.String(), tc.status)
+			}
+			if tc.status != http.StatusOK {
+				return
+			}
+			var out struct {
+				Value int `json:"value"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+				t.Fatalf("parse PUT: %v", err)
+			}
+			if out.Value != tc.want {
+				t.Fatalf("PUT %s echoed %d, want %d", tc.body, out.Value, tc.want)
+			}
+			if code, v := get(h); code != http.StatusOK || v != tc.want {
+				t.Fatalf("GET after PUT %s = %d/%d, want 200/%d", tc.body, code, v, tc.want)
+			}
+		})
+	}
+
+	// Persistence: the depth must survive a store reopen (the whole point
+	// of the prefs DB — a jetsam reload must not reset the user's cap).
+	put := httptest.NewRequest(http.MethodPut, "/api/prefs/max-stack-depth", strings.NewReader(`{"value":17}`))
+	put.Header.Set("X-Api-Key", "secret")
+	prr := httptest.NewRecorder()
+	h.ServeHTTP(prr, put)
+	if prr.Code != http.StatusOK {
+		t.Fatalf("PUT 17 = %d", prr.Code)
+	}
+	store2, err := openPrefs(dbPath)
+	if err != nil {
+		t.Fatalf("reopen prefs: %v", err)
+	}
+	mux2 := newServerBase(&fakeAPI{}, newImageCache(time.Hour, 10, 512<<20))
+	registerPrefs(mux2, store2)
+	if code, v := get(apiKeyGate("secret", mux2)); code != http.StatusOK || v != 17 {
+		t.Fatalf("persisted GET = %d/%d, want 200/17", code, v)
+	}
+}
+
+// A corrupt DB row (hand-edited, or a pre-numeric legacy value) degrades
+// to the default instead of breaking every layer push.
+func TestPrefsMaxStackDepthCorruptValueDegrades(t *testing.T) {
+	store, err := openPrefs(":memory:")
+	if err != nil {
+		t.Fatalf("open prefs: %v", err)
+	}
+	if err := store.set(maxStackDepthKey, "not-a-number"); err != nil {
+		t.Fatalf("seed corrupt value: %v", err)
+	}
+	if v, err := store.GetMaxStackDepth(); err != nil || v != DefaultMaxStackDepth {
+		t.Fatalf("corrupt GetMaxStackDepth = %d, %v; want default", v, err)
+	}
+	if err := store.SetMaxStackDepth(0); err != nil {
+		t.Fatalf("SetMaxStackDepth(0): %v", err)
+	}
+	if v, err := store.GetMaxStackDepth(); err != nil || v != DefaultMaxStackDepth {
+		t.Fatalf("after Set 0 = %d, %v; want default", v, err)
+	}
+	if err := store.SetMaxStackDepth(MaxStackDepthLimit + 1); err == nil {
+		t.Fatalf("SetMaxStackDepth(%d) = nil, want rejection", MaxStackDepthLimit+1)
 	}
 }
 

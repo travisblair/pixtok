@@ -153,13 +153,20 @@ function sanitizeSearchState(v: unknown): SearchState | null {
 const KEY = "pixtok_state_v2";
 
 export const MAX_SNAPSHOT_ITEMS = 100;
-// Max related-stack depth — the UI refusal and the snapshot truncation
-// must share ONE source of truth or they silently desync.
+// DEFAULT related-stack depth. The LIVE cap is the user pref in store.ts
+// (default 10, hard max 30) — useLayers refuses pushes at the live value.
+// The snapshot must never clip at this default: a user who raised the cap
+// to 30 would silently lose 20 layers on the next save (see MAX_*_HARD).
 export const MAX_STACK_DEPTH = 10;
-// Max stacked search pages (tag taps instance new layers). Same
+// Default max stacked search pages (tag taps instance new layers). Same
 // one-source-of-truth rule as the related stack. Artist pages do NOT
 // count against any cap (single replaceable layer).
 export const MAX_SEARCH_DEPTH = 10;
+// Hard upper bounds the pref is clamped to (store.ts mirrors these).
+// Snapshot truncation uses these, never the defaults: a pref that has
+// not loaded yet at hydrate time must not drop valid deep layers.
+export const MAX_STACK_DEPTH_HARD = 30;
+export const MAX_SEARCH_DEPTH_HARD = 30;
 
 export interface AppSnapshot {
   v: 1;
@@ -210,19 +217,19 @@ export function saveSnapshot(snap: SnapshotInput): void {
       // tag across a private pile save.
       bookmarkTag:
         snap.bookmarkVis === "private" ? "" : (snap.bookmarkTag ?? "").slice(0, 64),
-      stack: snap.stack.slice(0, MAX_STACK_DEPTH),
+      stack: snap.stack.slice(0, MAX_STACK_DEPTH_HARD),
       artist: snap.artist,
       recs: snap.recs.slice(0, MAX_SNAPSHOT_ITEMS),
       recsSource: snap.recsSource,
       modalOpen: snap.modalOpen,
       searchStack: snap.searchStack
-        .slice(0, MAX_SEARCH_DEPTH)
+        .slice(0, MAX_SEARCH_DEPTH_HARD)
         .map((s) => ({
           ...s,
           works: s.works.slice(-MAX_SNAPSHOT_ITEMS),
           users: s.users.slice(0, 30),
         })),
-      searchTags: snap.searchTags.slice(0, MAX_SEARCH_DEPTH),
+      searchTags: snap.searchTags.slice(0, MAX_SEARCH_DEPTH_HARD),
       layerOrder: Array.isArray(snap.layerOrder) ? [...snap.layerOrder] : [],
     };
     localStorage.setItem(KEY, JSON.stringify(out));
@@ -231,7 +238,24 @@ export function saveSnapshot(snap: SnapshotInput): void {
   }
 }
 
-export function loadSnapshot(): AppSnapshot | null {
+export function loadSnapshot(caps?: {
+  maxStackDepth?: number;
+  maxSearchDepth?: number;
+}): AppSnapshot | null {
+  // Live pref caps when the caller already has them (the boot GET can
+  // land before the rehydrate in a future boot order); otherwise the
+  // hard bound. Never the default: clipping a snapshot saved under a
+  // higher cap would silently discard layers the user could page back
+  // through. Restoring ABOVE a later-lowered cap is safe — pushes use
+  // the live cap, and the badge just shows e.g. 12/5.
+  const maxStack = Math.min(
+    MAX_STACK_DEPTH_HARD,
+    Math.max(1, caps?.maxStackDepth ?? MAX_STACK_DEPTH_HARD)
+  );
+  const maxSearch = Math.min(
+    MAX_SEARCH_DEPTH_HARD,
+    Math.max(1, caps?.maxSearchDepth ?? MAX_SEARCH_DEPTH_HARD)
+  );
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
@@ -256,6 +280,7 @@ export function loadSnapshot(): AppSnapshot | null {
       ? parsed.searchStack
           .map(sanitizeSearchState)
           .filter((s): s is SearchState => s !== null)
+          .slice(0, maxSearch)
       : // Legacy single-search snapshots migrate into stack[0].
         (() => {
           const legacy = sanitizeSearchState(parsed.search);
@@ -264,7 +289,7 @@ export function loadSnapshot(): AppSnapshot | null {
 
     const rawTags: (string | null)[] = Array.isArray(parsed.searchTags)
       ? parsed.searchTags
-          .slice(0, MAX_SEARCH_DEPTH)
+          .slice(0, maxSearch)
           .map((t) => (typeof t === "string" ? t : null))
       : parsed.search && typeof parsed.search.word === "string"
         ? [parsed.search.word]
@@ -289,7 +314,9 @@ export function loadSnapshot(): AppSnapshot | null {
           : typeof parsed.bookmarkTag === "string"
             ? parsed.bookmarkTag.slice(0, 64)
             : "",
-      stack: (parsed.stack as unknown[]).filter(isRenderableIllustEntry),
+      stack: (parsed.stack as unknown[])
+        .filter(isRenderableIllustEntry)
+        .slice(0, maxStack),
       artist:
         parsed.artist &&
         typeof parsed.artist.id === "number" &&

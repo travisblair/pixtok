@@ -3,7 +3,7 @@ import { logEvent, reportApiError, setOnGateLocked, setOnRequestError } from "./
 import { getStreet, getNewest, getNewestNext, getNextPage, getTop, getTopIllust, getRecommended } from "./api/feeds";
 import { getBookmarkIds, getBookmarkTags, getBookmarks, getBookmarksNext, getBookmarksPrivate } from "./api/bookmarks";
 import { getWorkRecs } from "./api/illust";
-import { getBlockedTags, getImageSize, getFeedViewMode, getArtistViewMode } from "./api/prefs";
+import { getBlockedTags, getImageSize, getFeedViewMode, getArtistViewMode, getMaxStackDepth } from "./api/prefs";
 import { gateStatus } from "./api/auth";
 import { uploadCrashBuffer } from "./crash-trap";
 import type { ContentMode, FeedType, PixivIllust, RankingMode } from "./types";
@@ -17,6 +17,9 @@ import {
   feedViewMode,
   setFeedViewModeFromServer,
   setArtistViewModeFromServer,
+  setMaxStackDepthFromServer,
+  maxStackDepth,
+  isMaxStackDepthLoaded,
 } from "./store";
 import RecsModal from "./components/RecsModal";
 import RelatedView from "./components/RelatedView";
@@ -33,7 +36,7 @@ import ErrorToast from "./components/ErrorToast";
 import {
   loadSnapshot,
   saveSnapshot,
-  MAX_STACK_DEPTH,
+  MAX_STACK_DEPTH_HARD,
 } from "./state-persistence";
 import type { SnapshotInput } from "./state-persistence";
 import { useFeedSentinel } from "./hooks/useFeedSentinel";
@@ -375,13 +378,29 @@ export default function App() {
     void getArtistViewMode()
       .then((d) => setArtistViewModeFromServer(d.value))
       .catch(reportApiError);
+    // Stack depth governs both the related stack and stacked search
+    // pages; it also bounds the snapshot rehydrate below.
+    void getMaxStackDepth()
+      .then((d) => setMaxStackDepthFromServer(d.value))
+      .catch(reportApiError);
     // Bookmark tags feed the bookmarks-tab pills (public list only —
     // the page's default view).
     void getBookmarkTags()
       .then((d) => setBookmarkTags(d.public))
       .catch(reportApiError);
 
-    const snap = loadSnapshot();
+    const snap = loadSnapshot(
+      // The pref GET above is still in flight on this boot path, so the
+      // default branch is the normal one: truncate at the HARD bound,
+      // never the default 10 (a deep stack saved under a raised cap must
+      // survive a reload). A landed pref narrows it to the live cap.
+      isMaxStackDepthLoaded()
+        ? { maxStackDepth: maxStackDepth(), maxSearchDepth: maxStackDepth() }
+        : {
+            maxStackDepth: MAX_STACK_DEPTH_HARD,
+            maxSearchDepth: MAX_STACK_DEPTH_HARD,
+          }
+    );
     if (snap) {
       reqSeq++; // anything an effect triggers during rehydrate gets discarded
       // Navigation + layer state restore only. The FEED is never
@@ -741,7 +760,7 @@ export default function App() {
             anchor={entry.illust}
             zIndex={entry.z}
             depth={i() + 1}
-            maxDepth={MAX_STACK_DEPTH}
+            maxDepth={maxStackDepth()}
             closing={closingDepth() === i() + 1}
             obscured={entry.z !== topZ() || closingDepth() === i() + 1}
             onClose={popRelated}

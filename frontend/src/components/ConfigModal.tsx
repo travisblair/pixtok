@@ -9,16 +9,39 @@ import {
   setFeedViewMode,
   artistViewMode,
   setArtistViewMode,
+  maxStackDepth,
+  setMaxStackDepth,
+  normalizeMaxStackDepth,
 } from "../store";
 import BaseModal from "./BaseModal";
 
 export default function ConfigModal(props: { onClose: () => void }) {
   const [input, setInput] = createSignal("");
+  // Depth box draft: a field controlled straight from the store would
+  // snap back to 10 the moment it's cleared (0/empty normalize to the
+  // default), making "clear and retype" impossible. Every valid keystroke
+  // still applies immediately — same rule as the view-mode pills — and
+  // blur normalizes whatever is left in the box.
+  const [depthInput, setDepthInput] = createSignal(String(maxStackDepth()));
 
   function add(e: Event) {
     e.preventDefault();
     addBlockedTag(input());
     setInput("");
+  }
+
+  function onDepthInput(raw: string) {
+    setDepthInput(raw);
+    const trimmed = raw.trim();
+    if (trimmed !== "" && Number.isFinite(Number(trimmed))) {
+      setMaxStackDepth(trimmed);
+    }
+  }
+
+  function onDepthBlur() {
+    const v = normalizeMaxStackDepth(depthInput());
+    setMaxStackDepth(v);
+    setDepthInput(String(v));
   }
 
   return (
@@ -80,6 +103,29 @@ export default function ConfigModal(props: { onClose: () => void }) {
           >
             Grid
           </button>
+        </div>
+
+        <h3>Stack depth</h3>
+        <p class="hint">
+          How many related views and tag-search pages can stack up. The
+          same limit applies to both; 0 = default (10).
+        </p>
+        <div class="config-view-row" data-testid="max-depth-row">
+          <label class="config-view-label" for="max-depth-input">
+            Max depth
+          </label>
+          <input
+            id="max-depth-input"
+            data-testid="max-depth-input"
+            class="config-depth-input"
+            type="number"
+            inputmode="numeric"
+            min={1}
+            max={30}
+            value={depthInput()}
+            onInput={(e) => onDepthInput(e.currentTarget.value)}
+            onBlur={onDepthBlur}
+          />
         </div>
 
         <h3>Image quality</h3>
