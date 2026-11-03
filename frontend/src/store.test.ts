@@ -20,6 +20,12 @@ import {
   setArtistViewMode,
   setArtistViewModeFromServer,
   clearArtistViewMode,
+  maxStackDepth,
+  setMaxStackDepth,
+  setMaxStackDepthFromServer,
+  normalizeMaxStackDepth,
+  isMaxStackDepthLoaded,
+  clearMaxStackDepth,
 } from "./store";
 
 // The store calls the REAL api module (test-setup imports store.ts before
@@ -33,6 +39,7 @@ beforeEach(() => {
   clearImageSize();
   clearFeedViewMode();
   clearArtistViewMode();
+  clearMaxStackDepth();
   fetchCalls = [];
   vi.stubGlobal(
     "fetch",
@@ -203,6 +210,56 @@ describe("view modes (backend-backed)", () => {
       expect(c.init?.method).toBe("PUT");
       expect(JSON.parse(c.init?.body as string)).toEqual({ value: "grid" });
     }
+  });
+});
+
+// ONE pref caps both overlay stacks: default 10, 0 (or garbage) = default,
+// clamp 1..30. Normalization happens locally before the PUT so the UI and
+// the DB can never disagree.
+describe("max stack depth (backend-backed)", () => {
+  it("defaults to 10 and applies the server value without a PUT", () => {
+    expect(maxStackDepth()).toBe(10);
+    expect(isMaxStackDepthLoaded()).toBe(false);
+    setMaxStackDepthFromServer(24);
+    expect(maxStackDepth()).toBe(24);
+    expect(isMaxStackDepthLoaded()).toBe(true);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("normalizes 0 / empty / non-numeric / out-of-range values", () => {
+    expect(normalizeMaxStackDepth(0)).toBe(10);
+    expect(normalizeMaxStackDepth("0")).toBe(10);
+    expect(normalizeMaxStackDepth("")).toBe(10);
+    expect(normalizeMaxStackDepth("abc")).toBe(10);
+    expect(normalizeMaxStackDepth(null)).toBe(10);
+    expect(normalizeMaxStackDepth(1)).toBe(1);
+    expect(normalizeMaxStackDepth(30)).toBe(30);
+    expect(normalizeMaxStackDepth(31)).toBe(30);
+    expect(normalizeMaxStackDepth(-4)).toBe(1);
+    expect(normalizeMaxStackDepth("12")).toBe(12);
+  });
+
+  it("clamps a corrupt server value to the default", () => {
+    setMaxStackDepthFromServer("nonsense");
+    expect(maxStackDepth()).toBe(10);
+  });
+
+  it("persists a normalized user change via PUT", async () => {
+    setMaxStackDepth("0");
+    expect(maxStackDepth()).toBe(10);
+    await vi.waitFor(() => expect(fetchCalls).toHaveLength(1));
+    expect(fetchCalls[0].url).toBe("/api/prefs/max-stack-depth");
+    expect(fetchCalls[0].init?.method).toBe("PUT");
+    expect(JSON.parse(fetchCalls[0].init?.body as string)).toEqual({
+      value: 10,
+    });
+
+    setMaxStackDepth(99);
+    expect(maxStackDepth()).toBe(30);
+    await vi.waitFor(() => expect(fetchCalls).toHaveLength(2));
+    expect(JSON.parse(fetchCalls[1].init?.body as string)).toEqual({
+      value: 30,
+    });
   });
 });
 

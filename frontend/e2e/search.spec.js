@@ -200,6 +200,22 @@ test("filters apply live: work type, AI hide, and a custom date range", async ({
     .toBe("ugoira");
 });
 
+test("the search input computes to 16px so iOS Safari doesn't zoom on focus", async ({
+  page,
+}) => {
+  await setupApiMocks(page);
+  await gotoApp(page);
+  await openSearch(page);
+
+  // iOS Safari auto-zooms the viewport when a focused input's computed
+  // font-size is below 16px. jsdom can't resolve real CSS, so the value is
+  // pinned here against the built stylesheet.
+  const fontSize = await page
+    .locator(".search-input")
+    .evaluate((el) => getComputedStyle(el).fontSize);
+  expect(fontSize).toBe("16px");
+});
+
 test("switching to Artists runs the user search", async ({ page }) => {
   const mocks = await setupApiMocks(page);
   await gotoApp(page);

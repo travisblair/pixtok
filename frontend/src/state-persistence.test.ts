@@ -3,7 +3,7 @@ import {
   saveSnapshot,
   loadSnapshot,
   MAX_SNAPSHOT_ITEMS,
-  MAX_STACK_DEPTH,
+  MAX_STACK_DEPTH_HARD,
   type SnapshotInput,
 } from "./state-persistence";
 import type { SearchState } from "./components/SearchScreen";
@@ -173,14 +173,55 @@ describe("saveSnapshot/loadSnapshot", () => {
     expect(loaded.recs.length).toBe(MAX_SNAPSHOT_ITEMS);
   });
 
-  it("truncates the stack to MAX_STACK_DEPTH", () => {
+  it("saves and restores a stack deeper than the default cap (hard bound only)", () => {
+    // The live cap is a user pref (up to 30) — truncating the snapshot at
+    // the DEFAULT 10 would silently delete layers the user opened under a
+    // raised cap. Only the hard bound clips.
     const snap = baseSnapshot();
-    snap.stack = Array.from({ length: MAX_STACK_DEPTH + 3 }, (_, i) =>
+    snap.stack = Array.from({ length: MAX_STACK_DEPTH_HARD + 3 }, (_, i) =>
       makeIllust({ id: i + 1 })
     );
     saveSnapshot(snap);
     const loaded = loadSnapshot()!;
-    expect(loaded.stack.length).toBe(MAX_STACK_DEPTH);
+    expect(loaded.stack.length).toBe(MAX_STACK_DEPTH_HARD);
+  });
+
+  it("applies the live pref cap when the caller already knows it", () => {
+    const snap = baseSnapshot();
+    snap.stack = Array.from({ length: 12 }, (_, i) => makeIllust({ id: i + 1 }));
+    snap.searchStack = Array.from({ length: 12 }, (_, i) =>
+      makeSearchState(`t${i}`)
+    );
+    snap.searchTags = snap.searchStack.map((s) => s.word);
+    saveSnapshot(snap);
+    const loaded = loadSnapshot({ maxStackDepth: 5, maxSearchDepth: 4 })!;
+    expect(loaded.stack.length).toBe(5);
+    expect(loaded.searchStack.length).toBe(4);
+    expect(loaded.searchTags.length).toBe(4);
+  });
+
+  it("keeps deep layers when the pref has not loaded yet (hard bound)", () => {
+    const snap = baseSnapshot();
+    snap.stack = Array.from({ length: 12 }, (_, i) => makeIllust({ id: i + 1 }));
+    saveSnapshot(snap);
+    // No caps = boot ordering where the pref GET is still in flight.
+    expect(loadSnapshot()!.stack.length).toBe(12);
+  });
+
+  it("caps an oversized hand-edited snapshot at the hard bound on load", () => {
+    const snap = baseSnapshot();
+    snap.stack = Array.from({ length: MAX_STACK_DEPTH_HARD + 5 }, (_, i) =>
+      makeIllust({ id: i + 1 })
+    );
+    saveSnapshot(snap);
+    // saveSnapshot already clipped at the hard bound; force a raw oversized
+    // payload to prove load applies the same bound.
+    const raw = JSON.parse(localStorage.getItem(KEY)!);
+    raw.stack = Array.from({ length: MAX_STACK_DEPTH_HARD + 5 }, (_, i) =>
+      makeIllust({ id: i + 1 })
+    );
+    localStorage.setItem(KEY, JSON.stringify(raw));
+    expect(loadSnapshot()!.stack.length).toBe(MAX_STACK_DEPTH_HARD);
   });
 
   it("drops stack/recs entries that only carry a numeric id", () => {

@@ -84,3 +84,23 @@ export async function setArtistViewMode(value: string) {
     })
   );
 }
+
+// Max stack depth — ONE pref for both the related-stack cap and the
+// stacked-search-page cap. Numeric body (the store normalizes before
+// sending): 0 is the user's "default" shorthand, server clamps to 1..30.
+export function getMaxStackDepth() {
+  return request<{ value: number }>("/prefs/max-stack-depth", {
+    signal: AbortSignal.timeout(10_000),
+  });
+}
+
+export async function setMaxStackDepth(value: number) {
+  await queuedPrefWrite(() =>
+    request<{ value: number }>("/prefs/max-stack-depth", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+      signal: AbortSignal.timeout(10_000),
+    })
+  );
+}

@@ -3,7 +3,7 @@ import { logEvent } from "../api/client";
 import { DEFAULT_FILTERS } from "../components/SearchFilters";
 import type { SearchState } from "../components/SearchScreen";
 import type { AppSnapshot, SnapshotInput } from "../state-persistence";
-import { MAX_SEARCH_DEPTH, MAX_STACK_DEPTH } from "../state-persistence";
+import { maxStackDepth } from "../store";
 import type { PixivIllust } from "../types";
 
 // Overlay slide-out animation duration. The CSS keyframes
@@ -138,8 +138,12 @@ export function useLayers(opts: {
       showToast("This work is already open — tap Back to return to it", false);
       return;
     }
-    if (stack().length >= MAX_STACK_DEPTH) {
-      showToast(`Max stack depth reached (${MAX_STACK_DEPTH}) — go back to open more`, false);
+    // ONE user pref governs both overlay stacks (default 10, clamp 1..30).
+    // Read at refusal time, never captured at hook setup: the boot GET
+    // may land after the first layer opens.
+    const limit = maxStackDepth();
+    if (stack().length >= limit) {
+      showToast(`Max stack depth reached (${limit}) — go back to open more`, false);
       return;
     }
     hideToast(); // don't let the toast sit hidden under the stack
@@ -251,9 +255,11 @@ export function useLayers(opts: {
     if (closing !== null) {
       finalizeSearchClose(closing, searchStack().findIndex((s) => s.z === closing));
     }
-    if (searchStack().length >= MAX_SEARCH_DEPTH) {
+    // Same live pref as the related stack — search layers share the cap.
+    const searchLimit = maxStackDepth();
+    if (searchStack().length >= searchLimit) {
       showToast(
-        `Max search pages reached (${MAX_SEARCH_DEPTH}) — close one to open more`,
+        `Max search pages reached (${searchLimit}) — close one to open more`,
         false
       );
       return;
@@ -308,9 +314,11 @@ export function useLayers(opts: {
       showToast("This tag is already open — tap Back to return to it", false);
       return;
     }
-    if (searchStack().length >= MAX_SEARCH_DEPTH) {
+    // Same live pref as the related stack — search layers share the cap.
+    const searchLimit = maxStackDepth();
+    if (searchStack().length >= searchLimit) {
       showToast(
-        `Max search pages reached (${MAX_SEARCH_DEPTH}) — close one to open more`,
+        `Max search pages reached (${searchLimit}) — close one to open more`,
         false
       );
       return;

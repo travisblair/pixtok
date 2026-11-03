@@ -186,6 +186,7 @@ export async function setupApiMocks(page, options = {}) {
     imageSize: options.imageSize ?? "large",
     feedViewMode: options.feedViewMode ?? "strip",
     artistViewMode: options.artistViewMode ?? "strip",
+    maxStackDepth: options.maxStackDepth ?? 10,
   };
   const prefsRoute = (pattern, key) =>
     page.route(pattern, (route) => {
@@ -198,7 +199,7 @@ export async function setupApiMocks(page, options = {}) {
         }
       }
       route.fulfill(
-        json(key.startsWith("feedViewMode") || key.startsWith("artistViewMode") || key === "imageSize"
+        json(key.startsWith("feedViewMode") || key.startsWith("artistViewMode") || key === "imageSize" || key === "maxStackDepth"
           ? { value: prefsState[key] }
           : { tags: prefsState[key] })
       );
@@ -207,6 +208,7 @@ export async function setupApiMocks(page, options = {}) {
   await prefsRoute(/\/api\/prefs\/image-size$/, "imageSize");
   await prefsRoute(/\/api\/prefs\/feed-view-mode$/, "feedViewMode");
   await prefsRoute(/\/api\/prefs\/artist-view-mode$/, "artistViewMode");
+  await prefsRoute(/\/api\/prefs\/max-stack-depth$/, "maxStackDepth");
 
   // ── Bookmarks page (tag pills + offset pagination) ──────────────────
   // The seed must cover the bookmark-page works so their hearts render

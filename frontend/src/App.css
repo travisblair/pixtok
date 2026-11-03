@@ -1303,7 +1303,9 @@
   border-radius: 8px;
   color: #eee;
   padding: 10px 12px;
-  font-size: 0.95rem;
+  /* 16px, not rem: iOS Safari auto-zooms the whole page when a focused
+     input's computed font-size is below 16px. */
+  font-size: 16px;
   font-weight: 400;
 }
 .search-input:focus {
@@ -1636,6 +1638,24 @@
   font-size: 0.9rem;
   color: #ccc;
   min-width: 90px;
+}
+
+/* Settings → Stack depth number box. 16px for the same iOS reason as
+   .search-input (below 16px Safari zooms the page on focus). */
+.config-depth-input {
+  width: 72px;
+  background: #111;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #eee;
+  padding: 6px 10px;
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.config-depth-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
 }
 
 /* Build stamp in Settings — identifies which bundle a device runs. */

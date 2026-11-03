@@ -115,6 +115,8 @@ describe("api route shapes by domain", () => {
     await prefs.setFeedViewMode("grid");
     await prefs.getArtistViewMode();
     await prefs.setArtistViewMode("grid");
+    await prefs.getMaxStackDepth();
+    await prefs.setMaxStackDepth(17);
     expect(calls.map(shape)).toEqual([
       "GET /api/prefs/blocked-tags",
       'PUT /api/prefs/blocked-tags :: {"tags":["a","b"]}',
@@ -124,6 +126,8 @@ describe("api route shapes by domain", () => {
       'PUT /api/prefs/feed-view-mode :: {"value":"grid"}',
       "GET /api/prefs/artist-view-mode",
       'PUT /api/prefs/artist-view-mode :: {"value":"grid"}',
+      "GET /api/prefs/max-stack-depth",
+      'PUT /api/prefs/max-stack-depth :: {"value":17}',
     ]);
   });
 

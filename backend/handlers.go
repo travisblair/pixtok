@@ -1139,6 +1139,51 @@ func registerPrefs(mux *http.ServeMux, store *prefsStore) {
 	registerPrefRoute("/api/prefs/image-size", "image size", store.GetImageSize, store.SetImageSize, "large", "medium")
 	registerPrefRoute("/api/prefs/feed-view-mode", "view mode", store.GetFeedViewMode, store.SetFeedViewMode, "strip", "grid")
 	registerPrefRoute("/api/prefs/artist-view-mode", "view mode", store.GetArtistViewMode, store.SetArtistViewMode, "strip", "grid")
+
+	// Max stack depth — same {value} envelope and the same error
+	// discipline as registerPrefRoute (validate HERE → 400; any store
+	// error → logged 500), but the value is an integer: the client sends
+	// a JSON number, 0 normalizes to the default (10), and anything
+	// outside 1..30 is a client error. A missing/non-numeric value fails
+	// the decode (int target) and is a 400 too — never a silent default.
+	mux.HandleFunc("/api/prefs/max-stack-depth", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			v, err := store.GetMaxStackDepth()
+			if err != nil {
+				log.Printf("ERROR prefs %s get: %v", r.URL.Path, err)
+				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]any{"value": v})
+
+		case http.MethodPut:
+			var body struct {
+				Value *int `json:"value"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil || body.Value == nil {
+				http.Error(w, "invalid stack depth", http.StatusBadRequest)
+				return
+			}
+			v := *body.Value
+			if v == 0 {
+				v = DefaultMaxStackDepth
+			}
+			if v < 1 || v > MaxStackDepthLimit {
+				http.Error(w, "invalid stack depth", http.StatusBadRequest)
+				return
+			}
+			if err := store.SetMaxStackDepth(v); err != nil {
+				log.Printf("ERROR prefs %s set: %v", r.URL.Path, err)
+				http.Error(w, "prefs unavailable", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]any{"value": v})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 }
 
 // apiKeyGate requires the shared key (set in .env as PIXTOK_API_KEY) on

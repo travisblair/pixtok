@@ -44,6 +44,7 @@ vi.mock("./api/client", async (importOriginal) => {
 });
 
 import { setOnGateLocked, setOnRequestError } from "./api/client";
+import { maxStackDepth } from "./store";
 import { json } from "./test/msw/handlers";
 import {
   requestCount,
@@ -1009,6 +1010,48 @@ describe("App", () => {
     expect(container.querySelectorAll(".related-view").length).toBe(10);
   });
 
+  it("caps the related stack at the server-configured depth", async () => {
+    // The depth pref governs the stack (not just a hard-coded 10): set 3,
+    // push 3 levels, and the 4th tap must refuse with the LIVE number.
+    let level = 0;
+    server.use(
+      http.get("/api/prefs/max-stack-depth", () => json({ value: 3 })),
+      http.get("/api/illust/:id/related", () =>
+        json(makeFeedOf(8, 900 + level++ * 100))
+      )
+    );
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+    // The boot seed must land before pushes, or the push path would read
+    // the default 10 and this test would pass for the wrong reason.
+    await waitFor(() => expect(maxStackDepth()).toBe(3));
+
+    for (let i = 0; i < 3; i++) {
+      const topCard = container.querySelector(".related-view")
+        ? topRelatedCards(container)[1]
+        : container.querySelectorAll(".feed-card")[0];
+      await fireEvent.click(topCard.querySelector(".card-overlay")!);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".related-view").length).toBe(i + 1)
+      );
+      await waitFor(() =>
+        expect(topRelatedCards(container).length).toBeGreaterThanOrEqual(2)
+      );
+    }
+    expect(container.querySelectorAll(".related-view").length).toBe(3);
+
+    const topCard = topRelatedCards(container)[1];
+    await fireEvent.click(topCard.querySelector(".card-overlay")!);
+    await waitFor(() =>
+      expect(container.querySelector(".toast")?.textContent).toContain(
+        "Max stack depth reached (3)"
+      )
+    );
+    expect(container.querySelectorAll(".related-view").length).toBe(3);
+  });
+
   it("toast names the work whose recommendations loaded", async () => {
     const { container } = render(() => <App />);
     await waitFor(() =>
@@ -1942,6 +1985,39 @@ describe("App", () => {
       await waitFor(() =>
         expect(container.querySelector(".toast")?.textContent).toContain(
           "Max search pages"
+        )
+      );
+    });
+
+    it("caps search pages at the configured depth too (one setting)", async () => {
+      // The SAME pref bounds tag-search layers: 4 deep here, so the 5th
+      // chip refuses and the toast names the live number.
+      server.use(
+        http.get("/api/prefs/max-stack-depth", () => json({ value: 4 }))
+      );
+      const tags = Array.from({ length: 6 }, (_, i) => `stag${i}`);
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed(
+              tags.map((t, i) => makeIllust({ id: i + 1, tags: [{ name: t }] }))
+            )
+          )
+        )
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await waitFor(() => expect(maxStackDepth()).toBe(4));
+      for (const t of tags) {
+        await tapChip(container, t);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(container.querySelectorAll(".search-screen").length).toBe(4);
+      await waitFor(() =>
+        expect(container.querySelector(".toast")?.textContent).toContain(
+          "Max search pages reached (4)"
         )
       );
     });

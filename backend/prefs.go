@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -181,4 +182,43 @@ func (s *prefsStore) SetArtistViewMode(v string) error {
 		return fmt.Errorf("invalid artist view mode")
 	}
 	return s.set(artistViewModeKey, v)
+}
+
+const maxStackDepthKey = "max_stack_depth"
+
+// Bounds for the user-controllable stack depth. ONE setting governs both
+// the related-stack cap and the stacked-search-page cap. 0 from the user
+// means "default"; 30 is the hard upper bound (each layer is a full
+// mounted page — beyond this the mobile memory budget is the real limit).
+const (
+	DefaultMaxStackDepth = 10
+	MaxStackDepthLimit   = 30
+)
+
+// GetMaxStackDepth returns the configured max stack depth. Never-set or
+// corrupt values read as the default — same degrade-to-default rule as
+// the view modes (a hand-edited DB row must not break layer pushes).
+func (s *prefsStore) GetMaxStackDepth() (int, error) {
+	raw, err := s.get(maxStackDepthKey)
+	if err != nil {
+		return 0, err
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 1 || v > MaxStackDepthLimit {
+		return DefaultMaxStackDepth, nil
+	}
+	return v, nil
+}
+
+// SetMaxStackDepth normalizes the user's 0 → default and rejects values
+// outside 1..30. Validation error text is distinct from a storage error
+// (returned unwrapped from s.set) so callers can classify them.
+func (s *prefsStore) SetMaxStackDepth(v int) error {
+	if v == 0 {
+		v = DefaultMaxStackDepth
+	}
+	if v < 1 || v > MaxStackDepthLimit {
+		return fmt.Errorf("invalid max stack depth: %d", v)
+	}
+	return s.set(maxStackDepthKey, strconv.Itoa(v))
 }

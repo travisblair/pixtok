@@ -135,6 +135,7 @@ const prefsState = {
   imageSize: "large",
   feedViewMode: "strip",
   artistViewMode: "strip",
+  maxStackDepth: 10,
 };
 
 export function resetPrefsState() {
@@ -142,6 +143,7 @@ export function resetPrefsState() {
   prefsState.imageSize = "large";
   prefsState.feedViewMode = "strip";
   prefsState.artistViewMode = "strip";
+  prefsState.maxStackDepth = 10;
 }
 
 /** Prefs value routes share one shape: GET {"value": v} / PUT {"value": v}. */
@@ -381,6 +383,25 @@ export const handlers = [
     (v) => (prefsState.artistViewMode = v),
     "artist-view-mode"
   ),
+  // Max stack depth is NUMERIC — same {value} envelope as the string
+  // prefs, but 0 normalizes to the default (10) and 1..30 is the only
+  // accepted range, mirroring registerPrefs' handler.
+  http.get("/api/prefs/max-stack-depth", () =>
+    json({ value: prefsState.maxStackDepth })
+  ),
+  http.put("/api/prefs/max-stack-depth", async ({ request }) => {
+    const body = (await request.json().catch(() => null)) as {
+      value?: unknown;
+    } | null;
+    const raw = body?.value;
+    if (typeof raw !== "number" || !Number.isInteger(raw)) {
+      return err("invalid stack depth", 400);
+    }
+    const v = raw === 0 ? 10 : raw;
+    if (v < 1 || v > 30) return err("invalid stack depth", 400);
+    prefsState.maxStackDepth = v;
+    return json({ value: v });
+  }),
 
   // ── GET /api/img?url=… (image proxy) ──────────────────────────────
   // Ugoira zips come back as real zip bytes (fflate inflates them for

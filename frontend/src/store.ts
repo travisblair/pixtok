@@ -5,6 +5,7 @@ import {
   setImageSize as persistImageSize,
   setFeedViewMode as persistFeedViewMode,
   setArtistViewMode as persistArtistViewMode,
+  setMaxStackDepth as persistMaxStackDepth,
 } from "./api/prefs";
 
 /**
@@ -241,6 +242,66 @@ export function clearArtistViewMode() {
 }
 
 export { feedViewMode, artistViewMode };
+
+// ── Max stack depth (related stack + stacked search pages) ─────────────
+//
+// ONE setting governs BOTH caps (product decision: "make the stack
+// deeper" means every overlay stack, not just the related one). Bounds:
+// default 10, 0 (or garbage) means default, hard cap 30. The backend
+// normalizes the same way — this side normalizes before sending so the
+// UI and the DB never disagree.
+
+export const DEFAULT_MAX_STACK_DEPTH = 10;
+export const MAX_STACK_DEPTH_LIMIT = 30;
+
+/** 0 / empty / non-numeric → default; otherwise clamp 1..30. */
+export function normalizeMaxStackDepth(raw: unknown): number {
+  if (raw === null || raw === undefined || raw === "") {
+    return DEFAULT_MAX_STACK_DEPTH;
+  }
+  const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (!Number.isFinite(n)) return DEFAULT_MAX_STACK_DEPTH;
+  const i = Math.trunc(n);
+  if (i === 0) return DEFAULT_MAX_STACK_DEPTH;
+  return Math.min(MAX_STACK_DEPTH_LIMIT, Math.max(1, i));
+}
+
+const [maxStackDepth, setMaxStackDepthRaw] = createSignal(
+  DEFAULT_MAX_STACK_DEPTH
+);
+
+// Did the boot GET land yet? state-persistence reads this to decide
+// whether it may truncate a restored snapshot at the live cap or must
+// wait and use the hard upper bound (dropping valid layers is worse
+// than restoring a few above a lowered cap).
+let maxStackDepthLoaded = false;
+
+/** Applies the value loaded from the server (no PUT round-trip). */
+export function setMaxStackDepthFromServer(v: unknown) {
+  maxStackDepthLoaded = true;
+  setMaxStackDepthRaw(normalizeMaxStackDepth(v));
+}
+
+/** True once the boot GET answered (or a user change landed). */
+export function isMaxStackDepthLoaded() {
+  return maxStackDepthLoaded;
+}
+
+/** User action: normalize locally + persist to the prefs DB. */
+export function setMaxStackDepth(v: number | string) {
+  const next = normalizeMaxStackDepth(v);
+  maxStackDepthLoaded = true;
+  setMaxStackDepthRaw(next);
+  void persistMaxStackDepth(next).catch(reportApiError);
+}
+
+/** Test hook. */
+export function clearMaxStackDepth() {
+  maxStackDepthLoaded = false;
+  setMaxStackDepthRaw(DEFAULT_MAX_STACK_DEPTH);
+}
+
+export { maxStackDepth };
 
 // ── One-time stack hint ("Related works — ← Back returns") ──────────────
 

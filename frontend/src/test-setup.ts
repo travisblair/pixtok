@@ -7,6 +7,7 @@ import {
   clearImageSize,
   clearFeedViewMode,
   clearArtistViewMode,
+  clearMaxStackDepth,
 } from "./store";
 
 afterEach(() => {
@@ -19,6 +20,7 @@ afterEach(() => {
   clearImageSize();
   clearFeedViewMode();
   clearArtistViewMode();
+  clearMaxStackDepth();
 });
 
 // jsdom has no IntersectionObserver — mock it with an implementation that
