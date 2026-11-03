@@ -133,7 +133,7 @@ test.describe("Like → related-works modal (unified with the tap-stack)", () =>
     await expectMainFeedCount(page, 30);
   });
 
-  test("like failure reverts the heart and shows no toast", async ({ page }) => {
+  test("like failure reverts the heart and surfaces the red error toast", async ({ page }) => {
     await setupApiMocks(page, { likeFails: true });
     await gotoApp(page);
     await expectMainFeedCount(page, 30);
@@ -141,9 +141,16 @@ test.describe("Like → related-works modal (unified with the tap-stack)", () =>
     const heart = page.locator(".feed-card").first().locator(".like-btn");
     await heart.click();
 
-    // Optimistic flip happens, then reverts on the 500
-    await expect(heart).toHaveText("🤍");
+    // The failure belongs in the RED error toast. `.toast` is the recs
+    // toast — asserting only that it is absent (the old check) passed even
+    // if the failure was reported nowhere at all.
+    const errorToast = page.locator(".error-toast");
+    await expect(errorToast).toBeVisible();
+    await expect(errorToast).toContainText("Request failed (500)");
     await expect(page.locator(".toast")).toHaveCount(0);
+
+    // Optimistic flip happens, then reverts on the 500.
+    await expect(heart).toHaveText("🤍");
   });
 
   test("toast wraps long titles full-width instead of clipping off-screen", async ({ page }) => {

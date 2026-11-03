@@ -94,7 +94,7 @@ func TestAuthProxyRejectsNonListedMethods(t *testing.T) {
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
 	for _, m := range []string{"PUT", "PATCH", "DELETE", "CONNECT", "TRACE"} {
-		req := withFlowCookie(httptest.NewRequest(m, "/api/auth/px/accounts/login", nil))
+		req := withFlowCookie(t, h, httptest.NewRequest(m, "/api/auth/px/accounts/login", nil))
 		req.Header.Set("X-Api-Key", "secret")
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -104,7 +104,7 @@ func TestAuthProxyRejectsNonListedMethods(t *testing.T) {
 	}
 	// GET and POST still pass the method gate (200 from the fake upstream).
 	for _, m := range []string{http.MethodGet, http.MethodPost} {
-		req := withFlowCookie(httptest.NewRequest(m, "/api/auth/px/accounts/login", nil))
+		req := withFlowCookie(t, h, httptest.NewRequest(m, "/api/auth/px/accounts/login", nil))
 		req.Header.Set("X-Api-Key", "secret")
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -131,11 +131,14 @@ func TestAuthProxyForwardsOnlyPixivCookies(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil)
 	req.Header.Set("X-Api-Key", "secret")
+	// The flow cookie must carry a REAL flow id (it is validated against
+	// the store), and the other pixtok_* cookies are noise the proxy must
+	// drop on the way upstream.
 	req.Header.Set("Cookie",
 		"PHPSESSID=123_abcdef0123456789abcdef; device_token=devtok; "+
-			"pixtok_login=shouldnotleave; pixtok_gate=alsonot; tracker=evil")
+			"pixtok_login="+startLoginFlow(t, h)+"; pixtok_gate=alsonot; tracker=evil")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != 200 {
@@ -214,7 +217,7 @@ func TestPkceCallbackSetTokensFailureIsFatal(t *testing.T) {
 // The callback's cookie-deletion sweep must match the transport's Secure
 // posture like every other cookie the proxy sets.
 func TestPkceCallbackDeletionCookiesCarrySecure(t *testing.T) {
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
+	withPublicHTTPS(t, "true")
 
 	pkce := newPkceStore()
 	flow := "flow-secure"

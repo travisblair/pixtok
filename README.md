@@ -161,10 +161,14 @@ unless `PIXTOK_GATE_ALLOW_PLAINTEXT_DEV_ONLY=true` is set (local dev
 only). A plaintext dev password is hashed on first boot and the bcrypt
 hash is persisted back to `.env` — the gate then survives restarts
 without re-locking devices.
-Without a password the gate is disabled and the app is open to whoever
-can reach the URL. Set `PIXTOK_PUBLIC_HTTPS=true` when the app is
-served over HTTPS (Tailscale Funnel) so the gate cookie and the login
-proxy's rewritten pixiv cookies keep `Secure`.
+Without a password the gate is disabled. That is safe only for local
+dev: with `PIXTOK_SERVE_FRONTEND=true` the backend refuses to boot
+without a gate, and the dev API-key gate fails closed — every `/api`
+request except `/health` answers 401 until `PIXTOK_API_KEY` is set. Any
+deployment reachable by someone else needs a gate password. Set
+`PIXTOK_PUBLIC_HTTPS=true` when the app is served over HTTPS (Tailscale
+Funnel) so the gate cookie and the login proxy's rewritten pixiv cookies
+keep `Secure`.
 
 Credentials live in `.env`. `PIXTOK_ENV_FILE=/path/to/.env` pins one
 file explicitly (no candidate search) — useful when the binary and

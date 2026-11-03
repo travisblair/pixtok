@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -1440,9 +1441,42 @@ func withProxyTargets(t *testing.T, targets map[string]string) {
 	t.Cleanup(func() { authProxyTargets = old })
 }
 
-func withFlowCookie(req *http.Request) *http.Request {
-	req.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: "1"})
+// startLoginFlow drives the real pkce/start route and returns the LIVE
+// login-flow cookie value. The proxy legs require the cookie to name a
+// flow in the server-side store (H1), so tests must start one exactly
+// like a browser does.
+func startLoginFlow(t *testing.T, h http.Handler) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/pkce/start", nil)
+	req.Header.Set("X-Api-Key", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("pkce/start = %d, want 302", rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == loginFlowCookie && c.Value != "" {
+			return c.Value
+		}
+	}
+	t.Fatal("pkce/start did not set the login-flow cookie")
+	return ""
+}
+
+func withFlowCookie(t *testing.T, h http.Handler, req *http.Request) *http.Request {
+	t.Helper()
+	req.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: startLoginFlow(t, h)})
 	return req
+}
+
+// withPublicHTTPS pins PIXTOK_PUBLIC_HTTPS for a test. The posture is
+// resolved once and cached (boot-time config in production), so a test
+// that flips it must also reset the cache.
+func withPublicHTTPS(t *testing.T, value string) {
+	t.Helper()
+	t.Setenv("PIXTOK_PUBLIC_HTTPS", value)
+	resetPublicHTTPSCache()
+	t.Cleanup(resetPublicHTTPSCache)
 }
 
 func TestAuthProxyRequiresFlowCookie(t *testing.T) {
@@ -1481,7 +1515,7 @@ func TestAuthProxyStripsPixtokCookies(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
+	req := withFlowCookie(t, h, httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
 	req.AddCookie(&http.Cookie{Name: gateCookie, Value: "app-session-token"})
 	req.AddCookie(&http.Cookie{Name: "PHPSESSID", Value: "upstreamsession123"})
 	req.Header.Set("X-Api-Key", "secret")
@@ -1528,7 +1562,7 @@ func TestAuthProxyAppSessionCookieScoping(t *testing.T) {
 		{"/api/auth/px/accounts/login", false},
 		{"/api/auth/px/www/account-selected", false},
 	} {
-		req := withFlowCookie(httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader("x=1")))
+		req := withFlowCookie(t, h, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader("x=1")))
 		req.AddCookie(&http.Cookie{Name: "app_api_session_id", Value: "appsess123"})
 		req.Header.Set("X-Api-Key", "secret")
 		rr := httptest.NewRecorder()
@@ -1546,13 +1580,15 @@ func TestAuthProxyAppSessionCookieScoping(t *testing.T) {
 
 func TestAuthProxyRewritesCookiesAndLocations(t *testing.T) {
 	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false") // pin: strip Secure for HTTP dev
+	resetPublicHTTPSCache()
+	t.Cleanup(resetPublicHTTPSCache)
 	_, targets := fakePixivUpstream(t)
 	withProxyTargets(t, targets)
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
 	// GET the login page: cookie must come back host-only.
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
+	req := withFlowCookie(t, h, httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/login", nil))
 	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1569,7 +1605,7 @@ func TestAuthProxyRewritesCookiesAndLocations(t *testing.T) {
 	}
 
 	// POST the login: the redirect must be rewritten onto our proxy path.
-	req2 := withFlowCookie(httptest.NewRequest(http.MethodPost, "/api/auth/px/accounts/login", strings.NewReader("pixiv_id=x&password=y")))
+	req2 := withFlowCookie(t, h, httptest.NewRequest(http.MethodPost, "/api/auth/px/accounts/login", strings.NewReader("pixiv_id=x&password=y")))
 	req2.Header.Set("X-Api-Key", "secret")
 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr2 := httptest.NewRecorder()
@@ -1604,7 +1640,7 @@ func TestAjaxLoginProxiedAndBodyRewritten(t *testing.T) {
 	// With the flow cookie → proxied to accounts. The OUTER returnTo is
 	// rewritten onto our proxy path; the percent-encoded INNER return_to
 	// must stay untouched (pixiv validates its host server-side).
-	req2 := withFlowCookie(httptest.NewRequest(http.MethodPost, "/ajax/login?lang=en", strings.NewReader("login_id=x&password=y")))
+	req2 := withFlowCookie(t, h, httptest.NewRequest(http.MethodPost, "/ajax/login?lang=en", strings.NewReader("login_id=x&password=y")))
 	req2.Header.Set("X-Api-Key", "secret")
 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr2 := httptest.NewRecorder()
@@ -1630,7 +1666,7 @@ func TestPostRedirectHTMLRewritten(t *testing.T) {
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/post-redirect?return_to=x", nil))
+	req := withFlowCookie(t, h, httptest.NewRequest(http.MethodGet, "/api/auth/px/accounts/post-redirect?return_to=x", nil))
 	req.Header.Set("X-Api-Key", "secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1774,21 +1810,34 @@ func TestPkceCallbackCompletesServerSide(t *testing.T) {
 	}
 }
 
-func TestPkceCallbackRejectsUnknownFlow(t *testing.T) {
+func TestPkceCallbackVerifierIsSingleUse(t *testing.T) {
 	_, targets := fakePixivUpstream(t)
 	withProxyTargets(t, targets)
 	f := &fakeAPI{}
 	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
 
-	// Flow cookie value "1" was never issued by pkce/start → the store
-	// has no verifier for it.
-	req := withFlowCookie(httptest.NewRequest(http.MethodGet,
-		"/api/auth/px/app/web/v1/users/auth/pixiv/callback?state=pixivs-own-state&code=x", nil))
-	req.Header.Set("X-Api-Key", "secret")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("unknown flow = %d, want 400", rr.Code)
+	// The verifier is single-use: replaying the SAME live flow cookie at
+	// the callback fails closed (400), it does not exchange a second
+	// code with a verifier that was already spent.
+	flowID := startLoginFlow(t, h)
+	first := httptest.NewRequest(http.MethodGet,
+		"/api/auth/px/app/web/v1/users/auth/pixiv/callback?state=s&code=c1", nil)
+	first.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: flowID})
+	first.Header.Set("X-Api-Key", "secret")
+	r1 := httptest.NewRecorder()
+	h.ServeHTTP(r1, first)
+	if r1.Code != http.StatusFound {
+		t.Fatalf("first callback = %d, want 302 (body: %s)", r1.Code, r1.Body.String())
+	}
+
+	second := httptest.NewRequest(http.MethodGet,
+		"/api/auth/px/app/web/v1/users/auth/pixiv/callback?state=s&code=c2", nil)
+	second.AddCookie(&http.Cookie{Name: loginFlowCookie, Value: flowID})
+	second.Header.Set("X-Api-Key", "secret")
+	r2 := httptest.NewRecorder()
+	h.ServeHTTP(r2, second)
+	if r2.Code != http.StatusForbidden {
+		t.Fatalf("replayed callback = %d, want 403 (flow consumed → proxy refuses)", r2.Code)
 	}
 }
 
@@ -2380,7 +2429,7 @@ func TestSecureForRequest(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			t.Setenv("PIXTOK_PUBLIC_HTTPS", c.flag)
+			withPublicHTTPS(t, c.flag)
 			if got := secureForRequest(c.req); got != c.want {
 				t.Fatalf("secureForRequest = %v, want %v", got, c.want)
 			}
@@ -2469,7 +2518,7 @@ func TestPrivateBookmarksPassthrough(t *testing.T) {
 }
 
 func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "true")
+	withPublicHTTPS(t, "true")
 	h := newGatedServer(t, "correct horse battery staple")
 
 	unlock := func(t *testing.T, mutate func(*http.Request)) *http.Cookie {
@@ -2508,7 +2557,7 @@ func TestGateCookieSecureFollowsRequestTransport(t *testing.T) {
 	}
 
 	// Flag off: never Secure, even with the forwarded proto.
-	t.Setenv("PIXTOK_PUBLIC_HTTPS", "false")
+	withPublicHTTPS(t, "false")
 	if c := unlock(t, func(r *http.Request) {
 		r.Header.Set("X-Forwarded-Proto", "https")
 	}); c.Secure {
@@ -2647,10 +2696,63 @@ func TestTarpitSleep(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tarpitSleep(tc.delay, tc.sinceLast); got != tc.want {
-				t.Fatalf("tarpitSleep(%v, %v) = %v, want %v", tc.delay, tc.sinceLast, got, tc.want)
+			if got := tarpitSleep(tc.delay, tc.sinceLast, tarpitMaxSleep); got != tc.want {
+				t.Fatalf("tarpitSleep(%v, %v, %v) = %v, want %v", tc.delay, tc.sinceLast, tarpitMaxSleep, got, tc.want)
 			}
 		})
+	}
+}
+
+// Regression (M1): the tarpit's longest tier used to equal or exceed the
+// server's 15s WriteTimeout, so the promised 401 never arrived — the
+// client got EOF at the deadline. A real server with a deliberately SHORT
+// write timeout proves the handler's own deadline now covers sleep+write.
+func TestTarpitDelivers401AtHighestTier(t *testing.T) {
+	g, err := newGate("correct horse battery staple", true)
+	if err != nil {
+		t.Fatalf("newGate: %v", err)
+	}
+	// Keep the test fast while staying on the HIGHEST failure tier
+	// (failures >= 17 → the 60s tier, capped here).
+	g.tarpitCap = 1500 * time.Millisecond
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/probe", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	registerGateRoutes(mux, g)
+
+	srv := httptest.NewUnstartedServer(apiKeyGate("secret", g.middleware(mux)))
+	srv.Config.WriteTimeout = 500 * time.Millisecond // shorter than the tarpit sleep
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	// Seed the failure streak (17 failures puts us on the 60s tier,
+	// capped to 1.5s here). The spacing guard only skips the sleep when
+	// the previous failure is >=2s old, so seed them back-to-back.
+	for i := 0; i < 17; i++ {
+		g.recordFailure()
+	}
+
+	body := strings.NewReader(`{"password":"wrong"}`)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/gate", body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Api-Key", "secret")
+	req.Header.Set("Content-Type", "application/json")
+
+	start := time.Now()
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("tarpit request failed after %v (the 401 was never delivered): %v", time.Since(start).Round(time.Millisecond), err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("tarpit response = %d, want 401", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed < g.tarpitCap {
+		t.Fatalf("401 arrived after %v, want the tarpit to have slept ~%v", elapsed.Round(time.Millisecond), g.tarpitCap)
 	}
 }
 
@@ -2940,5 +3042,39 @@ func TestImgStreamCommittedErrorLogsWithoutErroring(t *testing.T) {
 	}
 	if strings.Contains(rr.Body.String(), "upstream error") {
 		t.Fatalf("body = %q, must not contain http.Error text", rr.Body.String())
+	}
+}
+
+// /api/next must answer 400 (not 502) for a URL the pagination allowlist
+// refuses: it is a client error, and logging it as an upstream failure
+// hid broken feed URLs (review L6).
+func TestNextRejectsDisallowedURLWith400(t *testing.T) {
+	out := captureLog(t)
+	f := &fakeAPI{proxyNextFn: func(u string) ([]byte, error) {
+		return nil, fmt.Errorf("%w: next_url path not allowed", pixiv.ErrInvalidParam)
+	}}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+
+	bad := "https://app-api.pixiv.net/v1/user/detail?user_id=1"
+	rr := doReq(t, h, http.MethodGet, "/api/next?url="+url.QueryEscape(bad), "secret")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("/api/next disallowed url = %d, want 400", rr.Code)
+	}
+	got := out()
+	if !strings.Contains(got, "WARN /api/next rejected") {
+		t.Fatalf("rejected URL not logged: %q", got)
+	}
+	if !strings.Contains(got, "app-api.pixiv.net/v1/user/detail") {
+		t.Fatalf("log line does not name the rejected URL: %q", got)
+	}
+
+	// A genuine upstream failure still maps to 502.
+	f2 := &fakeAPI{proxyNextFn: func(u string) ([]byte, error) {
+		return nil, fmt.Errorf("proxy returned 500")
+	}}
+	h2 := newServer(f2, newImageCache(time.Hour, 10, 512<<20), "secret")
+	rr2 := doReq(t, h2, http.MethodGet, "/api/next?url="+url.QueryEscape(bad), "secret")
+	if rr2.Code != http.StatusBadGateway {
+		t.Fatalf("/api/next upstream error = %d, want 502", rr2.Code)
 	}
 }

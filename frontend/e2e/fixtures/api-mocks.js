@@ -106,6 +106,11 @@ export async function setupApiMocks(page, options = {}) {
     total: 2,
   };
   const likeFails = options.likeFails ?? false;
+  // Ids the viewer already follows — the followed route answers true only
+  // for these, so a spec can distinguish artists A and B (the old
+  // always-false mock made a stale follow state after an artist swap
+  // undetectable).
+  const followedIds = options.followedIds ?? [];
   // Fail the FIRST street continuation once (500), succeed afterwards —
   // exercises the "pagination failure must not auto-retry" path.
   const streetNextFailOnce = options.streetNextFailOnce ?? false;
@@ -260,7 +265,7 @@ export async function setupApiMocks(page, options = {}) {
   await page.route(/\/api\/user\/(\d+)\/followed$/, (route) => {
     const id = Number(route.request().url().match(/\/user\/(\d+)\/followed$/)[1]);
     mocks.followedCalls.push({ id });
-    route.fulfill(json({ followed: false }));
+    route.fulfill(json({ followed: followedIds.includes(id) }));
   });
   await page.route(/\/api\/user\/(\d+)\/follow$/, (route) => {
     const id = Number(route.request().url().match(/\/user\/(\d+)\/follow$/)[1]);

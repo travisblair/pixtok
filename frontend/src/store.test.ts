@@ -83,6 +83,42 @@ describe("blocked tags (backend-backed)", () => {
     expect(blockedTags()).toEqual(["loli", "swimsuit"]);
   });
 
+  it("merges a late boot seed with edits made while it was in flight", async () => {
+    // The user blocks a tag before the boot GET answers: the seed carries
+    // the server's PRE-edit list and must not replace the working copy.
+    addBlockedTag("swimsuit");
+    setBlockedTagsList(["loli"]);
+    // Union of server truth + the local add (order: seed first).
+    expect(blockedTags()).toEqual(["loli", "swimsuit"]);
+    // The edit's own PUT carried only [swimsuit], so the merged truth is
+    // written back — otherwise the next boot would forget "loli".
+    await vi.waitFor(() => {
+      const last = fetchCalls[fetchCalls.length - 1];
+      expect(JSON.parse(last.init?.body as string)).toEqual({
+        tags: ["loli", "swimsuit"],
+      });
+    });
+  });
+
+  it("honours a removal made while the seed was in flight", () => {
+    // Tombstoned removal: a seed that still lists the tag must not
+    // resurrect it (e.g. the unblock tap landed before the GET answered).
+    removeBlockedTag("loli");
+    setBlockedTagsList(["loli", "swimsuit"]);
+    expect(blockedTags()).toEqual(["swimsuit"]);
+  });
+
+  it("a seed after the first one still replaces (last write wins)", () => {
+    setBlockedTagsList(["a"]);
+    setBlockedTagsList(["b"]);
+    expect(blockedTags()).toEqual(["b"]);
+  });
+
+  it("normalizes the seed like the PUT path (trim, lowercase, dedupe)", () => {
+    setBlockedTagsList([" Swimsuit ", "swimsuit", "", "Loli"]);
+    expect(blockedTags()).toEqual(["swimsuit", "loli"]);
+  });
+
   it("add/remove update the list and PUT the full array", async () => {
     addBlockedTag(" Swimsuit ");
     expect(blockedTags()).toEqual(["swimsuit"]);

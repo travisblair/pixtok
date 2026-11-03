@@ -111,6 +111,52 @@ beforeEach(() => {
   vi.mocked(setOnRequestError).mockReset();
 });
 
+afterEach(() => vi.unstubAllGlobals());
+
+/**
+ * IntersectionObserver whose delivery the test drives, so "was the CURRENT
+ * sentinel re-observed after the UI remounted?" is observable. Entries are
+ * only delivered for targets still in the document: a detached sentinel is
+ * exactly what a stale observer would be left watching.
+ */
+class ControlledIO {
+  static instances: ControlledIO[] = [];
+  private targets = new Set<Element>();
+  private cb: IntersectionObserverCallback;
+  constructor(cb: IntersectionObserverCallback) {
+    this.cb = cb;
+    ControlledIO.instances.push(this);
+  }
+  observe(el: Element) {
+    this.targets.add(el);
+  }
+  unobserve(el: Element) {
+    this.targets.delete(el);
+  }
+  disconnect() {
+    this.targets.clear();
+  }
+  takeRecords(): IntersectionObserverEntry[] {
+    return [];
+  }
+  static isObserved(el: Element | null): boolean {
+    return !!el && ControlledIO.instances.some((io) => io.targets.has(el));
+  }
+  static fireSentinel() {
+    for (const io of ControlledIO.instances) {
+      for (const el of io.targets) {
+        // Only the scroll sentinel: card observers need geometry this
+        // mock does not model, and delivering to them proves nothing.
+        if (!el.isConnected || !el.classList.contains("feed-sentinel")) continue;
+        io.cb(
+          [{ isIntersecting: true, target: el } as IntersectionObserverEntry],
+          io as unknown as IntersectionObserver
+        );
+      }
+    }
+  }
+}
+
 describe("App", () => {
   it("loads the street feed on mount", async () => {
     const { container } = render(() => <App />);
@@ -293,6 +339,62 @@ describe("App", () => {
     );
   });
 
+  it("restores the SAVED open order: a stack above the artist stays on top", async () => {
+    // layerOrder is the whole point of the saved order. The fallback always
+    // puts the artist on top, which flipped artist-under-stack sessions and
+    // fed the black-screen class; ["artist","s0"] says the stack opened LAST
+    // and must come back on top with live images (the artist suppressed).
+    localStorage.setItem(
+      "pixtok_state_v2",
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        stack: makeFeedOf(1, 900).illusts,
+        artist: { id: 777, name: "RestoredArtist" },
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+        searchStack: [],
+        searchTags: [],
+        layerOrder: ["artist", "s0"],
+      })
+    );
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelector(".related-view")).not.toBeNull()
+    );
+    await waitFor(() =>
+      expect(container.querySelector(".artist-view")).not.toBeNull()
+    );
+    await waitFor(() =>
+      expect(container.querySelectorAll(".artist-view .feed-card").length).toBe(6)
+    );
+
+    const rvZ = parseInt(
+      (container.querySelector(".related-view") as HTMLElement).style.zIndex,
+      10
+    );
+    const avZ = parseInt(
+      (container.querySelector(".artist-view") as HTMLElement).style.zIndex,
+      10
+    );
+    expect(rvZ).toBeGreaterThan(avZ);
+
+    // The stack owns the image windows; the covered artist page does not.
+    await waitFor(() =>
+      expect(
+        container.querySelector(".related-view img")?.getAttribute("src")
+      ).toContain("/api/img")
+    );
+    expect(
+      container.querySelector(".artist-view img")?.getAttribute("src")
+    ).toContain("data:image/gif");
+  });
+
   it("surfaces request failures in the red top toast; tap dismisses", async () => {
     const { container } = render(() => <App />);
     await waitFor(() =>
@@ -310,11 +412,29 @@ describe("App", () => {
     expect(container.querySelector(".error-toast")).toBeNull();
   });
 
-  it("re-shows the gate screen when a mid-session request hits a locked gate", async () => {
+  it("re-shows the gate mid-session, then unlocking re-binds the feed sentinel", async () => {
+    // A page-1 cursor is REQUIRED for a sentinel to exist at all — the
+    // default fixture is a single page (next_url null) and would never
+    // observe one.
+    server.use(
+      http.post("/api/street", async ({ request }) => {
+        const raw = (await request.text()).trim();
+        return json(
+          raw === "" || raw === "{}"
+            ? makeFeedOf(30, 1, "/api/next?cursor=p2")
+            : makeFeedOf(10, 5000)
+        );
+      })
+    );
+    ControlledIO.instances.length = 0;
+    vi.stubGlobal("IntersectionObserver", ControlledIO);
     const { container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
+    // The controlled observer never fires on its own → no page 2 yet.
+    expect(requestCount("/api/street")).toBe(1);
+
     const reg = vi.mocked(setOnGateLocked);
     expect(reg).toHaveBeenCalledTimes(1);
     // The live trigger is a 403 "gate locked" inside request() — this
@@ -323,6 +443,31 @@ describe("App", () => {
     (reg.mock.calls[0][0] as () => void)();
     expect(container.querySelector(".gate-screen")).not.toBeNull();
     expect(container.querySelectorAll(".feed-card").length).toBe(0);
+
+    // Unlock (the gate's onUnlocked path) → the app UI remounts. Its
+    // sentinel must be RE-BOUND to the new DOM node, or infinite scroll
+    // stays dead for the rest of the session.
+    const input = container.querySelector(".gate-form input") as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "letmein" } });
+    await fireEvent.submit(input.closest("form")!);
+    await waitFor(() =>
+      expect(container.querySelector(".gate-screen")).toBeNull()
+    );
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+    // Unlock resumes the existing session: no second page-1 fetch.
+    expect(requestCount("/api/street")).toBe(1);
+    // The remounted sentinel must be observed by a LIVE observer.
+    expect(
+      ControlledIO.isObserved(container.querySelector(".feed-sentinel"))
+    ).toBe(true);
+
+    ControlledIO.fireSentinel();
+    await waitFor(() => expect(requestCount("/api/street")).toBe(2));
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(40)
+    );
   });
 
   it("Search item opens the search layer and searches", async () => {
@@ -398,6 +543,67 @@ describe("App", () => {
     expect(requestCount("/api/search/artworks")).toBe(0);
   });
 
+  it("boots past a malformed restored search layer instead of re-locking the gate", async () => {
+    // A v1 snapshot whose search arrays carry junk (null works, a user with
+    // no previews, primitive popular/related entries). The old loader
+    // validated only the array containers, so SearchScreen threw during
+    // boot — the gate-status catch re-locked the screen as
+    // gate:unreachable, and every reload repeated it. The layer must
+    // restore sanitized (empty results) and refetch on mount.
+    localStorage.setItem(
+      "pixtok_state_v2",
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+        searchStack: [
+          {
+            word: "fantasy",
+            mode: "works",
+            order: "date_d",
+            contentMode: "all",
+            workType: "all",
+            sMode: "s_tag_full",
+            aiType: "0",
+            dateMode: "all",
+            scd: "",
+            sce: "",
+            works: [null, 42],
+            popular: [{}],
+            related: [null],
+            users: [{ id: 5, name: "NoPreviews" }],
+            page: 1,
+            hasMore: false,
+          },
+        ],
+        searchTags: [null],
+        layerOrder: ["search0"],
+      })
+    );
+    const { container } = render(() => <App />);
+    // The app booted: feed requested, no gate screen.
+    await waitFor(() =>
+      expect(requestCount("/api/street")).toBeGreaterThan(0)
+    );
+    expect(container.querySelector(".gate-screen")).toBeNull();
+    await waitFor(() =>
+      expect(container.querySelector(".search-screen")).not.toBeNull()
+    );
+    expect(
+      (container.querySelector(".search-input") as HTMLInputElement).value
+    ).toBe("fantasy");
+    // Empty restored results -> exactly one mount refetch.
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
+  });
+
   it("Bookmarks tab loads the user's bookmarked works", async () => {
     const { getByText, container } = render(() => <App />);
     await waitFor(() =>
@@ -412,6 +618,99 @@ describe("App", () => {
     // The backend 400s a bookmarks page without an offset — the wire
     // must carry offset=0 on the first load.
     expect(paramsOf("/api/bookmarks")[0]).toMatchObject({ offset: "0" });
+  });
+
+  it("restores the private bookmarks pile from the snapshot", async () => {
+    localStorage.setItem(
+      "pixtok_state_v2",
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        bookmarkVis: "private",
+        bookmarkTag: "",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+      })
+    );
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(6)
+    );
+    // Private pile = the app-API feed, not the public web page.
+    expect(requestCount("/api/bookmarks/private")).toBeGreaterThan(0);
+    expect(requestCount("/api/bookmarks")).toBe(0);
+    const active = container.querySelector(".mode-pill.active");
+    expect(active?.textContent).toBe("Private");
+  });
+
+  it("restores the bookmark tag filter from the snapshot", async () => {
+    server.use(
+      http.get("/api/bookmarks/tags", () =>
+        json({ public: [{ name: "tag-one", count: 3 }], private: [] })
+      )
+    );
+    localStorage.setItem(
+      "pixtok_state_v2",
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        bookmarkVis: "public",
+        bookmarkTag: "tag-one",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+      })
+    );
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(requestCount("/api/bookmarks")).toBeGreaterThan(0)
+    );
+    // The first page load already carries the restored folder.
+    expect(paramsOf("/api/bookmarks")[0]).toMatchObject({
+      tag: "tag-one",
+      offset: "0",
+    });
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll(".mode-pill")].find(
+          (b) => b.textContent === "tag-one"
+        )?.className
+      ).toContain("active")
+    );
+  });
+
+  it("persists the bookmarks visibility pill in the snapshot", async () => {
+    const { getByText, container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+    await fireEvent.click(container.querySelector(".burger-pill")!);
+    await fireEvent.click(getByText("Bookmarks"));
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(8)
+    );
+    await fireEvent.click(
+      [...container.querySelectorAll(".mode-pill")].find(
+        (b) => b.textContent === "Private"
+      )!
+    );
+    await waitFor(() => expect(requestCount("/api/bookmarks/private")).toBe(1));
+    await new Promise((r) => setTimeout(r, 650)); // snapshot debounce
+    const snap = JSON.parse(localStorage.getItem("pixtok_state_v2")!);
+    expect(snap.bookmarkVis).toBe("private");
   });
 
   it("locks behind the gate and boots after unlocking", async () => {
@@ -763,6 +1062,18 @@ describe("App", () => {
         container.querySelectorAll(".related-view .feed-card").length
       ).toBe(9) // anchor + 8 related
     );
+
+    // The anchor id is the wire contract, and the handler echoes it into
+    // the batch: a hardcoded/stack[0] anchor would request a different id
+    // AND render a different set of titles.
+    expect(requestsTo("/api/illust/1/related")).toHaveLength(1);
+    const titles = [
+      ...container.querySelectorAll(".related-view .card-title"),
+    ].map((t) => t.textContent);
+    expect(titles).toEqual([
+      "Illust 1", // the tapped card is the stack's anchor
+      ...Array.from({ length: 8 }, (_, i) => `Illust ${901 + i}`),
+    ]);
   });
 
   it("first stack open shows the one-time hint; Got it dismisses it forever", async () => {
@@ -1003,7 +1314,7 @@ describe("App", () => {
     );
   });
 
-  it("settings live in the drawer; adding a blocked tag filters the feed on reload", async () => {
+  it("adding a blocked tag while the boot seed is in flight survives the seed", async () => {
     // Street feed: one work tagged swimsuit.
     server.use(
       http.post("/api/street", () =>
@@ -1013,26 +1324,27 @@ describe("App", () => {
             makeIllust({ id: 999, tags: [{ name: "swimsuit" }] }),
           ])
         )
+      ),
+      // Hold the boot seed open so the user edits the list WHILE it is in
+      // flight. A seed arriving later used to REPLACE the working list with
+      // the server's pre-edit snapshot: the pill vanished and the feed
+      // reloaded unfiltered (the ghost revert). It must merge.
+      http.get(
+        "/api/prefs/blocked-tags",
+        () =>
+          new Promise<Response>((resolve) => {
+            releaseSeed = resolve;
+          })
       )
     );
-    // The boot seed (GET blocked-tags) must land before the user adds a
-    // tag: a seed arriving later would REPLACE the working list with
-    // the server's old [] (the app treats boot as server truth).
-    const seeded = nextMockedResponse(
-      (r) =>
-        r.method === "GET" &&
-        new URL(r.url).pathname === "/api/prefs/blocked-tags"
-    );
+    let releaseSeed!: (r: Response) => void;
     const { container } = render(() => <App />);
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(30)
     );
-    await seeded;
-    // response:mocked fires before the caller's fetch promise resolves;
-    // one macrotask turn lets App's .then seed the store.
-    await new Promise((r) => setTimeout(r, 0));
 
-    // Open settings from the drawer.
+    // Open settings from the drawer and add the tag while the seed is
+    // still in flight.
     await fireEvent.click(container.querySelector(".burger-pill")!);
     await fireEvent.click(
       [...container.querySelectorAll(".drawer-item")].find(
@@ -1049,8 +1361,16 @@ describe("App", () => {
       "#swimsuit"
     );
 
-    // Switch to Ranking and back to Home — fresh street load,
-    // swimsuit work filtered out.
+    // The seed lands last, carrying the server's pre-edit list — it must
+    // not clobber the edit.
+    releaseSeed(json({ tags: [] }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(container.querySelector(".blocked-tag-pill")?.textContent).toBe(
+      "#swimsuit"
+    );
+
+    // Switch to Ranking and back to Home — fresh street load, swimsuit
+    // work filtered out.
     await fireEvent.click(container.querySelector(".burger-pill")!);
     await fireEvent.click(
       [...container.querySelectorAll(".drawer-item")].find(
@@ -1066,6 +1386,39 @@ describe("App", () => {
         (b) => b.textContent === "Home"
       )!
     );
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(29)
+    );
+  });
+
+  it("a boot tag seed filters the page already on screen", async () => {
+    // The seed arrives after the first street page rendered. The blocked
+    // work must disappear without waiting for the next feed load — the
+    // seed's own tags never re-filtered an already-rendered page.
+    server.use(
+      http.post("/api/street", () =>
+        json(
+          makeFeed([
+            ...makeFeedOf(29, 1).illusts.map((i) => ({ ...i, tags: [] })),
+            makeIllust({ id: 999, tags: [{ name: "swimsuit" }] }),
+          ])
+        )
+      ),
+      http.get(
+        "/api/prefs/blocked-tags",
+        () =>
+          new Promise<Response>((resolve) => {
+            releaseSeed = resolve;
+          })
+      )
+    );
+    let releaseSeed!: (r: Response) => void;
+    const { container } = render(() => <App />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".feed-card").length).toBe(30)
+    );
+
+    releaseSeed(json({ tags: ["swimsuit"] }));
     await waitFor(() =>
       expect(container.querySelectorAll(".feed-card").length).toBe(29)
     );
@@ -1379,6 +1732,137 @@ describe("App", () => {
         ".search-screen .search-input"
       ) as HTMLInputElement;
       expect(input.value).toBe("snow");
+    });
+
+    it("a covered search layer unloads its popular strip", async () => {
+      server.use(
+        http.post("/api/street", () =>
+          json(
+            makeFeed([
+              makeIllust({ id: 1, tags: [{ name: "snow" }] }),
+              makeIllust({ id: 2, tags: [{ name: "rain" }] }),
+            ])
+          )
+        ),
+        http.get("/api/search/artworks", () =>
+          json({
+            illusts: makeFeedOf(3, 2000).illusts,
+            total: 3,
+            last_page: 1,
+            page: 1,
+            next_url: null,
+            popular: makeFeedOf(2, 3000).illusts,
+            related_tags: [],
+          })
+        )
+      );
+      const { container } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBeGreaterThan(0)
+      );
+      await tapChip(container, "snow");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(1)
+      );
+      // The top layer's strip loads through the proxy.
+      await waitFor(() =>
+        expect(
+          container.querySelector(".search-popular-item img")?.getAttribute("src")
+        ).toContain("/api/img")
+      );
+
+      // Cover it with another tag page: the covered layer's strip must drop
+      // to the placeholder (it used to stay fully decoded underneath).
+      await tapChip(container, "rain");
+      await waitFor(() =>
+        expect(container.querySelectorAll(".search-screen").length).toBe(2)
+      );
+      const covered = container.querySelectorAll(".search-screen")[0];
+      await waitFor(() =>
+        expect(
+          covered.querySelector(".search-popular-item img")?.getAttribute("src")
+        ).toContain("data:image/gif")
+      );
+    });
+
+    it("a search layer covered by an artist page unloads avatars and previews", async () => {
+      server.use(
+        http.get("/api/search/users", () =>
+          json({
+            users: [
+              {
+                id: 77,
+                name: "User One",
+                avatar: "https://i.pximg.net/user-profile/img/1.jpg",
+                premium: false,
+                is_followed: false,
+                previews: makeFeedOf(3, 6000).illusts,
+              },
+            ],
+            total: 1,
+            page: 1,
+            next_url: null,
+          })
+        )
+      );
+      const { container, getByText } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await fireEvent.click(container.querySelector(".burger-pill")!);
+      await fireEvent.click(getByText("🔍 Search"));
+      await waitFor(() =>
+        expect(container.querySelector(".search-screen")).not.toBeNull()
+      );
+      const input = container.querySelector(".search-input") as HTMLInputElement;
+      await fireEvent.input(input, { target: { value: "fantasy" } });
+      await fireEvent.submit(input.closest("form")!);
+      await fireEvent.click(getByText("Artists"));
+      await waitFor(() =>
+        expect(container.querySelector(".search-user-row")).not.toBeNull()
+      );
+      const avatar = () =>
+        container.querySelector(".search-user-avatar")!.getAttribute("src");
+      await waitFor(() => expect(avatar()).toContain("/api/img"));
+
+      // Artist page on top → the search layer is covered; its avatar and
+      // previews must release their bitmaps.
+      await fireEvent.click(container.querySelector(".search-user-main")!);
+      await waitFor(() =>
+        expect(container.querySelector(".artist-view")).not.toBeNull()
+      );
+      await waitFor(() => expect(avatar()).toContain("data:image/gif"));
+      expect(
+        container.querySelector(".search-user-preview img")?.getAttribute("src")
+      ).toContain("data:image/gif");
+    });
+
+    it("persists the committed search query, not an unsubmitted draft", async () => {
+      const { container, getByText } = render(() => <App />);
+      await waitFor(() =>
+        expect(container.querySelectorAll(".feed-card").length).toBe(30)
+      );
+      await fireEvent.click(container.querySelector(".burger-pill")!);
+      await fireEvent.click(getByText("🔍 Search"));
+      await waitFor(() =>
+        expect(container.querySelector(".search-screen")).not.toBeNull()
+      );
+      const input = container.querySelector(".search-input") as HTMLInputElement;
+      await fireEvent.input(input, { target: { value: "fantasy" } });
+      await fireEvent.submit(input.closest("form")!);
+      await waitFor(() =>
+        expect(
+          container.querySelectorAll(".search-screen .feed-card").length
+        ).toBe(3)
+      );
+
+      // Abandon a draft afterwards. It used to be reported as the query and
+      // persisted: the next boot promoted "draft" while showing fantasy's
+      // results, and never refetched.
+      await fireEvent.input(input, { target: { value: "draft" } });
+      await new Promise((r) => setTimeout(r, 650)); // snapshot debounce
+      const snap = JSON.parse(localStorage.getItem("pixtok_state_v2")!);
+      expect(snap.searchStack[0].word).toBe("fantasy");
     });
 
     it("opening a search page during a close animation keeps the new top layer alive", async () => {

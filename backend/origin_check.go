@@ -51,7 +51,9 @@ func originCheckPathExempt(path string) bool {
 //
 // Rejections are LOGGED with method/path/Origin/Host (found live Aug 24:
 // originCheck wrapped OUTSIDE logRequests, so its 403s produced no REQ
-// line and a broken login flow left zero trace in the journal).
+// line and a broken login flow left zero trace in the journal). It now
+// sits INSIDE the rate limiter, so a reject also produces a REQ line and
+// pays for the token it spends.
 func originCheck(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -63,8 +65,12 @@ func originCheck(next http.Handler) http.Handler {
 			u, err := url.Parse(origin)
 			hostMatch := err == nil && strings.EqualFold(u.Hostname(), hostnameOf(r.Host))
 			if !hostMatch {
-				log.Printf("WARN origin rejected: %s %s origin=%q host=%q",
-					r.Method, r.URL.Path, origin, r.Host)
+				// Every field here comes off the wire: sanitize + cap
+				// each one (a 100 KB Origin used to write a 100 KB
+				// journal line, before this check was behind the
+				// rate limiter).
+				log.Printf("WARN origin rejected: %s %q origin=%q host=%q",
+					logField(r.Method), logField(r.URL.Path), logField(origin), logField(r.Host))
 				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 				return
 			}

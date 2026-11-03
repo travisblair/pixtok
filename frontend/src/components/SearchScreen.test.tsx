@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { http, HttpResponse } from "msw";
 import SearchScreen from "./SearchScreen";
+import type { SearchState } from "./SearchScreen";
 import { makeFeedOf } from "../test-fixtures";
 import {
   requestCount,
@@ -249,11 +250,31 @@ describe("SearchScreen", () => {
     await search(container, "broken");
     // The failed fresh run must flag the error.
     await waitFor(() => expect(container.textContent).toContain("Couldn't search"));
+    // …and drop the previous query's results: they were rendered under the
+    // NEW query, and the snapshot then persisted that mismatched pair.
+    expect(container.querySelectorAll(".feed-card").length).toBe(0);
+    expect(container.querySelector(".search-popular-strip")).toBeNull();
     // No continuation of the OLD result set may fire afterwards.
     await new Promise((r) => setTimeout(r, 100));
     expect(
       requestParams("/api/search/artworks").filter((p) => p.word === "broken")
     ).toHaveLength(1);
+  });
+
+  it("reports the committed query, never the unsubmitted draft", async () => {
+    const states: SearchState[] = [];
+    const { container } = render(() => (
+      <SearchScreen {...baseProps} onState={(s) => states.push(s)} />
+    ));
+    const input = container.querySelector(".search-input") as HTMLInputElement;
+    // Type a draft and abandon it — it must not become the persisted query.
+    await fireEvent.input(input, { target: { value: "draft" } });
+    await search(container, "fantasy");
+    await waitFor(() => expect(requestCount("/api/search/artworks")).toBe(1));
+    await waitFor(() =>
+      expect(states[states.length - 1]?.word).toBe("fantasy")
+    );
+    expect(states.map((s) => s.word)).not.toContain("draft");
   });
 
   it("opening Filters and picking a content mode refetches with the new mode", async () => {

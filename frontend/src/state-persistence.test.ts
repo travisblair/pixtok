@@ -42,6 +42,8 @@ function baseSnapshot(): SnapshotInput {
     rankMode: "day",
     newestR18: false,
     topMode: "all",
+    bookmarkVis: "public",
+    bookmarkTag: "",
     stack: [makeIllust({ id: 9 })],
     artist: { id: 42, name: "ArtistName" },
     recs: [makeIllust({ id: 11 })],
@@ -280,6 +282,133 @@ describe("saveSnapshot/loadSnapshot", () => {
     const loaded = loadSnapshot()!;
     expect(loaded.searchStack.length).toBe(1);
     expect(loaded.searchTags).toEqual(["snow"]);
+  });
+
+  it("deep-validates search works/users so a malformed entry can't throw out of boot()", () => {
+    // SearchScreen reads w.id at mount and u.previews.slice in the artist
+    // rows. Only the array CONTAINERS used to be checked, so null works /
+    // preview-less users passed validation and threw during boot — the
+    // gate catch re-locked the app and the bad state was never repaired.
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [],
+        recs: [],
+        artist: null,
+        searchStack: [
+          {
+            ...makeSearchState("snow"),
+            works: [null, 42, makeIllust({ id: 31 })],
+            popular: [{ nope: true }, makeIllust({ id: 32 })],
+            related: [{ name: 5 }, { name: "miku" }],
+            users: [
+              { id: 5, name: "no-previews", avatar: "b" }, // previews missing → []
+              { id: "6", name: "bad-id", avatar: "c" }, // dropped (id)
+              {
+                id: 7,
+                name: "ok",
+                avatar: "a",
+                previews: [null, makeIllust({ id: 33 })],
+              },
+            ],
+          },
+        ],
+        searchTags: ["snow"],
+      })
+    );
+    const s = loadSnapshot()!.searchStack[0];
+    expect(s.works.map((w) => w.id)).toEqual([31]);
+    expect(s.popular.map((w) => w.id)).toEqual([32]);
+    expect(s.related).toEqual([{ name: "miku" }]);
+    expect(s.users.map((u) => u.id)).toEqual([5, 7]);
+    expect(s.users[0].previews).toEqual([]);
+    expect(s.users[1].previews.map((p) => p.id)).toEqual([33]);
+  });
+
+  it("defaults malformed search filter fields instead of passing them through", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "home",
+        stack: [],
+        recs: [],
+        artist: null,
+        searchStack: [
+          { word: "x", works: [], users: [], mode: "weird", page: "2", hasMore: 1 },
+        ],
+      })
+    );
+    const s = loadSnapshot()!.searchStack[0];
+    expect(s.mode).toBe("works");
+    expect(s.page).toBe(0);
+    expect(s.hasMore).toBe(false);
+    expect(s.order).toBe("date_d");
+  });
+
+  it("migrates a pre-bookmark-pills v1 payload to public / no tag", () => {
+    // The fields are additive on the same v:1 payload: an older snapshot
+    // simply lacks them, and the old default view (Public, unfiltered) is
+    // the only safe reading.
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        rankContent: "all",
+        rankMode: "day",
+        newestR18: false,
+        topMode: "all",
+        stack: [],
+        artist: null,
+        recs: [],
+        recsSource: "",
+        modalOpen: false,
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.feedType).toBe("bookmarks");
+    expect(loaded.bookmarkVis).toBe("public");
+    expect(loaded.bookmarkTag).toBe("");
+  });
+
+  it("round-trips the bookmark pills and drops a tag on the private pile", () => {
+    const snap = baseSnapshot();
+    snap.feedType = "bookmarks";
+    snap.bookmarkVis = "public";
+    snap.bookmarkTag = "tag-one";
+    saveSnapshot(snap);
+    const loaded = loadSnapshot()!;
+    expect(loaded.bookmarkVis).toBe("public");
+    expect(loaded.bookmarkTag).toBe("tag-one");
+
+    // Private has no tag folders — a saved tag must not survive with it.
+    snap.bookmarkVis = "private";
+    snap.bookmarkTag = "tag-one";
+    saveSnapshot(snap);
+    const priv = loadSnapshot()!;
+    expect(priv.bookmarkVis).toBe("private");
+    expect(priv.bookmarkTag).toBe("");
+  });
+
+  it("treats an unknown bookmarkVis value as public", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        v: 1,
+        feedType: "bookmarks",
+        stack: [],
+        recs: [],
+        artist: null,
+        bookmarkVis: "weird",
+        bookmarkTag: "tag-one",
+      })
+    );
+    const loaded = loadSnapshot()!;
+    expect(loaded.bookmarkVis).toBe("public");
+    expect(loaded.bookmarkTag).toBe("tag-one");
   });
 
   it("returns null for corrupt JSON", () => {

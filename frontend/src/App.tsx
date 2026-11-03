@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { logEvent, reportApiError, setOnGateLocked, setOnRequestError } from "./api/client";
 import { getStreet, getNewest, getNewestNext, getNextPage, getTop, getTopIllust, getRecommended } from "./api/feeds";
 import { getBookmarkIds, getBookmarkTags, getBookmarks, getBookmarksNext, getBookmarksPrivate } from "./api/bookmarks";
@@ -390,6 +390,10 @@ export default function App() {
       setRankMode(isRankingMode(snap.rankMode) ? snap.rankMode : "day");
       setNewestR18(!!snap.newestR18);
       setTopMode(snap.topMode === "r18" ? "r18" : "all");
+      // Bookmarks pills are navigation state too — a reload on the Private
+      // pile must not snap back to Public (the pile then looked lost).
+      setBookmarkVis(snap.bookmarkVis);
+      setBookmarkTag(snap.bookmarkTag);
 
       layers.restore(snap);
 
@@ -472,6 +476,8 @@ export default function App() {
     void rankMode();
     void newestR18();
     void topMode();
+    void bookmarkVis();
+    void bookmarkTag();
     void stack();
     void artist();
     void recs();
@@ -496,6 +502,24 @@ export default function App() {
     }, 500);
   });
 
+  // A blocked-tag change must apply to what is ALREADY on screen: the boot
+  // seed lands after the first page rendered, and Settings/tag-popup edits
+  // happen while the current page is visible. Without this the filter only
+  // took effect on the next feed load — a blocked work stayed on screen
+  // under a "Blocked #tag" toast.
+  createEffect(
+    on(
+      blockedTags,
+      (tags) => {
+        if (tags.length === 0) return;
+        setIllusts((prev) =>
+          prev.filter((i) => filterBlockedTags([i], tags).length > 0)
+        );
+      },
+      { defer: true }
+    )
+  );
+
   /** The full current state, as the debounced saver would write it. */
   function buildSnapshotState() {
     return {
@@ -504,6 +528,8 @@ export default function App() {
       rankMode: rankMode(),
       newestR18: newestR18(),
       topMode: topMode(),
+      bookmarkVis: bookmarkVis(),
+      bookmarkTag: bookmarkTag(),
       ...layers.layerSnapshot(),
       recs: recs(),
       recsSource: recsSource(),

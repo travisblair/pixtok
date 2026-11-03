@@ -69,7 +69,13 @@ export default function UgoiraPlayer(props: {
   let staticLoading = false;
   let idx = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let loadSeq = 0; // bumped on teardown — in-flight loads discard themselves
+  // One generation per load channel, and they MUST stay independent. A
+  // shared counter made the poster retry invalidate the FRAME load it
+  // was started alongside: the frame load discarded itself at its seq
+  // guard without touching status, leaving the spinner up forever with
+  // no badge left to tap (the retry deadlock). teardown bumps both.
+  let loadSeq = 0; // frames
+  let staticSeq = 0; // poster
   let zipAbort: AbortController | undefined; // kills the in-flight zip fetch
   let staticAbort: AbortController | undefined; // kills the in-flight poster fetch
 
@@ -92,7 +98,11 @@ export default function UgoiraPlayer(props: {
   }
 
   function drawStatic() {
-    if (!canvasRef || !staticFrame) return;
+    // The frame loop owns the canvas once frames are decoded — a poster
+    // that was retried alongside playback and lands late must not paint
+    // over the animation (teardown clears `frames` first, so the poster
+    // still returns when the card is parked).
+    if (!canvasRef || !staticFrame || frames.length > 0) return;
     const canvas = canvasRef;
     canvas.width = staticFrame.width;
     canvas.height = staticFrame.height;
@@ -111,6 +121,7 @@ export default function UgoiraPlayer(props: {
         ? "poster"
         : null;
     loadSeq++;
+    staticSeq++;
     if (inFlight) {
       logEvent("ugoira", "aborted", {
         id: props.illustId,
@@ -132,7 +143,7 @@ export default function UgoiraPlayer(props: {
 
   async function loadStatic() {
     if (staticFrame || staticLoading) return;
-    const seq = ++loadSeq;
+    const seq = ++staticSeq;
     staticLoading = true;
     setError(false);
     const controller = new AbortController();
@@ -150,17 +161,21 @@ export default function UgoiraPlayer(props: {
       if (!res.ok) throw new Error(`static fetch failed: ${res.status}`);
       const blob = await res.blob();
       const frame = await loadFrame(blob, props.maxPosterSide ?? POSTER_MAX_SIDE);
-      if (seq !== loadSeq) return; // torn down or superseded while fetching
+      if (seq !== staticSeq) return; // torn down or superseded while fetching
       staticFrame = frame;
-      drawStatic();
       setPosterReady(true);
+      // Paint only when the poster is the only thing on the canvas. A
+      // poster retried alongside playback lands after the spinner/frames
+      // took over — painting it would flicker over them (teardown repaints
+      // it directly from the retained staticFrame).
+      if (frames.length === 0 && status() === "idle") drawStatic();
     } catch (e) {
       if (e instanceof ApiError) reportApiError(e);
       if (e instanceof Error && e.name === "AbortError") {
         // Deadline abort (seq still current) = the poster genuinely
         // stalled — badge it like any other failure. Teardown aborts
         // (seq bumped) stay silent; teardown() already logged them.
-        if (seq === loadSeq) {
+        if (seq === staticSeq && status() === "idle") {
           logEvent("ugoira", "poster-timeout", { id: props.illustId });
           setError(true);
         }
@@ -171,7 +186,10 @@ export default function UgoiraPlayer(props: {
         id: props.illustId,
         err: String(e),
       });
-      if (seq === loadSeq) setError(true);
+      // Only badge when there is nothing else to show: a poster retry
+      // rides along with a frame load, and its failure must not replace
+      // the spinner/playing canvas with "tap to retry".
+      if (seq === staticSeq && status() === "idle") setError(true);
     } finally {
       clearTimeout(timeout);
       staticLoading = false;

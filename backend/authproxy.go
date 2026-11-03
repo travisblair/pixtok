@@ -39,37 +39,45 @@ const loginFlowCookie = "pixtok_login"
 
 var browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
-// rewriteCookie rebuilds a Set-Cookie header without Domain=/Secure=/
-// Expires=/Max-Age=/SameSite. Host-only cookies on our origin are the
-// whole trick: the browser stores and replays them on follow-up
-// requests through the proxy, so the backend can read pixiv's session.
-// `secure` is secureForRequest(r): on HTTPS transports the Secure
-// attribute is preserved (reviewer finding: stripping it unconditionally
-// let session cookies ride plaintext on the public tunnel); on HTTP
-// transports it must go, or the browser stores but never sends the
-// cookie and the session silently breaks.
+// rewriteCookie rebuilds a Set-Cookie header for OUR origin: Domain= is
+// always stripped and Secure is kept only on HTTPS. Host-only cookies on
+// our origin are the whole trick: the browser stores and replays them on
+// follow-up requests through the proxy, so the backend can read pixiv's
+// session. `secure` is secureForRequest(r): on HTTPS transports the
+// Secure attribute is preserved (reviewer finding: stripping it
+// unconditionally let session cookies ride plaintext on the public
+// tunnel); on HTTP transports it must go, or the browser stores but
+// never sends the cookie and the session silently breaks.
+//
+// rewriteCookie is a parser, not a filter. The old field-by-field filter
+// dropped Max-Age and Expires, which turned a DELETION cookie
+// (`Set-Cookie: X=; Max-Age=0`, how pixiv logs a session out) into a
+// fresh SESSION cookie that shadowed the deleted one until the browser
+// closed — a logout that silently kept working for the rest of the day.
+// Deleting is not the only case: any real TTL was lost the same way, so
+// the browser's copy outlived our proxy's view of it.
+//
+// Kept rewrites: Domain is always stripped (the cookie must be scoped to
+// our origin, not pixiv's), Secure is kept only when the deployment is
+// HTTPS, and SameSite is dropped — SameSite=None without Secure is
+// rejected outright by browsers, and our proxy is same-origin anyway.
 func rewriteCookie(setCookie string, secure bool) string {
-	parts := strings.Split(setCookie, ";")
-	out := make([]string, 0, 3)
-	for _, p := range parts {
-		t := strings.TrimSpace(p)
-		if t == "" {
-			continue
-		}
-		lower := strings.ToLower(t)
-		if strings.HasPrefix(lower, "domain=") ||
-			(lower == "secure" && !secure) ||
-			strings.HasPrefix(lower, "expires=") ||
-			strings.HasPrefix(lower, "max-age=") ||
-			strings.HasPrefix(lower, "samesite=") {
-			continue
-		}
-		out = append(out, t)
-	}
-	if len(out) == 0 {
+	c, err := http.ParseSetCookie(setCookie)
+	if err != nil || c.Name == "" {
+		// Malformed upstream cookie: never relay a half-parsed one.
 		return ""
 	}
-	return strings.Join(out, "; ")
+	out := &http.Cookie{
+		Name:     c.Name,
+		Value:    c.Value,
+		Path:     c.Path,
+		Domain:   "",
+		MaxAge:   c.MaxAge,
+		Expires:  c.Expires,
+		HttpOnly: c.HttpOnly,
+		Secure:   c.Secure && secure,
+	}
+	return out.String()
 }
 
 // rewriteLocation maps an upstream redirect back onto our proxy paths so
@@ -134,6 +142,30 @@ func isCORSHeader(k string) bool {
 	case "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials",
 		"Access-Control-Allow-Headers", "Access-Control-Allow-Methods",
 		"Access-Control-Expose-Headers", "Access-Control-Max-Age":
+		return true
+	}
+	return false
+}
+
+// loginProxyRewriteCap bounds a JSON/HTML body that must be buffered for
+// URL rewriting. Over the cap the proxy answers 502 instead of relaying
+// JSON that was cut in half (the old behavior sent a truncated body with
+// a Content-Length matching the truncation, so the client saw
+// complete-length but invalid JSON).
+const loginProxyRewriteCap = 2 << 20
+
+// loginProxyStreamCap bounds a streamed passthrough body; truncation past
+// it is logged (headers are already committed, so a status is impossible).
+const loginProxyStreamCap = 8 << 20
+
+// isHopByHopHeader reports whether k is connection-scoped (RFC 7230
+// §6.1) and therefore must not be copied from an upstream response onto
+// ours. Content-Length/Content-Encoding are handled separately because
+// this proxy caps and rewrites bodies.
+func isHopByHopHeader(k string) bool {
+	switch k {
+	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade":
 		return true
 	}
 	return false
@@ -214,12 +246,20 @@ func isURLBoundary(b byte) bool {
 
 // registerAuthProxy wires the proxied-login routes. /api/auth/px/* is
 // hit by browser NAVIGATIONS during the login flow — gated by the
-// login-flow cookie set at /api/auth/pkce/start (only someone who
-// started a flow through the key-gated start route gets proxy access;
-// and the flow cookie expires in 10 minutes).
+// login-flow cookie set at /api/auth/pkce/start: the cookie value must
+// be a LIVE entry in the server-side pkce store, so only someone who
+// started a flow through the start route gets proxy access (and entries
+// expire with pkceTTL).
 // authProxyClientTimeout: login-flow proxy responses are relayed to the
 // browser, never followed server-side, so 30s is ample for a navigation.
 const authProxyClientTimeout = 30 * time.Second
+
+// loginProxyMaxConcurrent bounds CONCURRENT login-proxy upstream calls.
+// The proxy legs are gate-exempt, and the auth proxy uses its own
+// http.Client (not pixiv.Client), so without this bound a caller could
+// drive unbounded simultaneous TLS handshakes at Pixiv — the exact
+// 502-storm condition pixiv.Client.upstreamSlots exists to prevent.
+const loginProxyMaxConcurrent = 4
 
 func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// CRITICAL: never follow redirects server-side. Each upstream
@@ -234,6 +274,9 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 			return http.ErrUseLastResponse
 		},
 	}
+	// Per-server (not package-level) so one test server's saturated
+	// slots can never stall another's.
+	slots := make(chan struct{}, loginProxyMaxConcurrent)
 
 	// serveProxy forwards one request to the given upstream kind, applies
 	// the cookie/Location rewrites, and rewrites absolute pixiv URLs inside
@@ -241,7 +284,11 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 	// 2FA URLs — the browser must follow them back through this proxy).
 	serveProxy := func(kind, rest string, w http.ResponseWriter, r *http.Request) {
 		c, err := r.Cookie(loginFlowCookie)
-		if err != nil || c.Value == "" {
+		if err != nil || c.Value == "" || !pkce.peek(c.Value) {
+			// A non-empty cookie is NOT proof of a flow: its value is
+			// entirely caller-controlled. Requiring a live store entry
+			// is what stops these gate-exempt legs from being an
+			// unauthenticated relay into Pixiv's login endpoints.
 			http.Error(w, "login flow not started", http.StatusForbidden)
 			return
 		}
@@ -271,7 +318,21 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 		// Cap proxied request bodies — a flow-cookie holder should not be
 		// able to stream unbounded data through us into Pixiv.
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		req, err := http.NewRequest(r.Method, authProxyTargets[kind]+rest, r.Body)
+		// Bounded upstream concurrency (see loginProxyMaxConcurrent).
+		// Acquisition honors the request context: a browser that gave up
+		// (or a shutdown) must not queue a goroutine behind a slow slot.
+		// The slot is held for the whole relay — the bound is the point,
+		// and a single-user login flow has no second leg to starve.
+		select {
+		case slots <- struct{}{}:
+		case <-r.Context().Done():
+			http.Error(w, "request canceled", http.StatusRequestTimeout)
+			return
+		}
+		defer func() { <-slots }()
+		// Request context (L5): a client disconnect cancels the upstream
+		// call instead of letting it run to the 30s timeout.
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, authProxyTargets[kind]+rest, r.Body)
 		if err != nil {
 			http.Error(w, "proxy build failed", http.StatusBadGateway)
 			return
@@ -334,16 +395,26 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 			resp.Header.Set("Location", rewriteLocation(loc))
 		}
 
+		// Copy upstream headers, minus the ones that describe the
+		// upstream connection rather than the response:
+		//   - Content-Length / Content-Encoding: bodies are capped and
+		//     sometimes rewritten, so these would desync the response
+		//     (the rewrite branch sets its own; passthrough is chunked).
+		//   - RFC 7230 hop-by-hop headers (plus every header named in
+		//     Connection): they are connection-scoped and a buggy or
+		//     hostile upstream must not influence OUR connection
+		//     semantics (review finding).
+		//   - Access-Control-*: the UPSTREAM's CORS posture; the login
+		//     SPA is same-origin through this proxy and needs no grants.
+		connectionNamed := map[string]bool{}
+		for _, f := range strings.Split(resp.Header.Get("Connection"), ",") {
+			if name := strings.TrimSpace(f); name != "" {
+				connectionNamed[http.CanonicalHeaderKey(name)] = true
+			}
+		}
 		for k, vs := range resp.Header {
-			// Content-Length and Content-Encoding must not be copied
-			// verbatim: bodies are truncated (2-8 MB) and rewritten below,
-			// so an upstream Content-Length would desync the response. The
-			// rewrite branch sets its own; the passthrough streams chunked.
-			// Access-Control-* is the UPSTREAM's CORS posture — copying it
-			// onto our origin is needless and could confuse browsers
-			// (reviewer finding). The login SPA is same-origin through
-			// this proxy and needs no CORS grants.
-			if k == "Content-Length" || k == "Content-Encoding" || isCORSHeader(k) {
+			if k == "Content-Length" || k == "Content-Encoding" ||
+				isHopByHopHeader(k) || connectionNamed[k] || isCORSHeader(k) {
 				continue
 			}
 			for _, v := range vs {
@@ -363,17 +434,41 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 		rewriteBody := strings.Contains(ct, "json") ||
 			(kind == "accounts" && strings.Contains(r.URL.Path, "/post-redirect") && strings.Contains(ct, "html"))
 		if rewriteBody {
-			body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-			if err == nil {
-				body = rewriteBodyURLs(body)
-				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-				w.WriteHeader(resp.StatusCode)
-				_, _ = w.Write(body)
+			// Read one byte past the cap so an oversized body is DETECTED
+			// rather than silently truncated into invalid JSON served
+			// with a matching (but lie-shaped) Content-Length.
+			body, err := io.ReadAll(io.LimitReader(resp.Body, loginProxyRewriteCap+1))
+			if err != nil {
+				log.Printf("ERROR login proxy: reading rewrite body: %v", err)
+				http.Error(w, "upstream read failed", http.StatusBadGateway)
 				return
 			}
+			if len(body) > loginProxyRewriteCap {
+				log.Printf("ERROR login proxy: %s body exceeds %d bytes — refusing to relay truncated JSON", r.URL.Path, loginProxyRewriteCap)
+				http.Error(w, "upstream response too large", http.StatusBadGateway)
+				return
+			}
+			body = rewriteBodyURLs(body)
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(body)
+			return
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, io.LimitReader(resp.Body, 8<<20))
+		written, err := io.Copy(w, io.LimitReader(resp.Body, loginProxyStreamCap))
+		if err != nil {
+			// Headers are already committed: log the truncation, never
+			// try to write a status into the body.
+			log.Printf("ERROR login proxy: stream failed after %d bytes: %v", written, err)
+			return
+		}
+		// One extra read tells us the cap cut the body — the client got a
+		// complete-looking 200 with a truncated page, which must at least
+		// be visible in the journal.
+		var extra [1]byte
+		if n, _ := resp.Body.Read(extra[:]); n > 0 {
+			log.Printf("WARN login proxy: stream truncated at the %d-byte cap (%s)", loginProxyStreamCap, r.URL.Path)
+		}
 	}
 
 	// px routes: the login flow's navigations (/api/auth/px/<kind>/...).
@@ -477,6 +572,14 @@ func registerAuthProxy(mux *http.ServeMux, api pixivAPI, pkce *pkceStore) {
 // request's cookie jar (it lives on our origin now), scrape + persist
 // the bound csrf token, and land the user back in the app.
 func handlePkceCallback(w http.ResponseWriter, r *http.Request, api pixivAPI, pkce *pkceStore) {
+	// Budget: ExchangePkce (30s) then ScrapeCsrfFor→webGet (30s) = 60s
+	// of SEQUENTIAL upstream work, then token/session persistence and
+	// the redirect — 2 × 30s + 10s margin = 70s (authCallbackWriteDeadline).
+	// The global 15s WriteTimeout used to kill this response after the
+	// exchange had already rotated the refresh token, so the browser
+	// reported failure while the next boot was logged in. The deadline
+	// must cover the whole chain or the redirect is never written.
+	setSlowHandlerWriteDeadline(w, authCallbackWriteDeadline, "login callback")
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "missing code", http.StatusBadRequest)
