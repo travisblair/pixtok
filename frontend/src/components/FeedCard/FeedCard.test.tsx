@@ -411,3 +411,96 @@ describe("FeedCard touch gestures", () => {
     expect(onImmersiveChange).toHaveBeenLastCalledWith(false);
   });
 });
+
+describe("FeedCard selection mode (bookmarks → private)", () => {
+  it("desktop click toggles selection instead of opening a stack", async () => {
+    const illust = makeIllust({ id: 7 });
+    const onTap = vi.fn();
+    const onSelectToggle = vi.fn();
+    const { container } = render(() => (
+      <FeedCard
+        illust={illust}
+        onTap={onTap}
+        selectable
+        selected={false}
+        onSelectToggle={onSelectToggle}
+      />
+    ));
+
+    await fireEvent.click(container.querySelector(".card-overlay")!);
+    expect(onSelectToggle).toHaveBeenCalledWith(7);
+    expect(onTap).not.toHaveBeenCalled();
+    expect(container.querySelector(".card-select-box")).toBeTruthy();
+    expect(container.querySelector(".card-select-box")!.textContent).toBe("");
+  });
+
+  it("renders the checked checkbox when selected", () => {
+    const illust = makeIllust({ id: 7 });
+    const { container } = render(() => (
+      <FeedCard illust={illust} selectable selected onSelectToggle={() => {}} />
+    ));
+    const box = container.querySelector(".card-select-box")!;
+    expect(box.classList.contains("checked")).toBe(true);
+    expect(box.textContent).toBe("✓");
+    expect(container.querySelector(".feed-card")!.classList.contains("selected")).toBe(
+      true
+    );
+  });
+
+  it("touch single tap toggles selection (deferred), never opens a stack", async () => {
+    const illust = makeIllust({ id: 7 });
+    const onTap = vi.fn();
+    const onSelectToggle = vi.fn();
+    const { container } = render(() => (
+      <FeedCard
+        illust={illust}
+        onTap={onTap}
+        selectable
+        onSelectToggle={onSelectToggle}
+      />
+    ));
+    const card = container.querySelector(".feed-card")!;
+
+    vi.useFakeTimers();
+    try {
+      tapCard(card);
+      expect(onSelectToggle).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(300);
+      expect(onSelectToggle).toHaveBeenCalledWith(7);
+      expect(onTap).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("double-tap is inert in selection mode — no like, no selection flip", async () => {
+    const illust = makeIllust({ id: 7 });
+    const onSelectToggle = vi.fn();
+    const { container } = render(() => (
+      <FeedCard illust={illust} selectable onSelectToggle={onSelectToggle} />
+    ));
+    const card = container.querySelector(".feed-card")!;
+
+    tapCard(card, 100, 100);
+    tapCard(card, 103, 102);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onSelectToggle).not.toHaveBeenCalled();
+    expect(requestsTo("/api/illust/7/like")).toHaveLength(0);
+    expect(requestsTo("/api/illust/7/unlike")).toHaveLength(0);
+    expect(container.querySelector(".heart-flash")).toBeNull();
+  });
+
+  it("keeps the heart control functional while selectable", async () => {
+    const illust = makeIllust({ id: 7 });
+    const onSelectToggle = vi.fn();
+    const { container } = render(() => (
+      <FeedCard illust={illust} selectable onSelectToggle={onSelectToggle} />
+    ));
+    await fireEvent.click(container.querySelector(".like-btn")!);
+    await waitFor(() =>
+      expect(requestsTo("/api/illust/7/like")).toHaveLength(1)
+    );
+    expect(onSelectToggle).not.toHaveBeenCalled();
+  });
+});

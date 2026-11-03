@@ -1686,3 +1686,157 @@
   font-size: 12px;
   margin-left: 6px;
 }
+
+/* ── Bookmarks → move-to-private selection ─────────────────────────── */
+
+/* Selection chrome. Fixed to the bottom: the header's height varies
+   (tag folders add a row), so anchoring below it would overlap; the
+   bar floats above the card overlay, thumb-reachable, and never shifts
+   the feed's snap geometry. */
+.selection-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 12;
+  display: flex;
+  justify-content: center;
+  padding: 0 12px;
+  pointer-events: none;
+}
+
+.selection-bar > * {
+  pointer-events: auto;
+  max-width: 100%;
+}
+
+.selection-enter {
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+}
+
+.selection-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-radius: 24px;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+}
+
+.selection-count {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  padding: 0 4px;
+}
+
+.selection-bar .mode-pill {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.selection-bar .mode-pill.active {
+  background: #fff;
+  color: #000;
+}
+
+.selection-bar .mode-pill:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.move-progress span {
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Card checkbox overlay — top-left, clear of .card-right-stack
+   (heart/gear, bottom-right) and the bottom overlay. */
+.card-select-box,
+.grid-select-box {
+  position: absolute;
+  z-index: 4;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/* Below the fixed header's two bookmark rows (pills + tag folders). */
+.card-select-box {
+  top: 96px;
+  left: 14px;
+}
+
+.grid-select-box {
+  top: 6px;
+  left: 6px;
+}
+
+.card-select-box.checked,
+.grid-select-box.checked {
+  background: #fff;
+  color: #000;
+  border-color: #fff;
+}
+
+.feed-card.selected,
+.grid-cell.selected {
+  outline: 3px solid #fff;
+  outline-offset: -3px;
+}
+
+/* Move report (BaseModal body) */
+.move-report-note {
+  margin: 0 0 10px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.9rem;
+}
+
+.move-report-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50dvh;
+  overflow-y: auto;
+}
+
+.move-report-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  font-size: 0.85rem;
+}
+
+.move-report-id {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #fff;
+}
+
+.move-report-kind {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.move-report-loss {
+  flex-basis: 100%;
+  color: #ffb4b4;
+  font-size: 0.78rem;
+}

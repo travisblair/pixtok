@@ -27,10 +27,12 @@ import ArtistView from "./components/ArtistView";
 import SearchScreen from "./components/SearchScreen";
 import GateScreen from "./components/GateScreen";
 import ConfigModal from "./components/ConfigModal";
+import BaseModal from "./components/BaseModal";
 import TagPopup from "./components/TagPopup";
 import LoginScreen from "./components/LoginScreen";
 import FeedHeader from "./components/FeedHeader";
 import FeedArea from "./components/FeedArea";
+import SelectionBar from "./components/SelectionBar";
 import FeedToast from "./components/FeedToast";
 import ErrorToast from "./components/ErrorToast";
 import {
@@ -43,6 +45,8 @@ import { useFeedSentinel } from "./hooks/useFeedSentinel";
 import { useToast } from "./hooks/useToast";
 import { useEdgeBackGesture } from "./hooks/useEdgeBackGesture";
 import { useLayers } from "./hooks/useLayers";
+import { useBookmarkMover } from "./hooks/useBookmarkMover";
+import type { MoveFailureKind, MoveResult } from "./hooks/useBookmarkMover";
 import "./App.css";
 
 export default function App() {
@@ -78,6 +82,8 @@ export default function App() {
   const [configOpen, setConfigOpen] = createSignal(false);
   const [loginOpen, setLoginOpen] = createSignal(false);
   const [tagsIllust, setTagsIllust] = createSignal<PixivIllust | null>(null);
+  // Bookmarks → move-to-private failure/cancel report (BaseModal).
+  const [moveReport, setMoveReport] = createSignal<MoveResult | null>(null);
 
   let sentinelRef: HTMLDivElement | undefined;
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -251,6 +257,61 @@ export default function App() {
   }
 
   const showToast = toast.show;
+
+  // Bookmarks → private mover. The queue lives HERE (not in the
+  // SelectionBar) so it keeps running if the bar unmounts mid-run; only
+  // leaving the bookmarks tab / switching piles aborts it, at the next
+  // work boundary. Calls the shared unlike/like API functions directly —
+  // never a card's toggleLike — so the bookmarks tab's unlike-removes-
+  // the-card handler can't fire for moves.
+  const mover = useBookmarkMover({
+    onDone: (result) => {
+      if (result.failures.length === 0) {
+        showToast(
+          `Moved ${result.moved} ${result.moved === 1 ? "work" : "works"} to private`,
+          false
+        );
+      } else {
+        showToast(
+          `Move stopped — ${result.failures.length} ${
+            result.failures.length === 1 ? "work" : "works"
+          } not moved`,
+          false
+        );
+        setMoveReport(result);
+      }
+    },
+  });
+
+  // Selection is scoped to the bookmarks tab's public pile. Leaving the
+  // tab or switching to the private pile aborts at the next boundary and
+  // clears the selection UI.
+  createEffect(
+    on(
+      [feedType, bookmarkVis],
+      () => {
+        if (feedType() !== "bookmarks" || bookmarkVis() !== "public") {
+          mover.reset();
+        }
+      },
+      { defer: true }
+    )
+  );
+
+  function moveSelectedToPrivate() {
+    void mover.run([...mover.selectedIds()]);
+  }
+
+  function moveFailureLabel(kind: MoveFailureKind): string {
+    switch (kind) {
+      case "delete":
+        return "delete failed — still public";
+      case "add":
+        return "re-add as private failed";
+      case "cancelled":
+        return "cancelled — not attempted";
+    }
+  }
 
   // The layer machine — related stack, stacked search pages, artist
   // page, their open order and close animations — lives in
@@ -647,6 +708,21 @@ export default function App() {
           setLoginOpen={setLoginOpen}
         />
 
+        <Show when={feedType() === "bookmarks" && bookmarkVis() === "public"}>
+          <SelectionBar
+            selectionMode={mover.selectionMode}
+            selectedCount={mover.selectedCount}
+            running={mover.running}
+            progress={mover.progress}
+            onEnter={mover.enterSelection}
+            onSelectAll={() => mover.selectAll(illusts().map((i) => i.id))}
+            onDeselectAll={mover.deselectAll}
+            onMove={moveSelectedToPrivate}
+            onCancel={mover.cancel}
+            onExit={mover.exitSelection}
+          />
+        </Show>
+
         <FeedArea
           illusts={illusts}
           loading={loading}
@@ -665,6 +741,13 @@ export default function App() {
           openTagPage={openTagPage}
           loadMore={loadMore}
           onImmersiveChange={setFeedImmersive}
+          selectable={
+            feedType() === "bookmarks" &&
+            bookmarkVis() === "public" &&
+            mover.selectionMode()
+          }
+          selectedIds={mover.selectedIds()}
+          onSelectToggle={mover.toggle}
         />
       </div>
 
@@ -749,6 +832,48 @@ export default function App() {
             }
             onClose={() => setTagsIllust(null)}
           />
+        )}
+      </Show>
+
+      {/* Move-to-private report: failed / cancelled works, with the
+          delete-ok-add-fail LOSS WINDOW called out explicitly. */}
+      <Show when={moveReport()}>
+        {(report) => (
+          <BaseModal
+            title="Move to private"
+            closeLabel="Close move report"
+            onClose={() => setMoveReport(null)}
+            footer={
+              <button
+                type="button"
+                class="mode-pill active"
+                onClick={() => setMoveReport(null)}
+              >
+                Close
+              </button>
+            }
+          >
+            <p class="move-report-note">
+              {report().moved} moved. {report().failures.length} not moved:
+            </p>
+            <ul class="move-report-list">
+              <For each={report().failures}>
+                {(failure) => (
+                  <li class="move-report-item">
+                    <span class="move-report-id">{failure.id}</span>
+                    <span class="move-report-kind">
+                      {moveFailureLabel(failure.kind)}
+                    </span>
+                    <Show when={failure.kind === "add"}>
+                      <span class="move-report-loss">
+                        bookmark removed, re-add manually
+                      </span>
+                    </Show>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </BaseModal>
         )}
       </Show>
 

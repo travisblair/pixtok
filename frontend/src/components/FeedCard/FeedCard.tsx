@@ -50,6 +50,12 @@ export default function FeedCard(props: {
   // Immersive full-bleed: true while this card hides every overlay and
   // layer chrome. Parent feeds use it to hide their own header pills.
   onImmersiveChange?: (immersive: boolean) => void;
+  // Bookmarks → move-to-private selection mode. While selectable, a
+  // single tap toggles selection (never opens a stack) and double-tap
+  // does NOT toggle like; the heart/gear/ugoira controls stay live.
+  selectable?: boolean;
+  selected?: boolean;
+  onSelectToggle?: (id: number) => void;
 }) {
   const [loaded, setLoaded] = createSignal<Set<number>>(new Set());
   const [error, setError] = createSignal<Set<number>>(new Set());
@@ -477,9 +483,15 @@ export default function FeedCard(props: {
     );
   }
 
-  // One tap on the image. While immersive it RESTORES chrome only —
-  // opening a stack always needs a tap after the restore.
+  // One tap on the image. While selection mode is active it toggles the
+  // work's selection instead of opening a stack. While immersive it
+  // RESTORES chrome only — opening a stack always needs a tap after the
+  // restore.
   function handleSingleTap() {
+    if (props.selectable) {
+      props.onSelectToggle?.(props.illust.id);
+      return;
+    }
     if (immersive()) {
       setImmersive(false);
       return;
@@ -488,20 +500,27 @@ export default function FeedCard(props: {
   }
 
   // Double-tap anywhere on the image = toggle like, exactly like the
-  // heart button (same path), plus the transient heart flash.
+  // heart button (same path), plus the transient heart flash. In
+  // selection mode a double-tap is deliberately inert — it must never
+  // like a work the user is trying to move.
   function handleDoubleTap() {
+    if (props.selectable) return;
     if (busy()) return;
     flashHeart();
     void runToggleLike();
   }
 
   function handleTap(e: MouseEvent) {
-    if (!props.onTap && !immersive()) return;
+    if (!props.selectable && !props.onTap && !immersive()) return;
     const target = e.target as HTMLElement;
     // ignore taps on interactive children (like button, tags button,
     // artist link, page counter, tag chips, any control button); slider
     // swipes don't fire click so no conflict there
     if (target.closest?.(TAP_IGNORE)) return;
+    if (props.selectable) {
+      props.onSelectToggle?.(props.illust.id);
+      return;
+    }
     if (immersive()) {
       setImmersive(false);
       return;
@@ -519,10 +538,21 @@ export default function FeedCard(props: {
   return (
     <div
       class="feed-card"
-      classList={{ immersive: immersive() }}
+      classList={{ immersive: immersive(), selected: !!props.selectable && !!props.selected }}
       ref={rootRef}
       onClick={handleClick}
     >
+      {/* Selection checkbox — top-left, clear of the right action
+          stack (heart/gear) and the bottom overlay. */}
+      <Show when={props.selectable}>
+        <div
+          class="card-select-box"
+          classList={{ checked: !!props.selected }}
+          aria-hidden="true"
+        >
+          {props.selected ? "✓" : ""}
+        </div>
+      </Show>
       <Show
         when={hasMultiple}
         fallback={renderPage(pages[0], 0)}
