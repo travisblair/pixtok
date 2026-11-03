@@ -37,7 +37,16 @@ export interface GestureEventLike {
   preventDefault?: () => void;
 }
 
-export const TAP_WINDOW_MS = 300;
+/**
+ * How long a single tap is DEFERRED waiting for a possible second tap.
+ * Must cover real-world double-tap intervals (iOS users commonly tap
+ * 300-450ms apart): too short and the first tap's single fires before
+ * the second tap lands — the stack opens mid-double-tap and the second
+ * tap pushes the same work ("already open"). The cost is stack-open
+ * latency on every single tap; 500ms matches the iOS system double-tap
+ * timeout, so native-feeling users land inside it.
+ */
+export const TAP_WINDOW_MS = 500;
 export const TAP_SLOP_PX = 10;
 /**
  * Distance between the TWO taps of a double-tap. Deliberately looser

@@ -3,6 +3,7 @@ import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { http, HttpResponse } from "msw";
 import FeedCard from "./FeedCard";
+import { TAP_WINDOW_MS } from "./gestures";
 import { makeIllust, makeMultiPageIllust } from "../../test-fixtures";
 import { requestCount, requestsTo, server } from "../../test/msw/server";
 
@@ -266,7 +267,7 @@ describe("FeedCard touch gestures", () => {
       tapCard(card);
       fireEvent.click(card); // iOS synthetic click right after touchend
       expect(onTap).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(299);
+      vi.advanceTimersByTime(TAP_WINDOW_MS - 1);
       expect(onTap).not.toHaveBeenCalled();
       vi.advanceTimersByTime(1);
       expect(onTap).toHaveBeenCalledTimes(1);
@@ -349,7 +350,7 @@ describe("FeedCard touch gestures", () => {
     vi.useFakeTimers();
     try {
       tapCard(card);
-      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(TAP_WINDOW_MS);
       expect(card.classList.contains("immersive")).toBe(false);
       expect(onTap).not.toHaveBeenCalled();
       expect(onImmersiveChange).toHaveBeenLastCalledWith(false);
@@ -465,7 +466,7 @@ describe("FeedCard selection mode (bookmarks → private)", () => {
     try {
       tapCard(card);
       expect(onSelectToggle).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(TAP_WINDOW_MS);
       expect(onSelectToggle).toHaveBeenCalledWith(7);
       expect(onTap).not.toHaveBeenCalled();
     } finally {

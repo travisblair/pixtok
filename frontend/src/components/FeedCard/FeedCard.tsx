@@ -505,9 +505,11 @@ export default function FeedCard(props: {
   }
 
   // Double-tap anywhere on the image = toggle like, exactly like the
-  // heart button (same path), plus the transient heart flash. In
-  // selection mode a double-tap is deliberately inert — it must never
-  // like a work the user is trying to move.
+  // heart button (same path), plus the transient heart flash. While
+  // immersive the like still fires but the chrome stays hidden — the
+  // restore gestures (single tap / pinch-in / restore icon) own the
+  // reveal. In selection mode a double-tap is deliberately inert — it
+  // must never like a work the user is trying to move.
   function handleDoubleTap() {
     if (props.selectable) return;
     if (busy()) return;

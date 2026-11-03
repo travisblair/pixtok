@@ -1840,3 +1840,15 @@
   color: #ffb4b4;
   font-size: 0.78rem;
 }
+
+/* ── Global iOS focus-zoom lock (MUST stay last) ──────────────────────
+   iOS Safari zooms the whole page when a FOCUSED text input computes
+   below 16px font-size. Every input/textarea/select gets a 16px floor
+   here so no individual component style (modal, gate, filters, search,
+   settings) can reintroduce the zoom. Placed at the end of the cascade
+   so later rules can never undercut it. */
+input,
+textarea,
+select {
+  font-size: 16px;
+}

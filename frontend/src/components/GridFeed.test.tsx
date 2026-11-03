@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { http, HttpResponse } from "msw";
 import GridFeed from "./GridFeed";
+import { TAP_WINDOW_MS } from "./FeedCard/gestures";
 import { makeIllust, makeFeedOf } from "../test-fixtures";
 import { getLikeState } from "../store";
 import { requestsTo, server } from "../test/msw/server";
@@ -244,7 +245,7 @@ describe("GridFeed", () => {
       tapCell(cell);
       fireEvent.click(cell);
       expect(onTap).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(TAP_WINDOW_MS);
       expect(onTap).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
