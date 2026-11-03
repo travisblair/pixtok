@@ -27,6 +27,11 @@ export default function FeedArea(props: {
   loadMore: (fresh?: boolean) => void;
   // Immersive full-bleed on a strip card — App hides the feed header.
   onImmersiveChange?: (immersive: boolean) => void;
+  // Bookmarks → move-to-private selection mode (only the bookmarks tab's
+  // public pile turns this on).
+  selectable?: boolean;
+  selectedIds?: Set<number>;
+  onSelectToggle?: (id: number) => void;
 }) {
   return (
     <>
@@ -53,6 +58,9 @@ export default function FeedArea(props: {
                 onLike={props.handleLike}
                 onUnlike={props.handleUnlike}
                 onTap={props.pushRelated}
+                selectable={props.selectable}
+                selectedIds={props.selectedIds}
+                onSelectToggle={props.onSelectToggle}
               />
             }
           >
@@ -67,6 +75,9 @@ export default function FeedArea(props: {
                   onTagsTap={props.setTagsIllust}
                   onTagOpen={props.openTagPage}
                   onImmersiveChange={props.onImmersiveChange}
+                  selectable={props.selectable}
+                  selected={!!props.selectedIds?.has(illust.id)}
+                  onSelectToggle={props.onSelectToggle}
                 />
               )}
             </For>

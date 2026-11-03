@@ -49,6 +49,10 @@ export default function GridFeed(props: {
   // suppression DOES apply to cells: stacked layers keep ugoira players
   // and decodes alive otherwise.
   suppressImages?: boolean;
+  // Bookmarks → move-to-private selection (same contract as FeedCard).
+  selectable?: boolean;
+  selectedIds?: Set<number>;
+  onSelectToggle?: (id: number) => void;
 }) {
   return (
     <div class="feed-grid">
@@ -60,6 +64,9 @@ export default function GridFeed(props: {
             onUnlike={props.onUnlike}
             onTap={props.onTap}
             suppressImages={props.suppressImages}
+            selectable={props.selectable}
+            selected={!!props.selectedIds?.has(illust.id)}
+            onSelectToggle={props.onSelectToggle}
           />
         )}
       </For>
@@ -73,6 +80,9 @@ function GridCell(props: {
   onUnlike?: (illust: PixivIllust) => void;
   onTap?: (illust: PixivIllust) => void;
   suppressImages?: boolean;
+  selectable?: boolean;
+  selected?: boolean;
+  onSelectToggle?: (id: number) => void;
 }) {
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal(false);
@@ -106,8 +116,17 @@ function GridCell(props: {
 
   const tap = createTapTracker({
     isIgnored: isInteractiveTarget,
-    onSingleTap: () => props.onTap?.(props.illust),
-    onDoubleTap: () => handleDoubleTap(),
+    onSingleTap: () => {
+      if (props.selectable) {
+        props.onSelectToggle?.(props.illust.id);
+        return;
+      }
+      props.onTap?.(props.illust);
+    },
+    onDoubleTap: () => {
+      if (props.selectable) return;
+      handleDoubleTap();
+    },
   });
 
   function flashHeart() {
@@ -231,12 +250,16 @@ function GridCell(props: {
   }
 
   function handleTap(e: MouseEvent) {
-    if (!props.onTap) return;
+    if (!props.selectable && !props.onTap) return;
     const target = e.target as HTMLElement;
     // Ignore taps on the cell's interactive children — heart, ugoira
     // badge, retry, any button — so controls never open a stack.
     if (target.closest?.(TAP_IGNORE)) return;
-    props.onTap(props.illust);
+    if (props.selectable) {
+      props.onSelectToggle?.(props.illust.id);
+      return;
+    }
+    props.onTap?.(props.illust);
   }
 
   // Desktop clicks are immediate; synthetic clicks after a touch tap
@@ -247,7 +270,21 @@ function GridCell(props: {
   }
 
   return (
-    <div class="grid-cell" onClick={handleClick} ref={rootRef}>
+    <div
+      class="grid-cell"
+      classList={{ selected: !!props.selectable && !!props.selected }}
+      onClick={handleClick}
+      ref={rootRef}
+    >
+      <Show when={props.selectable}>
+        <div
+          class="grid-select-box"
+          classList={{ checked: !!props.selected }}
+          aria-hidden="true"
+        >
+          {props.selected ? "✓" : ""}
+        </div>
+      </Show>
       <Show
         when={props.illust.type === "ugoira" && !props.suppressImages}
         fallback={

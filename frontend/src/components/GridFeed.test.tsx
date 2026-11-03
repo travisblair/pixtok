@@ -270,3 +270,33 @@ describe("GridFeed", () => {
     expect(requestsTo(`/api/illust/${illusts[0].id}/unlike`)).toHaveLength(1);
   });
 });
+
+describe("GridFeed selection mode (bookmarks → private)", () => {
+  it("shows checkbox overlays and toggles selection instead of opening a stack", async () => {
+    const onTap = vi.fn();
+    const onSelectToggle = vi.fn();
+    const illusts = makeFeedOf(2, 1).illusts;
+    const { container } = render(() => (
+      <GridFeed
+        illusts={illusts}
+        onTap={onTap}
+        selectable
+        selectedIds={new Set([illusts[1].id])}
+        onSelectToggle={onSelectToggle}
+      />
+    ));
+
+    const boxes = container.querySelectorAll(".grid-select-box");
+    expect(boxes).toHaveLength(2);
+    expect(boxes[0].classList.contains("checked")).toBe(false);
+    expect(boxes[1].classList.contains("checked")).toBe(true);
+
+    await fireEvent.click(container.querySelectorAll(".grid-cell")[0]);
+    expect(onSelectToggle).toHaveBeenCalledWith(illusts[0].id);
+    expect(onTap).not.toHaveBeenCalled();
+
+    // The heart stays live.
+    await fireEvent.click(container.querySelector(".grid-cell-heart")!);
+    expect(onSelectToggle).toHaveBeenCalledTimes(1);
+  });
+});

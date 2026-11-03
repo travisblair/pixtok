@@ -21,6 +21,7 @@
 //   newestNextBatch GET /api/newest continuation    (default 10, next_url null)
 //   topIllustBatch GET /api/topillust               (default 30, next_url null)
 //   likeFails      POST like → 500 (failure-path spec)
+//   unlikeFails    array of illust ids whose POST unlike → 500
 //   imgFailOnce    substring of a proxied image URL — the FIRST request
 //                  matching it fails (500), later requests succeed
 //                  (per-page retry spec)
@@ -106,6 +107,7 @@ export async function setupApiMocks(page, options = {}) {
     total: 2,
   };
   const likeFails = options.likeFails ?? false;
+  const unlikeFails = options.unlikeFails ?? [];
   // Ids the viewer already follows — the followed route answers true only
   // for these, so a spec can distinguish artists A and B (the old
   // always-false mock made a stale follow state after an artist swap
@@ -127,6 +129,10 @@ export async function setupApiMocks(page, options = {}) {
     workRecsCalls: [], // [{ id }]
     likeCalls: [], // [{ id }]
     unlikeCalls: [], // [{ id }]
+    // Interleaved wire order of like/unlike POSTs — "unlike:123" /
+    // "like:123" — so the move-to-private spec can pin the exact
+    // delete-then-re-add sequence the queue must produce.
+    likeUnlikeEvents: [],
     relatedCalls: [], // [{ id }]
     userCalls: [], // [{ id }]
     ugoiraCalls: [], // [{ id }]
@@ -367,6 +373,7 @@ export async function setupApiMocks(page, options = {}) {
   await page.route(/\/api\/illust\/(\d+)\/like$/, (route) => {
     const id = Number(route.request().url().match(/\/illust\/(\d+)\/like$/)[1]);
     mocks.likeCalls.push({ id });
+    mocks.likeUnlikeEvents.push(`like:${id}`);
     if (likeFails) {
       route.fulfill(json({ error: "internal server error" }, 500));
     } else {
@@ -380,6 +387,11 @@ export async function setupApiMocks(page, options = {}) {
       route.request().url().match(/\/illust\/(\d+)\/unlike$/)[1]
     );
     mocks.unlikeCalls.push({ id });
+    mocks.likeUnlikeEvents.push(`unlike:${id}`);
+    if (unlikeFails.includes(id)) {
+      route.fulfill(json({ error: "internal server error" }, 500));
+      return;
+    }
     route.fulfill(json({ ok: true }));
   });
 
