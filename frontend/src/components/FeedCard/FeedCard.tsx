@@ -5,6 +5,7 @@ import {
   For,
   Show,
   onCleanup,
+  onMount,
 } from "solid-js";
 import type { PixivIllust } from "../../types";
 import { like as likeWork, unlike as unlikeWork } from "../../api/illust";
@@ -20,11 +21,17 @@ import { getLikeState, imageSize } from "../../store";
 import UgoiraPlayer from "../UgoiraPlayer";
 import FollowButton from "../FollowButton";
 import { createSettleDetector } from "./settle";
+import { createTapTracker, createPinchDetector } from "./gestures";
 import { computeTagLines, type TagLines } from "./tagLayout";
 
 const PIXEL =
   "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
 const CARD_MARGIN = "300% 0px 300% 0px"; // load/unload threshold: 3 viewports
+// Touches starting on any of these are controls, not card taps. `button`
+// additionally covers the page retry pill, the ugoira ▶, and tag chips.
+const TAP_IGNORE = ".like-btn, .tags-btn, a, .page-counter, .card-tag-row, button";
+// Heart flash confirmation lifetime (CSS animation matches).
+const HEART_FLASH_MS = 700;
 
 export default function FeedCard(props: {
   illust: PixivIllust;
@@ -40,6 +47,9 @@ export default function FeedCard(props: {
   // layers would otherwise keep full image windows alive — N stacked
   // layers × decoded master1200s jetsams iOS and hard-reloads the page.
   suppressImages?: boolean;
+  // Immersive full-bleed: true while this card hides every overlay and
+  // layer chrome. Parent feeds use it to hide their own header pills.
+  onImmersiveChange?: (immersive: boolean) => void;
 }) {
   const [loaded, setLoaded] = createSignal<Set<number>>(new Set());
   const [error, setError] = createSignal<Set<number>>(new Set());
@@ -60,6 +70,12 @@ export default function FeedCard(props: {
   const setLiked = like.setLiked;
   const [active, setActive] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  // Immersive full-bleed (pinch-spread). Per-card: hides this card's
+  // overlay, the right stack and counter, and (via onImmersiveChange)
+  // the layer chrome around it.
+  const [immersive, setImmersiveSignal] = createSignal(false);
+  // Bumped on every double-tap like confirmation; >0 renders the flash.
+  const [flash, setFlash] = createSignal(0);
   // Ugoira play/pause control lives in the overlay (small, above the
   // title, always visible). The counter is the toggle signal handed to
   // the player; the player reports status back for the icon/label.
@@ -71,6 +87,7 @@ export default function FeedCard(props: {
   let rootRef: HTMLDivElement | undefined;
   let unloadTimer: ReturnType<typeof setTimeout> | undefined;
   let loadTimer: ReturnType<typeof setTimeout> | undefined;
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Slider settle detector (settle.ts): polls scrollLeft until the snap
   // rests, then commits the true page — the load window follows the
@@ -82,6 +99,104 @@ export default function FeedCard(props: {
       setSettledPage(idx);
       setCurrentPage(idx); // the counter catches up to reality
     },
+  });
+
+  // ── Immersive + double-tap gestures (gestures.ts) ────────────────────
+  // Report chrome changes upward only on real transitions so the parent
+  // isn't re-notified on every effect re-run.
+  // Plain mirror flag (not a signal read) so the reset effects that call
+  // setImmersive don't accidentally subscribe to the immersive signal.
+  let immersiveOn = false;
+  function setImmersive(next: boolean) {
+    if (immersiveOn === next) return;
+    immersiveOn = next;
+    setImmersiveSignal(next);
+    props.onImmersiveChange?.(next);
+  }
+
+  // Touches starting on controls must never register as card taps or
+  // pinches — same exemption list as the click handler, plus any button.
+  function isInteractiveTarget(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    return !!el && typeof el.closest === "function" && !!el.closest(TAP_IGNORE);
+  }
+
+  const tap = createTapTracker({
+    isIgnored: isInteractiveTarget,
+    onSingleTap: () => handleSingleTap(),
+    onDoubleTap: () => handleDoubleTap(),
+  });
+
+  const pinch = createPinchDetector({
+    isIgnored: isInteractiveTarget,
+    onPinch: (on) => {
+      // A pinch is not a tap: never let a synthetic click open a stack
+      // right after (e.g. right after pinch-in restored the chrome).
+      tap.suppressClicks();
+      tap.cancelPending();
+      setImmersive(on);
+    },
+  });
+
+  function flashHeart() {
+    clearTimeout(flashTimer);
+    setFlash((n) => n + 1);
+    flashTimer = setTimeout(() => setFlash(0), HEART_FLASH_MS);
+  }
+
+  // Touch listeners are attached imperatively (not via JSX) because the
+  // 2-finger touchmove handler MUST be passive:false to preventDefault
+  // native page pinch-zoom. Single-finger moves are never prevented, so
+  // the .card-pages slider and edge-back swipes keep working untouched.
+  onMount(() => {
+    const el = rootRef;
+    if (!el) return;
+    const container = el.closest<HTMLElement>(".feed-container");
+    const onContainerScroll = () => {
+      // Scrolling the feed abandons immersive mode (and any pending tap).
+      tap.cancelPending();
+      setImmersive(false);
+    };
+    const onTouchStart = (e: TouchEvent) => {
+      tap.onTouchStart(e);
+      pinch.onTouchStart(e);
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      // Kill native page pinch-zoom over the card. Only 2-finger moves:
+      // single-finger slider swipes must stay native.
+      if (e.touches.length >= 2) e.preventDefault();
+      tap.onTouchMove(e);
+      pinch.onTouchMove(e);
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      tap.onTouchEnd(e);
+      pinch.onTouchEnd(e);
+    };
+    const onTouchCancel = () => {
+      tap.onTouchCancel();
+      pinch.onTouchCancel();
+    };
+    container?.addEventListener("scroll", onContainerScroll, { passive: true });
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    el.addEventListener("touchend", onTouchEnd, { passive: true });
+    el.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    onCleanup(() => {
+      container?.removeEventListener("scroll", onContainerScroll);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchCancel);
+      tap.dispose();
+      pinch.dispose();
+    });
+  });
+
+  // If the card unmounts while immersive, the parent must restore its
+  // chrome — otherwise the header/back pills stay hidden forever.
+  onCleanup(() => {
+    clearTimeout(flashTimer);
+    if (immersiveOn) props.onImmersiveChange?.(false);
   });
 
   const pages = props.illust.meta_pages?.length
@@ -150,6 +265,7 @@ export default function FeedCard(props: {
   createEffect(() => {
     if (props.suppressImages) {
       setActive(false);
+      setImmersive(false); // covered layer: restore chrome on the way out
       setLoaded(new Set<number>());
       setError(new Set<number>());
       return;
@@ -193,9 +309,11 @@ export default function FeedCard(props: {
   });
 
   // When the card deactivates, reset per-page state so re-activation
-  // reloads fresh and no spinners render off-screen.
+  // reloads fresh and no spinners render off-screen. Immersive is
+  // per-card and dies with the card's visibility too (IO unload).
   createEffect(() => {
     if (!active()) {
+      setImmersive(false);
       setLoaded(new Set<number>());
       setError(new Set<number>());
       setAttempts({});
@@ -232,9 +350,10 @@ export default function FeedCard(props: {
     });
   });
 
-  async function toggleLike(e: Event) {
-    e.preventDefault();
-    e.stopPropagation();
+  // Single like path for the heart button AND double-tap. The button
+  // wrapper only adds event plumbing; all side effects (busy lock,
+  // optimistic flip, callbacks, revert) live here so both agree.
+  async function runToggleLike() {
     if (busy()) return; // in-flight lock: no double-tap POST races
     setBusy(true);
     const newLiked = !liked();
@@ -253,6 +372,12 @@ export default function FeedCard(props: {
     } finally {
       setBusy(false);
     }
+  }
+
+  function toggleLike(e: Event) {
+    e.preventDefault();
+    e.stopPropagation();
+    void runToggleLike();
   }
 
   function onPageLoad(index: number) {
@@ -352,21 +477,51 @@ export default function FeedCard(props: {
     );
   }
 
+  // One tap on the image. While immersive it RESTORES chrome only —
+  // opening a stack always needs a tap after the restore.
+  function handleSingleTap() {
+    if (immersive()) {
+      setImmersive(false);
+      return;
+    }
+    props.onTap?.(props.illust);
+  }
+
+  // Double-tap anywhere on the image = toggle like, exactly like the
+  // heart button (same path), plus the transient heart flash.
+  function handleDoubleTap() {
+    if (busy()) return;
+    flashHeart();
+    void runToggleLike();
+  }
+
   function handleTap(e: MouseEvent) {
-    if (!props.onTap) return;
+    if (!props.onTap && !immersive()) return;
     const target = e.target as HTMLElement;
     // ignore taps on interactive children (like button, tags button,
-    // artist link, page counter, tag chips); slider swipes don't fire
-    // click so no conflict there
-    if (target.closest(".like-btn, .tags-btn, a, .page-counter, .card-tag-row")) return;
-    props.onTap(props.illust);
+    // artist link, page counter, tag chips, any control button); slider
+    // swipes don't fire click so no conflict there
+    if (target.closest?.(TAP_IGNORE)) return;
+    if (immersive()) {
+      setImmersive(false);
+      return;
+    }
+    props.onTap?.(props.illust);
+  }
+
+  // Desktop clicks are immediate; the synthetic click after a touch tap
+  // (already handled by the deferred tap tracker) is swallowed.
+  function handleClick(e: MouseEvent) {
+    if (!tap.absorbClick(e as MouseEvent & { pointerType?: string })) return;
+    handleTap(e);
   }
 
   return (
     <div
       class="feed-card"
+      classList={{ immersive: immersive() }}
       ref={rootRef}
-      onClick={handleTap}
+      onClick={handleClick}
     >
       <Show
         when={hasMultiple}
@@ -514,6 +669,29 @@ export default function FeedCard(props: {
           </div>
         </Show>
       </div>
+
+      {/* Immersive-only restore affordance: small and dim so the image
+          stays the only real thing on screen. */}
+      <Show when={immersive()}>
+        <button
+          type="button"
+          class="card-immersive-restore"
+          onClick={(e) => {
+            e.stopPropagation();
+            setImmersive(false);
+          }}
+          aria-label="Exit immersive mode"
+        >
+          ⤡
+        </button>
+      </Show>
+
+      {/* Double-tap like confirmation — transient, no assets. */}
+      <Show when={flash() > 0}>
+        <div class="heart-flash" aria-hidden="true">
+          ❤️
+        </div>
+      </Show>
     </div>
   );
 }

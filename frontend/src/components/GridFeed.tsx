@@ -4,15 +4,22 @@ import {
   For,
   Show,
   onCleanup,
+  onMount,
 } from "solid-js";
 import type { PixivIllust } from "../types";
 import { getLikeState } from "../store";
 import { like as likeWork, unlike as unlikeWork } from "../api/illust";
 import { reportApiError } from "../api/client";
+import { createTapTracker } from "./FeedCard/gestures";
 import UgoiraPlayer from "./UgoiraPlayer";
 
 const PIXEL =
   "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+// Touches starting on these are controls, never cell taps. `button`
+// covers the retry pill and the ugoira ▶ as well.
+const TAP_IGNORE =
+  ".grid-cell-heart, .grid-cell-ugoira, .grid-cell-retry, a, button";
+const HEART_FLASH_MS = 700;
 // Load/unload window for grid cells: 3 viewports. Cells scrolled beyond
 // it swap their src to the 1px placeholder, freeing the decode; coming
 // back re-fetches from cache. square_medium thumbs are small (~50-100KB)
@@ -71,6 +78,9 @@ function GridCell(props: {
   const [error, setError] = createSignal(false);
   const [attempts, setAttempts] = createSignal(0);
   const [busy, setBusy] = createSignal(false);
+  // Double-tap like confirmation: bumped on each flash; >0 renders it.
+  const [flash, setFlash] = createSignal(0);
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
   // Ugoira play/pause: the badge below bumps this counter; the player
   // reports status back for the icon/label (same wiring as the strip).
   const [ugoiraToggle, bumpUgoiraToggle] = createSignal(0);
@@ -87,6 +97,45 @@ function GridCell(props: {
   const [active, setActive] = createSignal(false);
   let rootRef: HTMLDivElement | undefined;
   let unloadTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // ── Touch gestures: double-tap like, deferred single tap ────────────
+  function isInteractiveTarget(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    return !!el && typeof el.closest === "function" && !!el.closest(TAP_IGNORE);
+  }
+
+  const tap = createTapTracker({
+    isIgnored: isInteractiveTarget,
+    onSingleTap: () => props.onTap?.(props.illust),
+    onDoubleTap: () => handleDoubleTap(),
+  });
+
+  function flashHeart() {
+    clearTimeout(flashTimer);
+    setFlash((n) => n + 1);
+    flashTimer = setTimeout(() => setFlash(0), HEART_FLASH_MS);
+  }
+
+  onMount(() => {
+    const el = rootRef;
+    if (!el) return;
+    const onTouchStart = (e: TouchEvent) => tap.onTouchStart(e);
+    const onTouchMove = (e: TouchEvent) => tap.onTouchMove(e);
+    const onTouchEnd = (e: TouchEvent) => tap.onTouchEnd(e);
+    const onTouchCancel = () => tap.onTouchCancel();
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("touchend", onTouchEnd, { passive: true });
+    el.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    onCleanup(() => {
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchCancel);
+      tap.dispose();
+      clearTimeout(flashTimer);
+    });
+  });
 
   createEffect(() => {
     if (props.suppressImages) {
@@ -140,9 +189,9 @@ function GridCell(props: {
           attempts() > 0 ? `&r=${attempts()}` : ""
         }`;
 
-  async function toggleLike(e: Event) {
-    e.preventDefault();
-    e.stopPropagation();
+  // Single like path for the heart button AND double-tap — same side
+  // effects (busy lock, optimistic flip, callbacks, revert).
+  async function runToggleLike() {
     if (busy()) return; // in-flight lock: no double-tap POST races
     setBusy(true);
     const newLiked = !liked();
@@ -163,6 +212,18 @@ function GridCell(props: {
     }
   }
 
+  function toggleLike(e: Event) {
+    e.preventDefault();
+    e.stopPropagation();
+    void runToggleLike();
+  }
+
+  function handleDoubleTap() {
+    if (busy()) return;
+    flashHeart();
+    void runToggleLike();
+  }
+
   function retry(e: Event) {
     e.stopPropagation();
     setError(false);
@@ -173,13 +234,20 @@ function GridCell(props: {
     if (!props.onTap) return;
     const target = e.target as HTMLElement;
     // Ignore taps on the cell's interactive children — heart, ugoira
-    // badge, retry — so controls never open a stack.
-    if (target.closest(".grid-cell-heart, .grid-cell-ugoira, .grid-cell-retry")) return;
+    // badge, retry, any button — so controls never open a stack.
+    if (target.closest?.(TAP_IGNORE)) return;
     props.onTap(props.illust);
   }
 
+  // Desktop clicks are immediate; synthetic clicks after a touch tap
+  // (already handled) are swallowed so nothing double-fires.
+  function handleClick(e: MouseEvent) {
+    if (!tap.absorbClick(e as MouseEvent & { pointerType?: string })) return;
+    handleTap(e);
+  }
+
   return (
-    <div class="grid-cell" onClick={handleTap} ref={rootRef}>
+    <div class="grid-cell" onClick={handleClick} ref={rootRef}>
       <Show
         when={props.illust.type === "ugoira" && !props.suppressImages}
         fallback={
@@ -259,6 +327,13 @@ function GridCell(props: {
       >
         {liked() ? "❤️" : "🤍"}
       </button>
+
+      {/* Double-tap like confirmation — transient, no assets. */}
+      <Show when={flash() > 0}>
+        <div class="heart-flash" aria-hidden="true">
+          ❤️
+        </div>
+      </Show>
     </div>
   );
 }
