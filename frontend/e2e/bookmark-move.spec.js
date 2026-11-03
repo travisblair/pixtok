@@ -50,10 +50,17 @@ test.describe("Bookmarks move to private", () => {
     await bar.locator(".mode-pill", { hasText: "Move to private" }).click();
     await expect(page.locator(".move-progress")).toContainText("Moving");
 
-    // Production pace: 2 works = 2 × (unlike + 1600ms + like) + 1600ms.
+    // Production pace: 2 works = 2 × (unlike + like) + 1600ms.
     await expect(page.locator(".toast")).toContainText(
       "Moved 2 works to private",
       { timeout: 20000 }
+    );
+
+    // The completion toast is STICKY — it must survive the 8s auto-hide
+    // window (the pile only updates on reload).
+    await page.waitForTimeout(8500);
+    await expect(page.locator(".toast")).toContainText(
+      "Moved 2 works to private"
     );
 
     // Per work: delete BEFORE re-add; works strictly one at a time.

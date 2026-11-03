@@ -267,9 +267,13 @@ export default function App() {
   const mover = useBookmarkMover({
     onDone: (result) => {
       if (result.failures.length === 0) {
+        // Sticky: the pile only updates on reload, so the confirmation
+        // must not auto-dismiss before the user has seen it (and the
+        // queue is slow enough that an 8s toast could vanish mid-scan).
         showToast(
           `Moved ${result.moved} ${result.moved === 1 ? "work" : "works"} to private`,
-          false
+          false,
+          true
         );
       } else {
         showToast(
