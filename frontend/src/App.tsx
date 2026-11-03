@@ -64,6 +64,9 @@ export default function App() {
   const [illusts, setIllusts] = createSignal<PixivIllust[]>([]);
   const [nextUrl, setNextUrl] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(false);
+  // True while a strip card is in immersive full-bleed — hides the feed
+  // header (the card reports through FeedCard.onImmersiveChange).
+  const [feedImmersive, setFeedImmersive] = createSignal(false);
   const [recs, setRecs] = createSignal<PixivIllust[]>([]);
   const [recsSource, setRecsSource] = createSignal("");
   const [modalOpen, setModalOpen] = createSignal(false);
@@ -602,6 +605,7 @@ export default function App() {
             ? "feed-container grid-container"
             : "feed-container"
         }
+        classList={{ immersive: feedImmersive() }}
       >
         <FeedHeader
           feedType={feedType}
@@ -641,6 +645,7 @@ export default function App() {
           setTagsIllust={setTagsIllust}
           openTagPage={openTagPage}
           loadMore={loadMore}
+          onImmersiveChange={setFeedImmersive}
         />
       </div>
 

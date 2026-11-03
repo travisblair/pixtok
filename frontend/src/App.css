@@ -127,6 +127,18 @@
   opacity: 1;
 }
 
+/* Touch surfaces: manipulation kills the double-tap zoom so double-tap
+   to like owns the gesture. Page pinch-zoom is killed separately in
+   gestures.ts (2-finger touchmove is preventDefault'd; that listener is
+   passive:false because it must be). */
+.card-pages,
+.card-page,
+.card-image,
+.grid-cell,
+.grid-cell-image {
+  touch-action: manipulation;
+}
+
 /* Page counter */
 .page-counter {
   position: absolute;
@@ -138,6 +150,81 @@
   padding: 2px 8px;
   border-radius: 10px;
   z-index: 2;
+}
+
+/* ── Immersive full-bleed ──────────────────────────────────────────────
+   Pinch-spread on a strip/stack card: only the image remains, plus the
+   dim restore affordance at the bottom-right. Grid cells opt out. */
+.feed-card.immersive .card-overlay,
+.feed-card.immersive .card-right-stack,
+.feed-card.immersive .page-counter {
+  display: none;
+}
+
+/* Layer chrome: the strip feed's header and the related stack's Back/✕,
+   depth badge and coaching hint. */
+.feed-container.immersive > .header-bar {
+  display: none;
+}
+.related-view.immersive .related-header-left,
+.related-view.immersive .stack-depth-badge,
+.related-view.immersive .stack-hint {
+  display: none;
+}
+
+.card-immersive-restore {
+  position: absolute;
+  right: 14px;
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  z-index: 3;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.28);
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* Double-tap like confirmation — transient, removed by a 700ms timeout
+   (CSS animation length matches). */
+.heart-flash {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 84px;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 6;
+  filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.55));
+  animation: heart-flash 700ms ease-out forwards;
+}
+
+@keyframes heart-flash {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  18% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  55% {
+    transform: scale(1);
+    opacity: 0.95;
+  }
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
 }
 
 /* Placeholder / spinner */

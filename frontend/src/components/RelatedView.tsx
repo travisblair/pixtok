@@ -27,6 +27,10 @@ export default function RelatedView(props: {
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal(false);
   const [loadMoreError, setLoadMoreError] = createSignal(false);
+  // Any immersive card in this layer hides the Back/✕ pills, the depth
+  // badge and the coaching hint. Per-card on the card side; only one card
+  // can be immersive at a time, so a plain boolean is enough.
+  const [immersive, setImmersive] = createSignal(false);
   let sentinelRef: HTMLDivElement | undefined;
   // Pixiv similarity pages re-inject works across pages like the
   // personalized feeds — dedupe by id on append.
@@ -93,6 +97,7 @@ export default function RelatedView(props: {
   return (
     <div
       class={props.closing ? "related-view exit" : "related-view enter"}
+      classList={{ immersive: immersive() }}
       style={{ "z-index": props.zIndex }}
     >
       <div class="feed-container">
@@ -105,6 +110,7 @@ export default function RelatedView(props: {
               onTagsTap={props.onTagsTap}
               onTagOpen={props.onTagOpen}
               suppressImages={props.obscured || props.closing}
+              onImmersiveChange={setImmersive}
             />
           )}
         </For>

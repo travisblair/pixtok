@@ -25,6 +25,8 @@ export default function FeedArea(props: {
   setTagsIllust: (illust: PixivIllust) => void;
   openTagPage: (tag: string) => void;
   loadMore: (fresh?: boolean) => void;
+  // Immersive full-bleed on a strip card — App hides the feed header.
+  onImmersiveChange?: (immersive: boolean) => void;
 }) {
   return (
     <>
@@ -64,6 +66,7 @@ export default function FeedArea(props: {
                   onArtistTap={props.openArtist}
                   onTagsTap={props.setTagsIllust}
                   onTagOpen={props.openTagPage}
+                  onImmersiveChange={props.onImmersiveChange}
                 />
               )}
             </For>

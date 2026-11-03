@@ -176,4 +176,97 @@ describe("GridFeed", () => {
     expect(img.getAttribute("src")).toContain("/api/img?url="); // restored
     vi.useRealTimers();
   });
+
+  // ── Double-tap like (touch) ────────────────────────────────────────
+  interface Pt {
+    clientX: number;
+    clientY: number;
+    identifier: number;
+  }
+  const pt = (x: number, y = 100, identifier = 0): Pt => ({
+    clientX: x,
+    clientY: y,
+    identifier,
+  });
+  function fireTouch(el: Element, type: string, touches: Pt[], changed: Pt[] = touches) {
+    fireEvent(
+      el,
+      new TouchEvent(type, {
+        touches: touches as unknown as Touch[],
+        changedTouches: changed as unknown as Touch[],
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      })
+    );
+  }
+  function tapCell(el: Element, x = 50, y = 50) {
+    fireTouch(el, "touchstart", [pt(x, y)]);
+    fireTouch(el, "touchend", [], [pt(x, y)]);
+  }
+
+  it("double-tap on a cell toggles like and shows the flash, not the stack", async () => {
+    const illusts = makeFeedOf(1, 1).illusts;
+    const onTap = vi.fn();
+    const onLike = vi.fn();
+    const { container } = render(() => (
+      <GridFeed illusts={illusts} onTap={onTap} onLike={onLike} />
+    ));
+    const cell = container.querySelector(".grid-cell")!;
+    const heart = container.querySelector(".grid-cell-heart") as HTMLButtonElement;
+
+    tapCell(cell, 40, 40);
+    tapCell(cell, 43, 42);
+    await waitFor(() => expect(onLike).toHaveBeenCalledWith(illusts[0]));
+    expect(requestsTo(`/api/illust/${illusts[0].id}/like`)).toHaveLength(1);
+    expect(heart.textContent).toBe("❤️");
+    expect(onTap).not.toHaveBeenCalled();
+    expect(container.querySelector(".grid-cell .heart-flash")).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 0));
+    tapCell(cell, 40, 40);
+    tapCell(cell, 43, 42);
+    await waitFor(() =>
+      expect(requestsTo(`/api/illust/${illusts[0].id}/unlike`)).toHaveLength(1)
+    );
+    expect(heart.textContent).toBe("🤍");
+  });
+
+  it("defers a touch single tap on a cell (synthetic click absorbed)", () => {
+    const illusts = makeFeedOf(1, 1).illusts;
+    const onTap = vi.fn();
+    const { container } = render(() => (
+      <GridFeed illusts={illusts} onTap={onTap} />
+    ));
+    const cell = container.querySelector(".grid-cell")!;
+    vi.useFakeTimers();
+    try {
+      tapCell(cell);
+      fireEvent.click(cell);
+      expect(onTap).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(300);
+      expect(onTap).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("double-tap on the heart button never counts as a cell double-tap", async () => {
+    const illusts = makeFeedOf(1, 1).illusts;
+    const onTap = vi.fn();
+    const { container } = render(() => (
+      <GridFeed illusts={illusts} onTap={onTap} />
+    ));
+    const heart = container.querySelector(".grid-cell-heart")!;
+    // Tap the heart twice quickly; its own click handler likes once, and
+    // the cell tracker must stay out of it (no extra POST, no stack).
+    await fireEvent.click(heart);
+    await fireEvent.click(heart);
+    await new Promise((r) => setTimeout(r, 0));
+    await fireEvent.click(heart);
+    await fireEvent.click(heart);
+    expect(onTap).not.toHaveBeenCalled();
+    expect(requestsTo(`/api/illust/${illusts[0].id}/like`)).toHaveLength(1);
+    expect(requestsTo(`/api/illust/${illusts[0].id}/unlike`)).toHaveLength(1);
+  });
 });
