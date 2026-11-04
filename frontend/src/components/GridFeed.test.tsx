@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { http, HttpResponse } from "msw";
 import GridFeed from "./GridFeed";
-import { TAP_WINDOW_MS } from "./FeedCard/gestures";
+import { TAP_WINDOW_MS, __resetClickBudgetForTests } from "./FeedCard/gestures";
 import { makeIllust, makeFeedOf } from "../test-fixtures";
 import { getLikeState } from "../store";
 import { requestsTo, server } from "../test/msw/server";
@@ -11,6 +11,8 @@ import { requestsTo, server } from "../test/msw/server";
 // heart assertions are network-level now: the POST must reach
 // /api/illust/:id/like (the module-mock era asserted like(id); the wire
 // path carries the same id).
+
+beforeEach(() => __resetClickBudgetForTests());
 
 describe("GridFeed", () => {
   it("renders one cell per illust with square_medium through the proxy", () => {

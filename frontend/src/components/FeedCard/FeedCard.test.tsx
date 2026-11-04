@@ -1,9 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { http, HttpResponse } from "msw";
 import FeedCard from "./FeedCard";
-import { TAP_WINDOW_MS } from "./gestures";
+import { TAP_WINDOW_MS, __resetClickBudgetForTests } from "./gestures";
 import { makeIllust, makeMultiPageIllust } from "../../test-fixtures";
 import { requestCount, requestsTo, server } from "../../test/msw/server";
 
@@ -58,6 +58,8 @@ function pinch(el: Element, from: [number, number], to: [number, number]) {
 // Real api/illust + api/follow -> request() -> MSW. Heart clicks assert
 // the wire POSTs (/api/illust/:id/like|unlike) instead of a module mock;
 // FollowButton's getFollowed answers from the shared default handler.
+
+beforeEach(() => __resetClickBudgetForTests());
 
 describe("FeedCard", () => {
   it("renders title, artist, and stats", () => {

@@ -72,6 +72,32 @@ export const CLICK_SUPPRESS_MS = 600;
 export const CLICK_BUDGET_MS = 2000;
 export const PINCH_THRESHOLD_PX = 70;
 
+/**
+ * GLOBAL synthetic-click budget, shared by every tap tracker in the app.
+ * It must be global: WebKit resolves the synthetic click's TARGET when
+ * the click FIRES, not when the finger lands. The deferred single opens
+ * the stack, the related view renders OVER the feed, and the click then
+ * lands on the NEW card under the finger — a different tracker with a
+ * zero budget would open a second stack (or, if the click wins the race
+ * and lands on the original card, push the same work → "already open").
+ * One budget for the whole page: any handled touchend banks one unit,
+ * any card's absorbClick consumes it.
+ */
+let clickBudget = 0;
+let clickBudgetExpiresAt = 0;
+
+/**
+ * TEST-ONLY: clears the global budget between test cases. The budget is
+ * module state shared by every tracker, so a test that banks a tap
+ * without consuming the click would leak units into the next test
+ * (vitest fake timers keep the clock static between cases). Production
+ * code never calls this — real time expires stale units.
+ */
+export function __resetClickBudgetForTests() {
+  clickBudget = 0;
+  clickBudgetExpiresAt = 0;
+}
+
 function distance(a: TouchPointLike, b: TouchPointLike): number {
   return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 }
@@ -105,13 +131,11 @@ export function createTapTracker(opts: TapTrackerOptions) {
   let moved = false;
   let ignored = false;
   // Timestamp window, not a boolean: a double-tap produces TWO synthetic
-  // clicks and a boolean flag would only eat the first one. The BUDGET
-  // is the primary mechanism (time windows fail on iOS — the deferred
-  // single opens the stack, the render delays the synthetic click past
-  // the window, and the click re-opens the same work).
+  // clicks and a boolean flag would only eat the first one. The GLOBAL
+  // BUDGET is the primary mechanism (time windows fail on iOS — the
+  // deferred single opens the stack, the render delays the synthetic
+  // click past the window, and the click can land on a different card).
   let suppressUntil = 0;
-  let clickBudget = 0;
-  let clickBudgetExpiresAt = 0;
 
   function clearTimer() {
     if (timer !== undefined) {
@@ -183,8 +207,12 @@ export function createTapTracker(opts: TapTrackerOptions) {
     // Any handled touch tap gets a synthetic click after touchend — eat
     // everything in this window (double-tap fires two of them).
     suppressUntil = Date.now() + CLICK_SUPPRESS_MS;
-    // One budget unit per tap; consumed one per absorbed click. A
+    // One GLOBAL budget unit per tap; consumed one per absorbed click,
+    // from whichever card's handler the click happens to land on. A
     // double-tap's two touchends bank two units for its two clicks.
+    // Expired leftovers (a tap whose click never fired) are dropped —
+    // stale units would otherwise eat future real clicks.
+    if (Date.now() > clickBudgetExpiresAt) clickBudget = 0;
     clickBudget++;
     clickBudgetExpiresAt = Date.now() + CLICK_BUDGET_MS;
     const now = Date.now();
@@ -233,10 +261,14 @@ export function createTapTracker(opts: TapTrackerOptions) {
   function absorbClick(e?: { pointerType?: string }): boolean {
     const pointerType = e?.pointerType;
     if (pointerType && pointerType !== "touch") return true;
+    // Global budget first: the synthetic click may land on a DIFFERENT
+    // card than the one that handled the touch (the stack-open render
+    // swaps the DOM under the tap point before the click fires).
     if (clickBudget > 0 && Date.now() <= clickBudgetExpiresAt) {
       clickBudget--;
       return false;
     }
+    if (clickBudget > 0) clickBudget = 0; // expired — drop the leftovers
     return Date.now() > suppressUntil;
   }
 

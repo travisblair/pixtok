@@ -5,6 +5,7 @@ import {
   TAP_WINDOW_MS,
   CLICK_SUPPRESS_MS,
   PINCH_THRESHOLD_PX,
+  __resetClickBudgetForTests,
 } from "./gestures";
 
 interface P {
@@ -32,6 +33,7 @@ function at(x: number, y = 0): P {
 
 describe("createTapTracker", () => {
   beforeEach(() => vi.useFakeTimers());
+  beforeEach(() => __resetClickBudgetForTests());
   afterEach(() => vi.useRealTimers());
 
   function makeTracker(overrides: Partial<Parameters<typeof createTapTracker>[0]> = {}) {
@@ -103,6 +105,23 @@ describe("createTapTracker", () => {
     expect(tracker.absorbClick({})).toBe(false); // absorbed, not handled
     // Budget exhausted — a further bare click is real.
     expect(tracker.absorbClick({})).toBe(true);
+  });
+
+  it("absorbs the synthetic click even when it lands on a DIFFERENT card's tracker (WebKit target-swap race)", () => {
+    // WebKit resolves the click's target when it FIRES, not when the
+    // finger lands: the deferred single opens the stack, the related view
+    // renders over the feed, and the click lands on the NEW card under
+    // the finger. Tracker A handled the tap — tracker B must still absorb
+    // the click (a per-card budget would handle it → second stack opens).
+    const a = makeTracker();
+    const b = makeTracker();
+    a.tracker.onTouchStart(gesture([at(100, 100)]));
+    a.tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(TAP_WINDOW_MS + 150); // single fired, stack rendered
+    expect(a.onSingleTap).toHaveBeenCalledTimes(1);
+    expect(b.tracker.absorbClick({})).toBe(false);
+    expect(b.onSingleTap).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(TAP_WINDOW_MS * 3);
   });
 
   it("a double-tap banks two budget units and absorbs exactly its two clicks", () => {

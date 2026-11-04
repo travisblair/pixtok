@@ -191,4 +191,29 @@ test.describe("Double-tap to like", () => {
     await expect(page.locator(".toast")).toHaveCount(0);
     expect(mocks.relatedCalls).toHaveLength(1); // still just the one stack
   });
+
+  test("a synthetic click landing on the NEW card after the stack renders is absorbed (global budget)", async ({ page }) => {
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    await tap(page, ".feed-card .card-image", 1);
+    await expect(page.locator(".related-view")).toBeVisible({ timeout: 8000 });
+    expect(mocks.relatedCalls).toHaveLength(1);
+
+    // WebKit fires the synthetic click AFTER the related view renders
+    // over the feed: the click now lands on a card INSIDE the related
+    // view — a different work, a different tracker. The global budget
+    // must absorb it; a per-card budget would open a second stack.
+    await page.waitForTimeout(700);
+    await page.evaluate(() => {
+      const card = document.querySelector(".related-view .feed-card .card-image");
+      if (!card) throw new Error("no related-view card");
+      card.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(400);
+
+    await expect(page.locator(".toast")).toHaveCount(0);
+    expect(mocks.relatedCalls).toHaveLength(1); // no second stack opened
+  });
 });
