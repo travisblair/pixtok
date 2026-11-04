@@ -216,4 +216,35 @@ test.describe("Double-tap to like", () => {
     await expect(page.locator(".toast")).toHaveCount(0);
     expect(mocks.relatedCalls).toHaveLength(1); // no second stack opened
   });
+
+  test("a mouse-typed synthetic click (WebKit 26 labels it pointerType mouse) is absorbed", async ({ page }) => {
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    await tap(page, ".feed-card .card-image", 1);
+    await expect(page.locator(".related-view")).toBeVisible({ timeout: 8000 });
+    expect(mocks.relatedCalls).toHaveLength(1);
+
+    // The phone/simulator bug: the click WebKit synthesizes after the
+    // touchend carries pointerType "mouse". The old order treated it as
+    // a real desktop click — the click pushed the stack and the
+    // deferred single pushed the same work again ("already open").
+    await page.waitForTimeout(700);
+    await page.evaluate(() => {
+      const card = document.querySelector(".related-view .feed-card .card-image");
+      if (!card) throw new Error("no related-view card");
+      card.dispatchEvent(
+        new PointerEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          pointerType: "mouse",
+        })
+      );
+    });
+    await page.waitForTimeout(400);
+
+    await expect(page.locator(".toast")).toHaveCount(0);
+    expect(mocks.relatedCalls).toHaveLength(1); // no second stack opened
+  });
 });

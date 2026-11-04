@@ -133,8 +133,13 @@ export function useLayers(opts: {
   // Push a related view for the tapped image. Refuses to re-open a work
   // that's already somewhere in the stack (endless self-drilling).
   function pushRelated(illust: PixivIllust) {
-    if (closingDepth() !== null) return; // mid pop-animation — ignore taps
+    logEvent("gesture", "push", { id: illust.id, depth: stack().length });
+    if (closingDepth() !== null) {
+      logEvent("gesture", "pushrefused", { id: illust.id, reason: "closing" });
+      return; // mid pop-animation — ignore taps
+    }
     if (stack().some((a) => a.illust.id === illust.id)) {
+      logEvent("gesture", "pushrefused", { id: illust.id, reason: "dup" });
       showToast("This work is already open — tap Back to return to it", false);
       return;
     }
@@ -143,6 +148,7 @@ export function useLayers(opts: {
     // may land after the first layer opens.
     const limit = maxStackDepth();
     if (stack().length >= limit) {
+      logEvent("gesture", "pushrefused", { id: illust.id, reason: "limit" });
       showToast(`Max stack depth reached (${limit}) — go back to open more`, false);
       return;
     }

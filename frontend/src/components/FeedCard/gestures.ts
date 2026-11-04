@@ -107,6 +107,10 @@ export interface TapTrackerOptions {
   onDoubleTap: (x: number, y: number) => void;
   /** True when the touch started on an interactive child — never a tap. */
   isIgnored?: (target: EventTarget | null) => boolean;
+  /** TEMPORARY diagnostic hook (tap-warning saga): fires at every
+   *  decision point with a short event name so the caller can breadcrumb
+   *  the tracker's decisions to the journal. No-op when omitted. */
+  onTrace?: (ev: string, data?: Record<string, unknown>) => void;
   windowMs?: number;
   /** Max finger movement WITHIN one tap (moved → not a tap). */
   slopPx?: number;
@@ -160,6 +164,7 @@ export function createTapTracker(opts: TapTrackerOptions) {
     pending = false;
     clearTimer();
     lastTapAt = 0;
+    opts.onTrace?.("deliver-pending");
     opts.onSingleTap();
   }
 
@@ -194,6 +199,7 @@ export function createTapTracker(opts: TapTrackerOptions) {
       // a fast swipe can never open a stack when the finger lifts.
       moved = true;
       cancelPending();
+      opts.onTrace?.("cancel-moved");
     }
   }
 
@@ -221,7 +227,10 @@ export function createTapTracker(opts: TapTrackerOptions) {
       now - lastTapAt <= windowMs &&
       Math.hypot(x - lastX, y - lastY) <= doubleTapSlop
     ) {
+      // Capture BEFORE cancelPending() zeroes lastTapAt.
+      const betweenMs = now - lastTapAt;
       cancelPending();
+      opts.onTrace?.("double", { betweenMs });
       opts.onDoubleTap(x, y);
       return;
     }
@@ -234,10 +243,12 @@ export function createTapTracker(opts: TapTrackerOptions) {
     lastY = y;
     // Defer the single tap: the second tap must be able to cancel it.
     pending = true;
+    opts.onTrace?.("defer-single");
     timer = setTimeout(() => {
       timer = undefined;
       pending = false;
       lastTapAt = 0;
+      opts.onTrace?.("single-fire");
       opts.onSingleTap();
     }, windowMs);
   }
@@ -251,25 +262,37 @@ export function createTapTracker(opts: TapTrackerOptions) {
    * true → handle this click normally (desktop MouseEvent); false → it is
    * the synthetic click after a touch tap/double-tap we already handled.
    *
-   * Real mouse/pen clicks bypass everything: a pinch (which arms
-   * suppression) must not swallow the user's next genuine click. A touch
-   * click (WebKit: no pointerType) is absorbed from the BUDGET first —
-   * WebKit's click can land well after any fixed window once the
-   * deferred single's stack-open render delays the main thread. The
-   * time window remains only as a fallback (pinch suppression).
+   * The GLOBAL BUDGET is checked FIRST, before the pointerType shortcut:
+   * WebKit 26 (iOS + simulator) tags the click it synthesizes after a
+   * touchend with pointerType "mouse" — the old order let it through as a
+   * real desktop click, so the click pushed the stack and the deferred
+   * single pushed it again ("already open"), and a double-tap's two
+   * clicks both opened stacks over the like. A real mouse/pen click has
+   * no banked touch unit behind it (desktop pages never see touchend),
+   * so checking the budget first cannot swallow genuine desktop clicks;
+   * the shortcut remains as a second line for touch-capable laptops
+   * whose synthetic click never fired (stale budget unit).
    */
   function absorbClick(e?: { pointerType?: string }): boolean {
     const pointerType = e?.pointerType;
-    if (pointerType && pointerType !== "touch") return true;
-    // Global budget first: the synthetic click may land on a DIFFERENT
-    // card than the one that handled the touch (the stack-open render
-    // swaps the DOM under the tap point before the click fires).
+    // Budget first: any click hot on the heels of a handled touch tap is
+    // the synthetic one, however WebKit labels its pointerType.
     if (clickBudget > 0 && Date.now() <= clickBudgetExpiresAt) {
       clickBudget--;
+      opts.onTrace?.("absorb", { consumed: true, budget: clickBudget, ptr: pointerType ?? null });
       return false;
     }
     if (clickBudget > 0) clickBudget = 0; // expired — drop the leftovers
-    return Date.now() > suppressUntil;
+    if (pointerType && pointerType !== "touch") return true;
+    const viaWindow = Date.now() > suppressUntil;
+    opts.onTrace?.("absorb", {
+      consumed: false,
+      budget: 0,
+      ptr: pointerType ?? null,
+      viaWindow,
+      suppressUntilAgeMs: suppressUntil === 0 ? null : Date.now() - suppressUntil,
+    });
+    return viaWindow;
   }
 
   /** Swallow clicks after a gesture that isn't a tap (pinch). */

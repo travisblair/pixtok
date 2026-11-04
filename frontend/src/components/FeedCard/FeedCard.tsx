@@ -9,7 +9,7 @@ import {
 } from "solid-js";
 import type { PixivIllust } from "../../types";
 import { like as likeWork, unlike as unlikeWork } from "../../api/illust";
-import { reportApiError } from "../../api/client";
+import { logEvent, reportApiError } from "../../api/client";
 import {
   sliderWindowBounds,
   computeLoadDelay,
@@ -131,6 +131,9 @@ export default function FeedCard(props: {
     isIgnored: isInteractiveTarget,
     onSingleTap: () => handleSingleTap(),
     onDoubleTap: () => handleDoubleTap(),
+    // TEMPORARY (tap-warning saga): journal the tracker's decisions.
+    onTrace: (ev, data) =>
+      logEvent("gesture", "tracker", { id: props.illust.id, ev, ...data }),
   });
 
   const pinch = createPinchDetector({
@@ -539,6 +542,11 @@ export default function FeedCard(props: {
   // (already handled by the deferred tap tracker) is swallowed.
   function handleClick(e: MouseEvent) {
     if (!tap.absorbClick(e as MouseEvent & { pointerType?: string })) return;
+    logEvent("gesture", "cardclick", {
+      id: props.illust.id,
+      ptr: (e as PointerEvent).pointerType ?? null,
+      t: Math.round(performance.now()),
+    });
     handleTap(e);
   }
 

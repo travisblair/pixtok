@@ -146,12 +146,36 @@ describe("createTapTracker", () => {
     expect(tracker.absorbClick({})).toBe(true);
   });
 
-  it("a desktop mouse click bypasses the budget", () => {
+  it("a mouse-typed click inside the budget window after a touch tap is absorbed (WebKit 26 synthetic click)", () => {
     const { tracker } = makeTracker();
     tracker.onTouchStart(gesture([at(100, 100)]));
     tracker.onTouchEnd(gesture([], [at(100, 100)]));
-    vi.advanceTimersByTime(TAP_WINDOW_MS);
+    // WebKit 26 tags its touch-synthesized click with pointerType
+    // "mouse". The budget must swallow it — the old pointerType-first
+    // order let it through, the click pushed the stack, and the
+    // deferred single pushed it again ("already open").
+    vi.advanceTimersByTime(TAP_WINDOW_MS); // budget still live (2s)
+    expect(tracker.absorbClick({ pointerType: "mouse" })).toBe(false);
+  });
+
+  it("a mouse-typed click after the budget expires passes (a stale unit never eats a real click)", () => {
+    const { tracker } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(2000 + 1); // CLICK_BUDGET_MS
     expect(tracker.absorbClick({ pointerType: "mouse" })).toBe(true);
+  });
+
+  it("a double-tap's two mouse-typed synthetic clicks are both absorbed", () => {
+    const { tracker, onDoubleTap } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    expect(onDoubleTap).toHaveBeenCalledTimes(1);
+    // WebKit synthesizes one click per tap, both labeled "mouse".
+    expect(tracker.absorbClick({ pointerType: "mouse" })).toBe(false);
+    expect(tracker.absorbClick({ pointerType: "mouse" })).toBe(false);
   });
 
   it("a second tap outside the slop is two singles, not a double", () => {
@@ -208,13 +232,18 @@ describe("createTapTracker", () => {
     expect(tracker.absorbClick()).toBe(true);
   });
 
-  it("a real mouse click bypasses the touch suppression window", () => {
+  it("a mouse-typed click right after a touch tap is absorbed, the next one passes", () => {
     const { tracker } = makeTracker();
     tracker.onTouchStart(gesture([at(100, 100)]));
     tracker.onTouchEnd(gesture([], [at(100, 100)]));
-    // Right after a pinch/tap: mouse input must still work immediately.
+    // The banked budget unit is the synthetic click's — WebKit 26
+    // labels it "mouse". It gets eaten even though the pointerType
+    // says mouse; the unit is gone, so a genuinely subsequent click
+    // passes immediately.
+    expect(tracker.absorbClick({ pointerType: "mouse" })).toBe(false);
     expect(tracker.absorbClick({ pointerType: "mouse" })).toBe(true);
-    // The touch-synthesized click is the one we eat.
+    // The touch-synthesized click with no unit left falls to the
+    // suppression window.
     expect(tracker.absorbClick({ pointerType: "touch" })).toBe(false);
   });
 
@@ -328,5 +357,90 @@ describe("createPinchDetector", () => {
   it("exports a sensible default threshold band (60–80px)", () => {
     expect(PINCH_THRESHOLD_PX).toBeGreaterThanOrEqual(60);
     expect(PINCH_THRESHOLD_PX).toBeLessThanOrEqual(80);
+  });
+});
+
+describe("createTapTracker onTrace diagnostics", () => {
+  beforeEach(() => vi.useFakeTimers());
+  beforeEach(() => __resetClickBudgetForTests());
+  afterEach(() => vi.useRealTimers());
+
+  function makeTraced() {
+    const onSingleTap = vi.fn();
+    const onDoubleTap = vi.fn();
+    const onTrace = vi.fn();
+    const tracker = createTapTracker({ onSingleTap, onDoubleTap, onTrace });
+    return { tracker, onSingleTap, onDoubleTap, onTrace };
+  }
+
+  it("reports defer-single then single-fire for one tap", () => {
+    const { tracker, onSingleTap, onTrace } = makeTraced();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    expect(onTrace).toHaveBeenCalledWith("defer-single");
+    vi.advanceTimersByTime(TAP_WINDOW_MS);
+    expect(onTrace).toHaveBeenLastCalledWith("single-fire");
+    expect(onSingleTap).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports double when the second tap lands inside the window", () => {
+    const { tracker, onDoubleTap, onTrace } = makeTraced();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(200);
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    expect(onTrace).toHaveBeenLastCalledWith(
+      "double",
+      expect.objectContaining({ betweenMs: expect.any(Number) })
+    );
+    expect(onDoubleTap).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports deliver-pending when a far second tap releases the deferred single", () => {
+    const { tracker, onSingleTap, onTrace } = makeTraced();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(100);
+    // Second tap far outside the between-taps slop: its own tap, but it
+    // must first deliver the deferred single.
+    tracker.onTouchStart(gesture([at(400, 400)]));
+    tracker.onTouchEnd(gesture([], [at(400, 400)]));
+    const calls = onTrace.mock.calls.map((c) => c[0]);
+    expect(calls).toEqual(["defer-single", "deliver-pending", "defer-single"]);
+    expect(onSingleTap).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports absorb consumed=true from the global budget, then false without one", () => {
+    const { tracker, onTrace } = makeTraced();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    expect(tracker.absorbClick({ pointerType: "touch" })).toBe(false);
+    expect(onTrace).toHaveBeenLastCalledWith("absorb", {
+      consumed: true,
+      budget: 0,
+      ptr: "touch",
+    });
+    // No budget left: falls through to the suppression-window fallback
+    // once the suppression window itself has elapsed.
+    vi.advanceTimersByTime(CLICK_SUPPRESS_MS + 1);
+    expect(tracker.absorbClick({ pointerType: "touch" })).toBe(true);
+    expect(onTrace).toHaveBeenLastCalledWith("absorb", {
+      consumed: false,
+      budget: 0,
+      ptr: "touch",
+      viaWindow: true,
+      suppressUntilAgeMs: 1,
+    });
+  });
+
+  it("reports cancel-moved when a touch travels past the slop", () => {
+    const { tracker, onTrace } = makeTraced();
+    tracker.onTouchStart(gesture([at(0, 0)]));
+    tracker.onTouchMove(gesture([at(40, 0)]));
+    expect(onTrace).toHaveBeenLastCalledWith("cancel-moved");
+    tracker.onTouchEnd(gesture([], [at(40, 0)]));
+    // No defer-single: the swipe never armed one.
+    expect(onTrace.mock.calls.map((c) => c[0])).toEqual(["cancel-moved"]);
   });
 });

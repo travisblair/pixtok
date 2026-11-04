@@ -9,7 +9,7 @@ import {
 import type { PixivIllust } from "../types";
 import { getLikeState } from "../store";
 import { like as likeWork, unlike as unlikeWork } from "../api/illust";
-import { reportApiError } from "../api/client";
+import { logEvent, reportApiError } from "../api/client";
 import { createTapTracker } from "./FeedCard/gestures";
 import UgoiraPlayer from "./UgoiraPlayer";
 
@@ -127,6 +127,9 @@ function GridCell(props: {
       if (props.selectable) return;
       handleDoubleTap();
     },
+    // TEMPORARY (tap-warning saga): journal the tracker's decisions.
+    onTrace: (ev, data) =>
+      logEvent("gesture", "tracker", { id: props.illust.id, ev, ...data }),
   });
 
   function flashHeart() {
@@ -266,6 +269,11 @@ function GridCell(props: {
   // (already handled) are swallowed so nothing double-fires.
   function handleClick(e: MouseEvent) {
     if (!tap.absorbClick(e as MouseEvent & { pointerType?: string })) return;
+    logEvent("gesture", "cardclick", {
+      id: props.illust.id,
+      ptr: (e as PointerEvent).pointerType ?? null,
+      t: Math.round(performance.now()),
+    });
     handleTap(e);
   }
 
