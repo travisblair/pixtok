@@ -120,7 +120,7 @@ test.describe("Double-tap to like", () => {
     await expectMainFeedCount(page, 30);
 
     await tap(page, ".feed-card .card-image", 1);
-    // Still inside the ~300ms double-tap window: nothing opened yet.
+    // Still inside the ~500ms double-tap window: nothing opened yet.
     await page.waitForTimeout(100);
     await expect(page.locator(".related-view")).toHaveCount(0);
     expect(mocks.likeCalls).toHaveLength(0);
@@ -159,5 +159,36 @@ test.describe("Double-tap to like", () => {
     await tap(page, ".feed-container .grid-cell", 2);
     await expect(heart).toHaveText("🤍");
     expect(mocks.unlikeCalls).toHaveLength(1);
+  });
+
+  test("a late WebKit-style synthetic click after a single tap doesn't re-open the stack", async ({
+    page,
+  }) => {
+    const mocks = await setupApiMocks(page);
+    await gotoApp(page);
+    await expectMainFeedCount(page, 30);
+
+    await tap(page, ".feed-card .card-image", 1);
+    await expect(page.locator(".related-view")).toBeVisible({ timeout: 8000 });
+    expect(mocks.relatedCalls).toHaveLength(1);
+
+    // WebKit fires its synthetic click AFTER the deferred single's
+    // stack-open render — past any fixed suppression window. The old
+    // time-window code handled it and re-opened the same work ("already
+    // open" toast). The click budget must absorb it whenever it lands.
+    await page.waitForTimeout(700); // past CLICK_SUPPRESS_MS (600)
+    await page.evaluate(() => {
+      const el = document.querySelector(".feed-card .card-image");
+      if (!el) throw new Error("no card image");
+      el.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+    });
+    await page.waitForTimeout(400);
+
+    // The bug produced an "already open" toast from the double-open;
+    // the absorbed click must produce NO toast at all.
+    await expect(page.locator(".toast")).toHaveCount(0);
+    expect(mocks.relatedCalls).toHaveLength(1); // still just the one stack
   });
 });

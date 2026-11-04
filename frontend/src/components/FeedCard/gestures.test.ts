@@ -76,6 +76,53 @@ describe("createTapTracker", () => {
     expect(onSingleTap).not.toHaveBeenCalled();
   });
 
+  it("absorbs a delayed WebKit synthetic click (no pointerType) after the single fires", () => {
+    // THE iOS race: the deferred single opens the stack at 500ms, the
+    // render delays WebKit's synthetic click past any fixed window, and
+    // the click then re-opens the same work ("already open"). The click
+    // BUDGET absorbs it however late it arrives.
+    const { tracker, onSingleTap } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(TAP_WINDOW_MS); // single delivered
+    expect(onSingleTap).toHaveBeenCalledTimes(1);
+    // Well past CLICK_SUPPRESS_MS (600) but inside the budget:
+    vi.advanceTimersByTime(400); // total 900ms since touchend
+    expect(tracker.absorbClick({})).toBe(false); // absorbed, not handled
+    // Budget exhausted — a further bare click is real.
+    expect(tracker.absorbClick({})).toBe(true);
+  });
+
+  it("a double-tap banks two budget units and absorbs exactly its two clicks", () => {
+    const { tracker, onDoubleTap } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(150);
+    tracker.onTouchStart(gesture([at(103, 104)]));
+    tracker.onTouchEnd(gesture([], [at(103, 104)]));
+    expect(onDoubleTap).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(700); // past any time window
+    expect(tracker.absorbClick({})).toBe(false);
+    expect(tracker.absorbClick({})).toBe(false);
+    expect(tracker.absorbClick({})).toBe(true);
+  });
+
+  it("the budget expires so a never-fired click can't eat a later real one", () => {
+    const { tracker } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(2000 + 1); // CLICK_BUDGET_MS
+    expect(tracker.absorbClick({})).toBe(true);
+  });
+
+  it("a desktop mouse click bypasses the budget", () => {
+    const { tracker } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(TAP_WINDOW_MS);
+    expect(tracker.absorbClick({ pointerType: "mouse" })).toBe(true);
+  });
+
   it("a second tap outside the slop is two singles, not a double", () => {
     const { tracker, onSingleTap, onDoubleTap } = makeTracker();
     tracker.onTouchStart(gesture([at(100, 100)]));

@@ -57,8 +57,17 @@ export const TAP_SLOP_PX = 10;
  * arms its own single (same work pushed again → "already open" refusal).
  */
 export const DOUBLE_TAP_SLOP_PX = 30;
-/** How long after a touch tap synthetic clicks are swallowed. */
+/** How long after a touch tap synthetic clicks are swallowed (pinch path
+ *  and as the last-resort fallback). */
 export const CLICK_SUPPRESS_MS = 600;
+/**
+ * How long a tap's synthetic-click budget stays valid. WebKit fires the
+ * synthetic click AFTER the deferred single opens the stack — the render
+ * delays it past any time window, so the click re-opens the same work
+ * ("already open"). The budget absorbs it however late it arrives; the
+ * expiry only stops a NEVER-fired click from eating a later real one.
+ */
+export const CLICK_BUDGET_MS = 2000;
 export const PINCH_THRESHOLD_PX = 70;
 
 function distance(a: TouchPointLike, b: TouchPointLike): number {
@@ -94,8 +103,13 @@ export function createTapTracker(opts: TapTrackerOptions) {
   let moved = false;
   let ignored = false;
   // Timestamp window, not a boolean: a double-tap produces TWO synthetic
-  // clicks and a boolean flag would only eat the first one.
+  // clicks and a boolean flag would only eat the first one. The BUDGET
+  // is the primary mechanism (time windows fail on iOS — the deferred
+  // single opens the stack, the render delays the synthetic click past
+  // the window, and the click re-opens the same work).
   let suppressUntil = 0;
+  let clickBudget = 0;
+  let clickBudgetExpiresAt = 0;
 
   function clearTimer() {
     if (timer !== undefined) {
@@ -167,6 +181,10 @@ export function createTapTracker(opts: TapTrackerOptions) {
     // Any handled touch tap gets a synthetic click after touchend — eat
     // everything in this window (double-tap fires two of them).
     suppressUntil = Date.now() + CLICK_SUPPRESS_MS;
+    // One budget unit per tap; consumed one per absorbed click. A
+    // double-tap's two touchends bank two units for its two clicks.
+    clickBudget++;
+    clickBudgetExpiresAt = Date.now() + CLICK_BUDGET_MS;
     const now = Date.now();
     if (
       lastTapAt !== 0 &&
@@ -203,15 +221,20 @@ export function createTapTracker(opts: TapTrackerOptions) {
    * true → handle this click normally (desktop MouseEvent); false → it is
    * the synthetic click after a touch tap/double-tap we already handled.
    *
-   * Real mouse/pen clicks bypass the time window: a pinch (which arms
-   * suppression) must not swallow the user's next genuine click. The
-   * synthetic click a touch produces carries pointerType "touch" in
-   * Chromium; WebKit's bare MouseEvent has no pointerType and falls back
-   * to the window.
+   * Real mouse/pen clicks bypass everything: a pinch (which arms
+   * suppression) must not swallow the user's next genuine click. A touch
+   * click (WebKit: no pointerType) is absorbed from the BUDGET first —
+   * WebKit's click can land well after any fixed window once the
+   * deferred single's stack-open render delays the main thread. The
+   * time window remains only as a fallback (pinch suppression).
    */
   function absorbClick(e?: { pointerType?: string }): boolean {
     const pointerType = e?.pointerType;
     if (pointerType && pointerType !== "touch") return true;
+    if (clickBudget > 0 && Date.now() <= clickBudgetExpiresAt) {
+      clickBudget--;
+      return false;
+    }
     return Date.now() > suppressUntil;
   }
 
