@@ -76,8 +76,20 @@ describe("createTapTracker", () => {
     expect(onSingleTap).not.toHaveBeenCalled();
   });
 
+  it("two taps ~45px apart (fast thumb drift) still fire onDoubleTap", () => {
+    const { tracker, onSingleTap, onDoubleTap } = makeTracker();
+    tracker.onTouchStart(gesture([at(100, 100)]));
+    tracker.onTouchEnd(gesture([], [at(100, 100)]));
+    vi.advanceTimersByTime(200);
+    tracker.onTouchStart(gesture([at(145, 110)]));
+    tracker.onTouchEnd(gesture([], [at(145, 110)]));
+    expect(onDoubleTap).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(TAP_WINDOW_MS * 3);
+    expect(onSingleTap).not.toHaveBeenCalled();
+  });
+
   it("absorbs a delayed WebKit synthetic click (no pointerType) after the single fires", () => {
-    // THE iOS race: the deferred single opens the stack at 500ms, the
+    // THE iOS race: the deferred single opens the stack (700ms), the
     // render delays WebKit's synthetic click past any fixed window, and
     // the click then re-opens the same work ("already open"). The click
     // BUDGET absorbs it however late it arrives.

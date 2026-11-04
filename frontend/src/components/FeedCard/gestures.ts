@@ -39,24 +39,26 @@ export interface GestureEventLike {
 
 /**
  * How long a single tap is DEFERRED waiting for a possible second tap.
- * Must cover real-world double-tap intervals (iOS users commonly tap
- * 300-450ms apart): too short and the first tap's single fires before
- * the second tap lands — the stack opens mid-double-tap and the second
- * tap pushes the same work ("already open"). The cost is stack-open
- * latency on every single tap; 500ms matches the iOS system double-tap
- * timeout, so native-feeling users land inside it.
+ * Must cover real-world double-tap intervals: device testing showed
+ * deliberate double-taps landing 500-700ms apart (slower than the iOS
+ * system zoom cadence). Too short and the first tap's single fires
+ * before the second tap lands — the stack opens mid-double-tap and the
+ * second tap pushes the same work ("already open"). The cost is stack-
+ * open latency on every single tap; 700ms is the accepted tradeoff
+ * (Travis, Nov 3 device pass).
  */
-export const TAP_WINDOW_MS = 500;
+export const TAP_WINDOW_MS = 700;
 export const TAP_SLOP_PX = 10;
 /**
  * Distance between the TWO taps of a double-tap. Deliberately looser
  * than TAP_SLOP_PX: a finger never lands on the same pixel twice — real
- * double-taps land ~10-30px apart. If the between-taps check reuses the
- * 10px in-tap slop, most real double-taps are rejected, and the rejected
- * second tap first DELIVERS the deferred single (stack opens) and then
- * arms its own single (same work pushed again → "already open" refusal).
+ * double-taps land ~10-30px apart, fast thumb double-taps up to ~50px.
+ * If the between-taps check is too tight, the rejected second tap first
+ * DELIVERS the deferred single (stack opens) and then arms its own
+ * single (same work pushed again → "already open" refusal) — the exact
+ * failure mode the 50px bound prevents.
  */
-export const DOUBLE_TAP_SLOP_PX = 30;
+export const DOUBLE_TAP_SLOP_PX = 50;
 /** How long after a touch tap synthetic clicks are swallowed (pinch path
  *  and as the last-resort fallback). */
 export const CLICK_SUPPRESS_MS = 600;
