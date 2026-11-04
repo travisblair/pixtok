@@ -76,6 +76,44 @@ test.describe("Bookmarks move to private", () => {
     await expect(bar.getByRole("button", { name: "Select", exact: true })).toBeVisible();
   });
 
+  test("a deleted work (404 on re-add) is skipped and the queue keeps going", async ({
+    page,
+  }) => {
+    const mocks = await setupApiMocks(page, { likeGone: [9502] });
+    await openPublicBookmarks(page);
+
+    const bar = page.locator(".selection-bar");
+    await bar.getByRole("button", { name: "Select", exact: true }).click();
+    await page.locator(".feed-card").nth(0).click();
+    await page.locator(".feed-card").nth(1).click();
+    await page.locator(".feed-card").nth(2).click();
+    await expect(bar).toContainText("3 selected");
+
+    await bar.locator(".mode-pill", { hasText: "Move to private" }).click();
+
+    // The 404 does NOT stop the queue: 2 works move, 1 is reported
+    // skipped, and the completion toast is sticky.
+    await expect(page.locator(".toast")).toContainText(
+      "Moved 2 works to private — 1 deleted work skipped",
+      { timeout: 20000 }
+    );
+
+    // Wire order: 9502's unlike+like both ran, and the queue carried on
+    // to 9503 — proving a deleted work no longer bricks a batch.
+    expect(mocks.likeUnlikeEvents).toEqual([
+      "unlike:9501",
+      "like:9501",
+      "unlike:9502",
+      "like:9502",
+      "unlike:9503",
+      "like:9503",
+    ]);
+
+    // No failure modal — skips are not failures.
+    await expect(page.locator(".modal-dialog")).toHaveCount(0);
+    await expect(page.locator(".feed-card")).toHaveCount(6);
+  });
+
   test("a failed delete stops the queue and the modal reports failures + cancellations", async ({
     page,
   }) => {

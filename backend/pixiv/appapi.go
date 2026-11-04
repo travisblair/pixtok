@@ -143,6 +143,13 @@ func (c *Client) BookmarkAdd(illustID string, isPrivate bool) error {
 		return err
 	}
 	if resp.StatusCode != 200 {
+		if resp.StatusCode == 404 {
+			// A 404 on add means the WORK is gone upstream (deleted or
+			// removed) — not a rate limit. Callers branch on ErrNotFound
+			// to skip dead works instead of treating them as upstream
+			// failures (see the bookmark-move queue).
+			return fmt.Errorf("%w: bookmark add (API HTTP 404)", ErrNotFound)
+		}
 		return fmt.Errorf("bookmark add returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return nil
@@ -271,6 +278,10 @@ func (c *Client) BookmarkDelete(illustID string) error {
 		return err
 	}
 	if resp.StatusCode != 200 {
+		if resp.StatusCode == 404 {
+			// Same convention as BookmarkAdd: the work is gone upstream.
+			return fmt.Errorf("%w: bookmark delete (API HTTP 404)", ErrNotFound)
+		}
 		return fmt.Errorf("bookmark delete returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return nil

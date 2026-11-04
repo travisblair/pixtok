@@ -786,6 +786,12 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			}
 			if err := api.BookmarkAdd(id, true); err != nil {
 				log.Printf("ERROR like(%s): %v", id, err)
+				if errors.Is(err, pixiv.ErrNotFound) {
+					// Work deleted upstream — a 404, not an upstream
+					// failure. The move queue skips these and continues.
+					http.Error(w, "work not found", http.StatusNotFound)
+					return
+				}
 				http.Error(w, "upstream error", http.StatusBadGateway)
 				return
 			}
@@ -804,6 +810,12 @@ func buildRoutes(mux *http.ServeMux, api pixivAPI, cache *imageCache) {
 			}
 			if err := api.BookmarkDelete(id); err != nil {
 				log.Printf("ERROR unlike(%s): %v", id, err)
+				if errors.Is(err, pixiv.ErrNotFound) {
+					// Work deleted upstream — a 404, not an upstream
+					// failure. The move queue skips these and continues.
+					http.Error(w, "work not found", http.StatusNotFound)
+					return
+				}
 				http.Error(w, "upstream error", http.StatusBadGateway)
 				return
 			}

@@ -257,6 +257,29 @@ func TestLikeUnlikeInvalidID(t *testing.T) {
 	}
 }
 
+func TestLikeUnlikeDeletedWorkMapsTo404(t *testing.T) {
+	// Upstream 404 on like/unlike = the WORK is gone (deleted/removed).
+	// The handler must surface a distinct 404 (NOT a blanket 502) so the
+	// bookmark-move queue can skip dead works and continue — a 502 is
+	// indistinguishable from a rate limit, and skipping those would
+	// hammer pixiv mid-throttle.
+	f := &fakeAPI{
+		bookmarkAddFn: func(id string, private bool) error {
+			return fmt.Errorf("%w: bookmark add (API HTTP 404)", pixiv.ErrNotFound)
+		},
+		bookmarkDelFn: func(id string) error {
+			return fmt.Errorf("%w: bookmark delete (API HTTP 404)", pixiv.ErrNotFound)
+		},
+	}
+	h := newServer(f, newImageCache(time.Hour, 10, 512<<20), "secret")
+	if rr := doReq(t, h, http.MethodPost, "/api/illust/123/like", "secret"); rr.Code != http.StatusNotFound {
+		t.Errorf("like on a deleted work = %d, want 404 (distinct from 502)", rr.Code)
+	}
+	if rr := doReq(t, h, http.MethodPost, "/api/illust/123/unlike", "secret"); rr.Code != http.StatusNotFound {
+		t.Errorf("unlike on a deleted work = %d, want 404 (distinct from 502)", rr.Code)
+	}
+}
+
 func TestDoubleSlashPathCanonicalized(t *testing.T) {
 	// ServeMux canonicalizes // before our handler sees it — document the
 	// redirect so nobody "fixes" it into a broken expectation later.

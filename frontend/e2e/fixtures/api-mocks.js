@@ -107,6 +107,7 @@ export async function setupApiMocks(page, options = {}) {
     total: 2,
   };
   const likeFails = options.likeFails ?? false;
+  const likeGone = options.likeGone ?? [];
   const unlikeFails = options.unlikeFails ?? [];
   // Ids the viewer already follows — the followed route answers true only
   // for these, so a spec can distinguish artists A and B (the old
@@ -374,7 +375,11 @@ export async function setupApiMocks(page, options = {}) {
     const id = Number(route.request().url().match(/\/illust\/(\d+)\/like$/)[1]);
     mocks.likeCalls.push({ id });
     mocks.likeUnlikeEvents.push(`like:${id}`);
-    if (likeFails) {
+    if (likeGone.includes(id)) {
+      // The work is deleted upstream — the backend surfaces a distinct
+      // 404 (never a blanket 502) so the move queue can skip it.
+      route.fulfill(json({ error: "work not found" }, 404));
+    } else if (likeFails) {
       route.fulfill(json({ error: "internal server error" }, 500));
     } else {
       route.fulfill(json({ ok: true }));

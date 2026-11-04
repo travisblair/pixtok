@@ -9,6 +9,7 @@ vi.mock("../api/illust", () => ({
 }));
 
 import { like, unlike } from "../api/illust";
+import { ApiError } from "../api/client";
 import { useBookmarkMover, type MoveResult } from "./useBookmarkMover";
 
 const unlikeMock = vi.mocked(unlike);
@@ -79,6 +80,7 @@ describe("useBookmarkMover", () => {
     expect(maxInFlight).toBe(1); // never overlapping
     expect(done).toHaveBeenCalledWith({
       moved: 2,
+      skipped: 0,
       failures: [],
       cancelled: false,
     });
@@ -99,6 +101,7 @@ describe("useBookmarkMover", () => {
     expect(unlikeMock).toHaveBeenCalledTimes(1);
     expect(done).toHaveBeenCalledWith({
       moved: 0,
+      skipped: 0,
       failures: [
         { id: 1, kind: "delete" },
         { id: 2, kind: "cancelled" },
@@ -123,9 +126,87 @@ describe("useBookmarkMover", () => {
     expect(unlikeMock).toHaveBeenCalledTimes(1); // work 2 never started
     expect(done).toHaveBeenCalledWith({
       moved: 0,
+      skipped: 0,
       failures: [
         { id: 1, kind: "add" }, // delete succeeded → LOSS WINDOW
         { id: 2, kind: "cancelled" },
+      ],
+      cancelled: true,
+    });
+  });
+
+  it("skips a deleted work (unlike 404), keeps going, and reports it as skipped", async () => {
+    unlikeMock.mockImplementation(async (id: number) => {
+      if (id === 1) throw new ApiError("http", 404, "work not found");
+      return { ok: true };
+    });
+    const done = vi.fn();
+    const { api } = setup({ onDone: done });
+
+    const running = api.run([1, 2]);
+    await running;
+
+    // Work 1's like is never attempted (the work is dead); work 2 moves.
+    expect(likeMock.mock.calls.map((c) => c[0])).toEqual([2]);
+    expect(done).toHaveBeenCalledWith({
+      moved: 1,
+      skipped: 1,
+      failures: [],
+      cancelled: false,
+    });
+  });
+
+  it("skips a deleted work (like 404 after unlike 200), keeps going, no loss window", async () => {
+    likeMock.mockImplementation(async (id: number) => {
+      if (id === 1) throw new ApiError("http", 404, "work not found");
+      return { ok: true };
+    });
+    const done = vi.fn();
+    const { api } = setup({ onDone: done });
+
+    const running = api.run([1, 2, 3]);
+    await flush(); // unlike 1 resolves
+    await flush(); // like 1 404s → skip; unlike 2 fires
+    await flush(); // unlike 2 resolves; like 2 fires
+    await flush(); // like 2 resolves; between-works wait starts
+    await vi.advanceTimersByTimeAsync(PACE); // → work 3
+    await flush(); // unlike 3 resolves
+    await flush(); // like 3 resolves
+    await running;
+
+    // All three unlikes ran; only work 1's like 404'd. The queue did
+    // NOT stop — 2 and 3 completed.
+    expect(unlikeMock.mock.calls.map((c) => c[0])).toEqual([1, 2, 3]);
+    expect(likeMock.mock.calls.map((c) => c[0])).toEqual([1, 2, 3]);
+    expect(done).toHaveBeenCalledWith({
+      moved: 2,
+      skipped: 1,
+      failures: [],
+      cancelled: false,
+    });
+  });
+
+  it("a 404 skip does not mask a later REAL failure — the queue still stops", async () => {
+    unlikeMock.mockImplementation(async (id: number) => {
+      if (id === 1) throw new ApiError("http", 404, "work not found");
+      return { ok: true };
+    });
+    likeMock.mockImplementation(async (id: number) => {
+      if (id === 2) throw new Error("502");
+      return { ok: true };
+    });
+    const done = vi.fn();
+    const { api } = setup({ onDone: done });
+
+    const running = api.run([1, 2, 3]);
+    await running;
+
+    expect(done).toHaveBeenCalledWith({
+      moved: 0,
+      skipped: 1,
+      failures: [
+        { id: 2, kind: "add" }, // delete ok, add 502 → LOSS WINDOW
+        { id: 3, kind: "cancelled" },
       ],
       cancelled: true,
     });
@@ -148,6 +229,7 @@ describe("useBookmarkMover", () => {
     expect(likeMock.mock.calls.map((c) => c[0])).toEqual([1]);
     expect(done).toHaveBeenCalledWith({
       moved: 1,
+      skipped: 0,
       failures: [
         { id: 2, kind: "cancelled" },
         { id: 3, kind: "cancelled" },

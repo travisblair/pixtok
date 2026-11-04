@@ -1,6 +1,6 @@
 import { createSignal, onCleanup } from "solid-js";
 import { like as likeWork, unlike as unlikeWork } from "../api/illust";
-import { reportApiError } from "../api/client";
+import { ApiError, reportApiError } from "../api/client";
 
 /**
  * Move public bookmarks to the private pile.
@@ -15,9 +15,15 @@ import { reportApiError } from "../api/client";
  * The queue is strictly serial and paced: each work's two calls fire
  * back-to-back (unlike → like — a move is one logical operation, and a
  * pair of calls on the same work reads as a single move upstream), then
- * the throttle gap lands BETWEEN works (default 1600ms). Any non-200
- * stops the whole queue; no retries (house rule — retrying rate-limited
- * endpoints draws attention). A work whose delete succeeded but re-add
+ * the throttle gap lands BETWEEN works (default 1600ms). No retries
+ * (house rule — retrying rate-limited endpoints draws attention).
+ *
+ * Failure policy: an upstream 404 means the WORK ITSELF is gone
+ * (deleted/removed) — the bookmark died with it, so the work is SKIPPED
+ * and the queue continues (counted in `skipped`; there is nothing to
+ * restore or re-add). Every OTHER failure (429/5xx/network) stops the
+ * queue — plowing through a rate-limit window is exactly the attention
+ * this queue exists to avoid. A work whose delete succeeded but re-add
  * failed is the LOSS WINDOW: it is reported as kind "add" so the UI can
  * say "bookmark removed, re-add manually".
  */
@@ -33,6 +39,9 @@ export interface MoveFailure {
 
 export interface MoveResult {
   moved: number;
+  /** Works the queue skipped because they are GONE upstream (404 on
+   *  like/unlike) — nothing to restore, nothing to re-add. */
+  skipped: number;
   failures: MoveFailure[];
   /** True when the queue stopped early (cancel or failure) — the rest
    *  of the requested works are in `failures` as kind "cancelled". */
@@ -105,6 +114,12 @@ export function useBookmarkMover(options: BookmarkMoverOptions = {}) {
     return new Promise<void>((resolve) => setTimeout(resolve, ms));
   }
 
+  /** An upstream 404 on like/unlike = the work is GONE (deleted or
+   *  removed). Skip it and keep going — there is nothing to restore. */
+  function isGoneWork(err: unknown): boolean {
+    return err instanceof ApiError && err.kind === "http" && err.status === 404;
+  }
+
   async function run(ids: number[]) {
     if (running()) return;
     const targets = [...ids];
@@ -117,6 +132,7 @@ export function useBookmarkMover(options: BookmarkMoverOptions = {}) {
 
     const failures: MoveFailure[] = [];
     let moved = 0;
+    let skipped = 0;
     let stopped = false;
 
     // Record every not-attempted work after a stop/failure so the report
@@ -140,6 +156,14 @@ export function useBookmarkMover(options: BookmarkMoverOptions = {}) {
       try {
         await unlikeWork(id);
       } catch (err) {
+        if (isGoneWork(err)) {
+          // The work is gone upstream: nothing to delete, nothing to
+          // re-add. Skip it (no like attempt — the work is dead) and
+          // keep the queue moving.
+          skipped++;
+          setProgress({ done: moved + skipped, total: targets.length });
+          continue;
+        }
         reportApiError(err);
         failures.push({ id, kind: "delete" });
         stopped = true;
@@ -153,6 +177,14 @@ export function useBookmarkMover(options: BookmarkMoverOptions = {}) {
       try {
         await likeWork(id);
       } catch (err) {
+        if (isGoneWork(err)) {
+          // Delete succeeded but the work is gone upstream (404 on
+          // add): its bookmark died with the work. Skip and continue —
+          // this is NOT the loss window (nothing to restore).
+          skipped++;
+          setProgress({ done: moved + skipped, total: targets.length });
+          continue;
+        }
         reportApiError(err);
         // Delete succeeded, re-add failed: the LOSS WINDOW.
         failures.push({ id, kind: "add" });
@@ -162,7 +194,7 @@ export function useBookmarkMover(options: BookmarkMoverOptions = {}) {
       }
 
       moved++;
-      setProgress({ done: moved, total: targets.length });
+      setProgress({ done: moved + skipped, total: targets.length });
 
       // Pace before the next work's first upstream call.
       if (i < targets.length - 1) await wait(paceMs);
@@ -172,7 +204,7 @@ export function useBookmarkMover(options: BookmarkMoverOptions = {}) {
     abort = null;
     setSelectedIds(new Set<number>());
     setSelectionMode(false);
-    const result: MoveResult = { moved, failures, cancelled: stopped };
+    const result: MoveResult = { moved, skipped, failures, cancelled: stopped };
     if (stopped) options.onCancel?.(result);
     options.onDone?.(result);
   }

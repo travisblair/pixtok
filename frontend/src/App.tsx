@@ -270,11 +270,16 @@ export default function App() {
         // Sticky: the pile only updates on reload, so the confirmation
         // must not auto-dismiss before the user has seen it (and the
         // queue is slow enough that an 8s toast could vanish mid-scan).
-        showToast(
-          `Moved ${result.moved} ${result.moved === 1 ? "work" : "works"} to private`,
-          false,
-          true
-        );
+        const movedText = `Moved ${result.moved} ${
+          result.moved === 1 ? "work" : "works"
+        } to private`;
+        const skippedText =
+          result.skipped > 0
+            ? ` — ${result.skipped} deleted ${
+                result.skipped === 1 ? "work" : "works"
+              } skipped`
+            : "";
+        showToast(movedText + skippedText, false, true);
       } else {
         showToast(
           `Move stopped — ${result.failures.length} ${
